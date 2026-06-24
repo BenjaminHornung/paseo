@@ -19,6 +19,7 @@ import {
 import type {
   AgentSessionConfig,
   AgentStreamEvent,
+  AgentLaunchContext,
   ToolCallTimelineItem,
   AssistantMessageTimelineItem,
   AgentTimelineItem,
@@ -321,6 +322,100 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
     expect(runtime.acquisitions.every((acquisition) => acquisition.releaseCount === 1)).toBe(true);
     rmSync(cwd, { recursive: true, force: true });
   });
+
+  test("passes the agent cwd and id to the dedicated helper server acquisition", async () => {
+    const cwd = tmpCwd();
+    const runtime = new TestOpenCodeHarness();
+    runtime.enqueueClient(new TestOpenCodeClient());
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const launchContext: AgentLaunchContext = {
+      agentId: "agent-1",
+      env: { PASEO_AGENT_ID: "agent-1" },
+    };
+
+    const session = await client.createSession(buildConfig(cwd), launchContext);
+
+    expect(runtime.acquisitions).toEqual([
+      {
+        kind: "dedicated",
+        env: { PASEO_AGENT_ID: "agent-1" },
+        cwd,
+        agentId: "agent-1",
+        releaseCount: 0,
+      },
+    ]);
+
+    await session.close();
+    rmSync(cwd, { recursive: true, force: true });
+  }, 60_000);
+
+  test("does not attach agent attribution to shared helper server acquisitions", async () => {
+    const cwd = tmpCwd();
+    const runtime = new TestOpenCodeHarness();
+    runtime.enqueueClient(new TestOpenCodeClient());
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const launchContext: AgentLaunchContext = {
+      agentId: "agent-shared",
+    };
+
+    const session = await client.createSession(buildConfig(cwd), launchContext);
+
+    expect(runtime.acquisitions).toEqual([
+      {
+        kind: "current",
+        cwd,
+        releaseCount: 0,
+      },
+    ]);
+
+    await session.close();
+    rmSync(cwd, { recursive: true, force: true });
+  }, 60_000);
+
+  test("passes resumed session attribution to the dedicated helper server acquisition", async () => {
+    const cwd = tmpCwd();
+    const runtime = new TestOpenCodeHarness();
+    runtime.enqueueClient(new TestOpenCodeClient());
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const launchContext: AgentLaunchContext = {
+      agentId: "agent-2",
+      env: { PASEO_AGENT_ID: "agent-2" },
+    };
+
+    const session = await client.resumeSession(
+      {
+        provider: "opencode",
+        sessionId: "ses-resume",
+        nativeHandle: "ses-resume",
+        metadata: { provider: "opencode", cwd },
+      },
+      undefined,
+      launchContext,
+    );
+
+    expect(runtime.acquisitions).toEqual([
+      {
+        kind: "dedicated",
+        env: { PASEO_AGENT_ID: "agent-2" },
+        cwd,
+        agentId: "agent-2",
+        sessionId: "ses-resume",
+        releaseCount: 0,
+      },
+    ]);
+
+    await session.close();
+    rmSync(cwd, { recursive: true, force: true });
+  }, 60_000);
 
   test("single turn completes with streaming deltas", async () => {
     const cwd = tmpCwd();
@@ -3545,7 +3640,6 @@ describe("OpenCode persisted sessions", () => {
   test("importSession reads only the selected OpenCode session without listing", async () => {
     const runtime = new TestOpenCodeHarness();
     const metadataClient = new TestOpenCodeClient();
-    const resumedClient = new TestOpenCodeClient();
     const cwd = "/workspace/repo";
     const selectedSession = {
       id: "ses_selected",
@@ -3577,10 +3671,7 @@ describe("OpenCode persisted sessions", () => {
     ];
     metadataClient.sessionGetResponse = { data: selectedSession };
     metadataClient.sessionMessagesResponse = { data: messages };
-    resumedClient.sessionGetResponse = { data: selectedSession };
-    resumedClient.sessionMessagesResponse = { data: messages };
     runtime.enqueueClient(metadataClient);
-    runtime.enqueueClient(resumedClient);
 
     const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
       serverManager: runtime,
@@ -3591,14 +3682,20 @@ describe("OpenCode persisted sessions", () => {
       {
         config: { provider: "opencode", cwd },
         storedConfig: { provider: "opencode", cwd },
+        launchContext: {
+          agentId: "agent-import",
+          env: { PASEO_AGENT_ID: "agent-import" },
+        },
       },
     );
 
     expect(metadataClient.calls.experimentalSessionList).toEqual([]);
     expect(metadataClient.calls.sessionGet).toEqual([
       { sessionID: "ses_selected", directory: cwd },
+      { sessionID: "ses_selected", directory: cwd },
     ]);
     expect(metadataClient.calls.sessionMessages).toEqual([
+      { sessionID: "ses_selected", directory: cwd },
       { sessionID: "ses_selected", directory: cwd },
     ]);
     expect(imported.config).toMatchObject({
@@ -3616,9 +3713,17 @@ describe("OpenCode persisted sessions", () => {
     expect(imported.timeline.map((entry) => entry.item)).toEqual([
       { type: "user_message", text: "import only this session", messageId: "msg_user" },
     ]);
-    expect(resumedClient.calls.sessionMessages).toEqual([
-      { sessionID: "ses_selected", directory: cwd },
+    expect(runtime.acquisitions).toEqual([
+      {
+        kind: "dedicated",
+        env: { PASEO_AGENT_ID: "agent-import" },
+        cwd,
+        agentId: "agent-import",
+        sessionId: "ses_selected",
+        releaseCount: 0,
+      },
     ]);
+    await imported.session.close();
   });
 
   test("listImportableSessions matches Windows cwd paths with forward slashes", async () => {
