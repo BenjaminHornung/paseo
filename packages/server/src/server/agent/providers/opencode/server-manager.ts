@@ -85,6 +85,8 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   private readonly portAllocator: OpenCodePortAllocator;
   private readonly resolveCommandPrefix: OpenCodeCommandPrefixResolver;
   private readonly spawnServerProcess: OpenCodeServerProcessSpawner;
+  private shutdownPromise: Promise<void> | null = null;
+  private shutdownEpoch = 0;
 
   constructor(options: OpenCodeServerManagerOptions) {
     this.logger = options.logger;
@@ -147,12 +149,16 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   }
 
   async acquireCurrent(scope?: OpenCodeServerScope): Promise<OpenCodeServerAcquisition> {
+    const shutdownEpoch = this.beginAcquisition();
     const server = await this.getCurrentServer(scope);
+    this.assertAcquisitionStillCurrent(shutdownEpoch);
     return this.acquireServer(server);
   }
 
   async acquireNew(scope?: OpenCodeServerScope): Promise<OpenCodeServerAcquisition> {
+    const shutdownEpoch = this.beginAcquisition();
     const server = await this.getNewServer(scope);
+    this.assertAcquisitionStillCurrent(shutdownEpoch);
     return this.acquireServer(server);
   }
 
@@ -160,6 +166,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     env: Record<string, string>,
     scope?: OpenCodeServerScope,
   ): Promise<OpenCodeServerAcquisition> {
+    const shutdownEpoch = this.beginAcquisition();
     const startPromise = this.startServer(env, scope);
     this.dedicatedStartPromises.add(startPromise);
     let server: OpenCodeServerGeneration;
@@ -173,6 +180,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     const acquisition = this.acquireServer(server);
     try {
       await server.ready;
+      this.assertAcquisitionStillCurrent(shutdownEpoch);
       return acquisition;
     } catch (error) {
       acquisition.release();
@@ -215,6 +223,24 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
         this.cleanupRetiredServers();
       },
     };
+  }
+
+  private beginAcquisition(): number {
+    this.assertNotShuttingDown();
+    return this.shutdownEpoch;
+  }
+
+  private assertAcquisitionStillCurrent(shutdownEpoch: number): void {
+    if (this.shutdownEpoch !== shutdownEpoch) {
+      throw new Error("OpenCode server manager is shutting down");
+    }
+    this.assertNotShuttingDown();
+  }
+
+  private assertNotShuttingDown(): void {
+    if (this.shutdownPromise) {
+      throw new Error("OpenCode server manager is shutting down");
+    }
   }
 
   private async getNewServer(scope?: OpenCodeServerScope): Promise<OpenCodeServerGeneration> {
@@ -342,7 +368,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       command: launchPrefix.command,
       args: serverArgs,
       port,
-      ...(scope ? { cwd: serverCwd } : {}),
+      cwd: serverCwd,
       ...(scope?.agentId ? { agentId: scope.agentId } : {}),
       ...(scope?.sessionId ? { sessionId: scope.sessionId } : {}),
     });
@@ -459,11 +485,30 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   }
 
   async shutdown(): Promise<void> {
+    if (this.shutdownPromise) {
+      return this.shutdownPromise;
+    }
+    this.shutdownEpoch += 1;
+    const shutdownPromise = this.performShutdown();
+    this.shutdownPromise = shutdownPromise;
+    try {
+      await shutdownPromise;
+    } finally {
+      if (this.shutdownPromise === shutdownPromise) {
+        this.shutdownPromise = null;
+      }
+    }
+  }
+
+  private async performShutdown(): Promise<void> {
     const servers = new Set([
       ...this.currentServers.values(),
       ...Array.from(this.retiredServers),
       ...(await this.collectStartingServers()),
     ]);
+    for (const server of servers) {
+      server.retired = true;
+    }
     await Promise.all(Array.from(servers).map((server) => this.killServer(server)));
     this.currentServers.clear();
     this.retiredServers.clear();
@@ -533,7 +578,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     command: string;
     args: string[];
     port: number;
-    cwd?: string;
+    cwd: string;
     agentId?: string;
     sessionId?: string;
   }): Promise<{ id: string } | null> {
@@ -550,7 +595,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
         args: options.args,
         metadata: {
           port: options.port,
-          ...(options.cwd ? { cwd: options.cwd } : {}),
+          cwd: options.cwd,
           ...(options.agentId ? { agentId: options.agentId } : {}),
           ...(options.sessionId ? { sessionId: options.sessionId } : {}),
         },
