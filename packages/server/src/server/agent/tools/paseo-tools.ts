@@ -57,7 +57,12 @@ import {
   toScheduleSummary,
   waitForAgentWithTimeout,
 } from "../mcp-shared.js";
-import { sendPromptToAgent, setupFinishNotification } from "../agent-prompt.js";
+import {
+  ownBackgroundAgentRunStart,
+  sendPromptToAgent,
+  setupFinishNotification,
+  waitForAgentRunStartWithTimeout,
+} from "../agent-prompt.js";
 import { respondToAgentPermission } from "../permission-response.js";
 import {
   archiveAgentCommand,
@@ -1869,7 +1874,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     }) => {
       const shouldNotifyOnFinish = Boolean(callerAgentId && notifyOnFinish && background);
 
-      await sendPromptToAgent({
+      const dispatchResult = await sendPromptToAgent({
         agentManager,
         agentStorage,
         agentId,
@@ -1877,6 +1882,20 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         sessionMode,
         logger: childLogger,
       });
+      if (background) {
+        if (!dispatchResult.outOfBand && !dispatchResult.skippedReason) {
+          ownBackgroundAgentRunStart({
+            startAcknowledged: dispatchResult.startAcknowledged,
+            logger: childLogger,
+            context: { agentId, callerAgentId, tool: "send_agent_prompt" },
+            timeoutMessage:
+              "Background send_agent_prompt run did not acknowledge start before timeout",
+            failureMessage: "Background send_agent_prompt run failed before start acknowledgement",
+          });
+        }
+      } else if (!dispatchResult.outOfBand && !dispatchResult.skippedReason) {
+        await waitForAgentRunStartWithTimeout(dispatchResult.startAcknowledged);
+      }
 
       if (shouldNotifyOnFinish && callerAgentId) {
         setupFinishNotification({

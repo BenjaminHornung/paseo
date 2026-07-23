@@ -2053,6 +2053,9 @@ export class HostRuntimeStore {
     if (this.queuedAgentDrainInFlight.has(drainKey)) return;
     const store = useSessionStore.getState();
     const session = store.sessions[serverId];
+    if (session?.serverInfo?.features?.agentMessageQueue === true) {
+      return;
+    }
     const queue = session?.queuedMessages.get(agentId);
     const client = session?.client;
     if (!client || !queue?.length || session.initializingAgents.get(agentId) === true) {

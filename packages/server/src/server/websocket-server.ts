@@ -19,6 +19,7 @@ import type { DaemonConfigStore, MutableDaemonConfig } from "./daemon-config-sto
 import {
   type ServerInfoStatusPayload,
   type SessionOutboundMessage,
+  type QueuedAgentMessageQueuePayload,
   type WorkspaceSetupSnapshot,
   type WSHelloMessage,
   type WSInboundMessage,
@@ -28,6 +29,10 @@ import {
   type WSOutboundMessage,
   wrapSessionMessage,
 } from "./messages.js";
+import {
+  createAgentMessageQueueService,
+  type AgentMessageQueueService,
+} from "./agent-message-queue.js";
 import { asUint8Array, decodeBinaryFrame } from "@getpaseo/protocol/binary-frames/index";
 import type { TerminalActivity } from "@getpaseo/protocol/terminal-activity";
 import type { HostnamesConfig } from "./hostnames.js";
@@ -75,7 +80,7 @@ import {
   CLIENT_SHUTDOWN_RPC_REASON,
   normalizeClientRestartRpcReason,
 } from "./lifecycle-reasons.js";
-import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
+import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-capabilities";
 import type { BrowserAutomationExecuteResponse } from "@getpaseo/protocol/browser-automation/rpc-schemas";
 import {
   BrowserAutomationHostCapabilitySchema,
@@ -488,6 +493,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly workspaceSetupSnapshots = new Map<string, WorkspaceSetupSnapshot>();
   private readonly providerSnapshotManager: ProviderSnapshotManager;
   private onLifecycleIntent!: ((intent: SessionLifecycleIntent) => void) | null;
+  private readonly agentMessageQueue: AgentMessageQueueService;
   private onBranchChanged!:
     | ((workspaceId: string, oldBranch: string | null, newBranch: string | null) => void)
     | null;
@@ -618,6 +624,15 @@ export class VoiceAssistantWebSocketServer {
     this.pushTokenStore = new PushTokenStore(pushLogger, join(paseoHome, "push-tokens.json"));
     this.pushNotificationSender =
       pushNotificationSender ?? createPushNotificationSender(pushLogger, this.pushTokenStore);
+
+    this.agentMessageQueue = createAgentMessageQueueService({
+      paseoHome,
+      agentManager: this.agentManager,
+      agentStorage: this.agentStorage,
+      logger: this.logger.child({ module: "agent-message-queue" }),
+      onQueueUpdated: (queue) => this.broadcastAgentMessageQueueUpdated(queue),
+    });
+    this.agentMessageQueue.start();
 
     this.agentManager.setAgentAttentionCallback((params) => {
       void this.broadcastAgentAttention(params).catch((err) => {
@@ -890,6 +905,7 @@ export class VoiceAssistantWebSocketServer {
 
   public async close(): Promise<void> {
     this.prepareForShutdown();
+    this.agentMessageQueue.stop();
     this.unsubscribeSpeechReadiness?.();
     this.unsubscribeSpeechReadiness = null;
     this.unsubscribeDaemonConfigChange?.();
@@ -999,6 +1015,18 @@ export class VoiceAssistantWebSocketServer {
     const sockets = connection.kind === "trusted" ? connection.sockets : [connection.socket];
     for (const ws of sockets) {
       this.sendToClient(ws, message);
+    }
+  }
+
+  private sendToConnectionsWithClientCapability(
+    capability: ClientCapability,
+    message: WSOutboundMessage,
+  ): void {
+    for (const connection of new Set(this.sessions.values())) {
+      if (connection.kind !== "trusted" || connection.clientCapabilities?.[capability] !== true) {
+        continue;
+      }
+      this.sendToConnection(connection, message);
     }
   }
 
@@ -1162,6 +1190,7 @@ export class VoiceAssistantWebSocketServer {
       worktreesRoot: this.worktreesRoot,
       agentManager: this.agentManager,
       agentStorage: this.agentStorage,
+      agentMessageQueue: this.agentMessageQueue,
       projectRegistry: this.projectRegistry,
       workspaceRegistry: this.workspaceRegistry,
       chatService: this.chatService,
@@ -1380,8 +1409,6 @@ export class VoiceAssistantWebSocketServer {
         worktreeRestore: true,
         // COMPAT(workspaceRecovery): added in v0.1.105, remove after 2027-01-11 once daemon floor >= v0.1.105.
         workspaceRecovery: true,
-        // COMPAT(workspaceFileEditing): added in v0.2.0, remove after 2027-01-18 once daemon floor >= v0.2.0.
-        workspaceFileEditing: true,
         // COMPAT(providerUsageList): added in v0.1.98, drop the gate when daemon floor >= v0.1.98.
         providerUsageList: true,
         // COMPAT(agentDetach): added in v0.1.98, remove gate after 2026-12-19 once daemon floor >= v0.1.98.
@@ -1418,6 +1445,8 @@ export class VoiceAssistantWebSocketServer {
         selectiveAgentTimeline: true,
         // COMPAT(stableProjectIdentity): added in v0.1.109, remove gate after 2027-01-15.
         stableProjectIdentity: true,
+        // COMPAT(agentMessageQueue): added in v0.2.0, remove gate after 2027-01-20.
+        agentMessageQueue: true,
       },
     };
   }
@@ -1448,6 +1477,16 @@ export class VoiceAssistantWebSocketServer {
 
   private broadcastDaemonConfigChanged(config: MutableDaemonConfig): void {
     this.broadcast(this.createDaemonConfigChangedMessage(config));
+  }
+
+  private broadcastAgentMessageQueueUpdated(queue: QueuedAgentMessageQueuePayload): void {
+    this.sendToConnectionsWithClientCapability(
+      CLIENT_CAPS.agentMessageQueueEvents,
+      wrapSessionMessage({
+        type: "queue.agent_message.updated",
+        payload: queue,
+      }),
+    );
   }
 
   private bindSocketHandlers(ws: WebSocketLike): void {

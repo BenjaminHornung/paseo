@@ -5268,6 +5268,247 @@ test("keeps updatedAt monotonic when user message and run start happen in the sa
   }
 });
 
+test("classifies recorded user messages by stable client message id", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  await manager.appendTimelineItem(snapshot.id, {
+    type: "user_message",
+    text: "ship the fix",
+    messageId: "provider-message-id",
+    clientMessageId: " client-message-id ",
+  });
+
+  expect(
+    await manager.admitRecordedUserMessage(snapshot.id, "ship the fix", {
+      messageId: "client-message-id",
+    }),
+  ).toMatchObject({ disposition: "legacy_unverifiable" });
+  expect(
+    await manager.admitRecordedUserMessage(snapshot.id, "ship a different fix", {
+      messageId: "client-message-id",
+    }),
+  ).toMatchObject({ disposition: "legacy_unverifiable" });
+  expect(
+    await manager.admitRecordedUserMessage(snapshot.id, "ship the fix", {
+      messageId: "provider-message-id",
+    }),
+  ).toMatchObject({ disposition: "new" });
+  expect(
+    await manager.admitRecordedUserMessage(snapshot.id, "ship the fix", { messageId: "   " }),
+  ).toEqual({ disposition: "new" });
+});
+
+test("parallel identical admissions share the owner's success outcome", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  const admitStarted = deferred<void>();
+  const releaseAdmit = deferred<void>();
+  const originalAdmit = storage.admitClientMessage.bind(storage);
+  const admitSpy = vi
+    .spyOn(storage, "admitClientMessage")
+    .mockImplementationOnce(async (...args) => {
+      admitStarted.resolve();
+      await releaseAdmit.promise;
+      return await originalAdmit(...args);
+    });
+
+  try {
+    const ownerAdmissionPromise = manager.admitRecordedUserMessage(snapshot.id, "ship the fix", {
+      messageId: "shared-message-id",
+    });
+    await admitStarted.promise;
+    const duplicateAdmissionPromise = manager.admitRecordedUserMessage(
+      snapshot.id,
+      "ship the fix",
+      {
+        messageId: "shared-message-id",
+      },
+    );
+
+    const duplicateEarlyState = await Promise.race([
+      duplicateAdmissionPromise.then(() => "resolved" as const),
+      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 25)),
+    ]);
+    expect(duplicateEarlyState).toBe("pending");
+
+    releaseAdmit.resolve();
+    const ownerAdmission = await ownerAdmissionPromise;
+    const duplicateAdmission = await duplicateAdmissionPromise;
+
+    expect(ownerAdmission).toMatchObject({ disposition: "new" });
+    expect(duplicateAdmission).toMatchObject({ disposition: "in_flight" });
+
+    const duplicateCompletion = duplicateAdmission.completion;
+    expect(duplicateCompletion).toBeDefined();
+    await manager.commitRecordedUserMessageAdmissionForAgent(snapshot.id, ownerAdmission);
+    await expect(duplicateCompletion).resolves.toEqual({ accepted: true, error: null });
+  } finally {
+    admitSpy.mockRestore();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("parallel identical admissions share the owner's failure outcome", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  const admitStarted = deferred<void>();
+  const releaseAdmit = deferred<void>();
+  const originalAdmit = storage.admitClientMessage.bind(storage);
+  const admitSpy = vi
+    .spyOn(storage, "admitClientMessage")
+    .mockImplementationOnce(async (...args) => {
+      admitStarted.resolve();
+      await releaseAdmit.promise;
+      return await originalAdmit(...args);
+    });
+
+  try {
+    const ownerAdmissionPromise = manager.admitRecordedUserMessage(snapshot.id, "ship the fix", {
+      messageId: "shared-message-id-failure",
+    });
+    await admitStarted.promise;
+    const duplicateAdmissionPromise = manager.admitRecordedUserMessage(
+      snapshot.id,
+      "ship the fix",
+      {
+        messageId: "shared-message-id-failure",
+      },
+    );
+
+    releaseAdmit.resolve();
+    const ownerAdmission = await ownerAdmissionPromise;
+    const duplicateAdmission = await duplicateAdmissionPromise;
+
+    expect(ownerAdmission).toMatchObject({ disposition: "new" });
+    expect(duplicateAdmission).toMatchObject({ disposition: "in_flight" });
+
+    const duplicateCompletion = duplicateAdmission.completion;
+    expect(duplicateCompletion).toBeDefined();
+    await manager.releaseRecordedUserMessageAdmissionForAgent(
+      snapshot.id,
+      ownerAdmission,
+      "dispatch failed",
+    );
+    await expect(duplicateCompletion).resolves.toEqual({
+      accepted: false,
+      error: "dispatch failed",
+    });
+  } finally {
+    admitSpy.mockRestore();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("persists legacy replay cutover as legacy-unverifiable without requiring timeline scans on the next process", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { claude: new TestAgentClient("claude") },
+    registry: storage,
+    logger,
+  });
+
+  try {
+    const snapshot = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    await manager.appendTimelineItem(snapshot.id, {
+      type: "user_message",
+      text: "ship the fix",
+      clientMessageId: "legacy-cutover-message",
+    });
+
+    await expect(
+      manager.admitRecordedUserMessage(snapshot.id, "ship the fix", {
+        messageId: "legacy-cutover-message",
+      }),
+    ).resolves.toMatchObject({
+      disposition: "legacy_unverifiable",
+      error:
+        "This client messageId was only observed in legacy history and cannot be safely replay-verified; resend with a new messageId",
+    });
+    await expect(
+      manager.admitRecordedUserMessage(
+        snapshot.id,
+        {
+          text: "ship the fix",
+          attachments: [{ type: "text", text: "ctx", contextKind: "chat_history" }],
+        },
+        {
+          messageId: "legacy-cutover-message",
+        },
+      ),
+    ).resolves.toMatchObject({ disposition: "legacy_unverifiable" });
+    expect((await storage.get(snapshot.id))?.clientMessageAdmissions).toBeDefined();
+
+    const freshManager = new AgentManager({
+      clients: { claude: new TestAgentClient("claude") },
+      registry: storage,
+      logger,
+    });
+    await expect(
+      freshManager.admitRecordedUserMessage(snapshot.id, "ship the fix", {
+        messageId: "legacy-cutover-message",
+      }),
+    ).resolves.toMatchObject({ disposition: "legacy_unverifiable" });
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("rejects overlong client message ids before dispatch", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+
+  try {
+    const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    await expect(
+      manager.admitRecordedUserMessage(snapshot.id, "ship the fix", {
+        messageId: "x".repeat(257),
+      }),
+    ).resolves.toMatchObject({
+      disposition: "capacity",
+      error: "Client messageId exceeds 256 characters",
+    });
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("runAgent assembles finalText from trailing assistant chunks", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
   const storagePath = join(workdir, "agents");

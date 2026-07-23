@@ -83,7 +83,7 @@ export function useLiveFile(input: {
     if (
       query.data &&
       observed?.status === "ready" &&
-      query.data.modifiedAt !== observed.modifiedAt
+      (query.data.modifiedAt !== observed.modifiedAt || query.data.revision !== observed.revision)
     ) {
       void queryClient.invalidateQueries({ queryKey });
     }

@@ -1568,10 +1568,12 @@ function mapCodexThreadUserMessageItem(
   }
   const text = extractUserText(normalizedItem.content) ?? "";
   const messageId = nonEmptyString(normalizedItem.id);
+  const clientMessageId = nonEmptyString(normalizedItem.clientId);
   return {
     type: "user_message",
     text,
     ...(messageId ? { messageId } : {}),
+    ...(clientMessageId ? { clientMessageId } : {}),
   };
 }
 
@@ -1856,6 +1858,44 @@ const CodexThreadReadResponseSchema = z
 type CodexThreadReadResponse = z.infer<typeof CodexThreadReadResponseSchema>;
 type CodexThreadReadRequest = (threadId: string) => Promise<unknown>;
 
+const CodexThreadStatusValueSchema = z.union([
+  z.string(),
+  z
+    .object({
+      type: z.string(),
+    })
+    .passthrough(),
+]);
+
+const StrictCodexIdleThreadReadResponseSchema = z
+  .object({
+    thread: z
+      .object({
+        id: z.string(),
+        status: CodexThreadStatusValueSchema,
+        turns: z.array(
+          z
+            .object({
+              id: z.string(),
+              status: z.string(),
+            })
+            .passthrough(),
+        ),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+function readCodexThreadStatusType(status: z.infer<typeof CodexThreadStatusValueSchema>): string {
+  return typeof status === "string" ? status : status.type;
+}
+
+function isCodexThreadReadTerminalStatus(statusType: string): boolean {
+  return ["idle", "completed", "interrupted", "failed", "canceled", "cancelled"].includes(
+    statusType,
+  );
+}
+
 async function requestCodexThreadHistory(
   requestThread: CodexThreadReadRequest,
   threadId: string,
@@ -1967,9 +2007,27 @@ const ThreadStartedNotificationSchema = z
   })
   .passthrough();
 
+const ThreadStatusChangedNotificationSchema = z
+  .object({
+    threadId: z.string().optional(),
+    status: z
+      .object({
+        type: z.string().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
 const TurnStartedNotificationSchema = z
   .object({
     threadId: z.string().optional(),
+    turn: z.object({ id: z.string() }).passthrough(),
+  })
+  .passthrough();
+
+const TurnStartResponseSchema = z
+  .object({
     turn: z.object({ id: z.string() }).passthrough(),
   })
   .passthrough();
@@ -1979,6 +2037,7 @@ const TurnCompletedNotificationSchema = z
     threadId: z.string().optional(),
     turn: z
       .object({
+        id: z.string(),
         status: z.string(),
         error: z
           .object({
@@ -2251,13 +2310,9 @@ const CodexEventThreadRolledBackNotificationSchema = z
 
 type ParsedCodexNotification =
   | { kind: "thread_started"; threadId: string }
+  | { kind: "thread_status_changed"; threadId: string | null; statusType: string | null }
   | { kind: "turn_started"; turnId: string; threadId: string | null }
-  | {
-      kind: "turn_completed";
-      status: string;
-      errorMessage: string | null;
-      threadId: string | null;
-    }
+  | ParsedTurnCompletedNotification
   | {
       kind: "plan_updated";
       plan: Array<{ step: string | null; status: string | null }>;
@@ -2338,6 +2393,28 @@ type ParsedCodexNotification =
   | { kind: "invalid_payload"; method: string; params: unknown }
   | { kind: "unknown_method"; method: string; params: unknown };
 
+interface ParsedCanonicalTurnCompletedNotification {
+  kind: "turn_completed";
+  source: "canonical";
+  turnId: string | null;
+  status: string;
+  errorMessage: string | null;
+  threadId: string | null;
+}
+
+interface ParsedLegacyAliasTurnCompletedNotification {
+  kind: "turn_completed";
+  source: "legacy_alias";
+  turnId: null;
+  status: string;
+  errorMessage: string | null;
+  threadId: string | null;
+}
+
+type ParsedTurnCompletedNotification =
+  | ParsedCanonicalTurnCompletedNotification
+  | ParsedLegacyAliasTurnCompletedNotification;
+
 type CodexDeltaNotification = Extract<
   ParsedCodexNotification,
   {
@@ -2385,6 +2462,25 @@ const CodexNotificationSchema = z.union([
       params,
     }),
   ),
+  z
+    .object({
+      method: z.literal("thread/status/changed"),
+      params: ThreadStatusChangedNotificationSchema,
+    })
+    .transform(
+      ({ params }): ParsedCodexNotification => ({
+        kind: "thread_status_changed",
+        threadId: params.threadId ?? null,
+        statusType: params.status?.type ?? null,
+      }),
+    ),
+  z.object({ method: z.literal("thread/status/changed"), params: z.unknown() }).transform(
+    ({ method, params }): ParsedCodexNotification => ({
+      kind: "invalid_payload",
+      method,
+      params,
+    }),
+  ),
   z.object({ method: z.literal("turn/started"), params: TurnStartedNotificationSchema }).transform(
     ({ params }): ParsedCodexNotification => ({
       kind: "turn_started",
@@ -2404,6 +2500,8 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        source: "canonical",
+        turnId: params.turn.id,
         status: params.turn.status,
         errorMessage: params.turn.error?.message ?? null,
         threadId: params.threadId ?? null,
@@ -2824,6 +2922,8 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        source: "legacy_alias",
+        turnId: null,
         status: "interrupted",
         errorMessage: null,
         threadId: getCodexEventThreadId(params),
@@ -2844,6 +2944,8 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        source: "legacy_alias",
+        turnId: null,
         status: "completed",
         errorMessage: null,
         threadId: getCodexEventThreadId(params),
@@ -3096,7 +3198,19 @@ export class CodexAppServerAgentSession implements AgentSession {
   private readonly subscribers = new Set<(event: AgentStreamEvent) => void>();
   private nextTurnOrdinal = 0;
   private activeForegroundTurnId: string | null = null;
-  private activeClientMessageId: string | null = null;
+  private nextTurnGeneration = 0;
+  private activeTurnGeneration: number | null = null;
+  private turnStartAcknowledgedGeneration: number | null = null;
+  private turnStartedGeneration: number | null = null;
+  private activeProviderTurnId: string | null = null;
+  private pendingRootTurnStartedIds = new Set<string>();
+  private pendingRootTurnCompletions = new Map<string, ParsedCanonicalTurnCompletedNotification>();
+  private pendingRootIdle = false;
+  private pendingRootIdleReconciliationGeneration: number | null = null;
+  private pendingLegacyRootTerminalHint: {
+    generation: number;
+    threadId: string;
+  } | null = null;
   private cachedRuntimeInfo: AgentRuntimeInfo | null = null;
   private serviceTier: "fast" | null = null;
   private planModeEnabled = false;
@@ -3689,6 +3803,9 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (options?.outputSchema) {
       params.outputSchema = normalizeCodexOutputSchema(options.outputSchema);
     }
+    if (options?.clientMessageId) {
+      params.clientUserMessageId = options.clientMessageId;
+    }
     const developerInstructions = composeSystemPromptParts(
       this.config.systemPrompt,
       this.config.daemonAppendSystemPrompt,
@@ -3820,8 +3937,17 @@ export class CodexAppServerAgentSession implements AgentSession {
     const turnStart = await this.buildTurnStartParams(effectivePrompt, options);
 
     const turnId = this.createTurnId();
+    const generation = ++this.nextTurnGeneration;
     this.activeForegroundTurnId = turnId;
-    this.activeClientMessageId = options?.clientMessageId ?? null;
+    this.activeTurnGeneration = generation;
+    this.turnStartAcknowledgedGeneration = null;
+    this.turnStartedGeneration = null;
+    this.activeProviderTurnId = null;
+    this.pendingRootTurnStartedIds.clear();
+    this.pendingRootTurnCompletions.clear();
+    this.pendingRootIdle = false;
+    this.pendingRootIdleReconciliationGeneration = null;
+    this.pendingLegacyRootTerminalHint = null;
     this.currentTurnId = null;
 
     try {
@@ -3834,10 +3960,40 @@ export class CodexAppServerAgentSession implements AgentSession {
         hasDeveloperInstructions: turnStart.hasDeveloperInstructions,
         hasCodexConfig: turnStart.hasCodexConfig,
       });
-      await this.client.request("turn/start", turnStart.params, TURN_START_TIMEOUT_MS);
+      const response = TurnStartResponseSchema.parse(
+        await this.client.request("turn/start", turnStart.params, TURN_START_TIMEOUT_MS),
+      );
+      if (this.activeTurnGeneration === generation) {
+        this.activeProviderTurnId = response.turn.id;
+        this.currentTurnId = response.turn.id;
+        this.turnStartAcknowledgedGeneration = generation;
+        this.replayPendingRootTurnEvents(response.turn.id);
+        const currentThreadId = this.currentThreadId;
+        if (
+          currentThreadId !== null &&
+          this.consumePendingLegacyRootTerminalHint(generation, currentThreadId)
+        ) {
+          this.scheduleStrictRootTurnReconciliation({
+            generation,
+            threadId: currentThreadId,
+            providerTurnId: response.turn.id,
+            reason: "legacy_terminal_alias",
+          });
+        }
+      }
     } catch (error) {
-      this.activeForegroundTurnId = null;
-      this.activeClientMessageId = null;
+      if (this.activeTurnGeneration === generation) {
+        this.activeForegroundTurnId = null;
+        this.activeTurnGeneration = null;
+        this.turnStartAcknowledgedGeneration = null;
+        this.turnStartedGeneration = null;
+        this.activeProviderTurnId = null;
+        this.pendingRootTurnStartedIds.clear();
+        this.pendingRootTurnCompletions.clear();
+        this.pendingRootIdle = false;
+        this.pendingRootIdleReconciliationGeneration = null;
+        this.pendingLegacyRootTerminalHint = null;
+      }
       throw error;
     }
 
@@ -4241,7 +4397,15 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.pendingSubAgentNotificationsByThreadId.clear();
     this.subscribers.clear();
     this.activeForegroundTurnId = null;
-    this.activeClientMessageId = null;
+    this.activeTurnGeneration = null;
+    this.turnStartAcknowledgedGeneration = null;
+    this.turnStartedGeneration = null;
+    this.activeProviderTurnId = null;
+    this.pendingRootTurnStartedIds.clear();
+    this.pendingRootTurnCompletions.clear();
+    this.pendingRootIdle = false;
+    this.pendingRootIdleReconciliationGeneration = null;
+    this.pendingLegacyRootTerminalHint = null;
     if (this.client) {
       await this.client.dispose();
     }
@@ -4748,6 +4912,26 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   private handleThreadStateNotification(parsed: ParsedCodexNotification): boolean {
     switch (parsed.kind) {
+      case "thread_status_changed":
+        if (
+          parsed.statusType === "idle" &&
+          this.activeForegroundTurnId &&
+          this.activeTurnGeneration !== null
+        ) {
+          if (
+            this.turnStartAcknowledgedGeneration === this.activeTurnGeneration &&
+            this.turnStartedGeneration === this.activeTurnGeneration &&
+            this.activeProviderTurnId
+          ) {
+            this.schedulePendingRootIdleReconciliation();
+          } else if (
+            this.activeProviderTurnId === null &&
+            this.pendingRootTurnStartedIds.size > 0
+          ) {
+            this.pendingRootIdle = true;
+          }
+        }
+        return true;
       case "context_compacted":
         this.handleContextCompactedNotification(parsed);
         return true;
@@ -5253,14 +5437,36 @@ export class CodexAppServerAgentSession implements AgentSession {
       this.emitSubAgentActivityUpdate(subAgentCallId, "running");
       return;
     }
-    this.currentTurnId = parsed.turnId;
+    if (this.activeTurnGeneration === null) {
+      return;
+    }
+    if (parsed.turnId === null) {
+      return;
+    }
+    if (this.activeProviderTurnId === null) {
+      this.pendingRootTurnStartedIds.add(parsed.turnId);
+      return;
+    }
+    if (parsed.turnId !== this.activeProviderTurnId) {
+      return;
+    }
+    this.acceptRootTurnStarted(parsed.turnId);
+  }
+
+  private acceptRootTurnStarted(turnId: string): void {
+    if (
+      this.activeTurnGeneration === null ||
+      this.turnStartedGeneration === this.activeTurnGeneration
+    ) {
+      return;
+    }
+    this.currentTurnId = turnId;
+    this.turnStartedGeneration = this.activeTurnGeneration;
     this.resetTurnTrackingState();
     this.emitEvent({ type: "turn_started", provider: CODEX_PROVIDER });
   }
 
-  private handleTurnCompletedNotification(
-    parsed: Extract<ParsedCodexNotification, { kind: "turn_completed" }>,
-  ): void {
+  private handleTurnCompletedNotification(parsed: ParsedTurnCompletedNotification): void {
     const subAgentCallId = this.getSubAgentCallIdForThread(parsed.threadId);
     if (subAgentCallId) {
       let status: ToolCallTimelineItem["status"] = "completed";
@@ -5272,6 +5478,47 @@ export class CodexAppServerAgentSession implements AgentSession {
       this.emitSubAgentActivityUpdate(subAgentCallId, status);
       return;
     }
+    if (this.activeTurnGeneration === null) {
+      return;
+    }
+    if (parsed.source === "legacy_alias") {
+      this.handleLegacyRootTurnTerminalHint(parsed);
+      return;
+    }
+    if (this.activeProviderTurnId === null) {
+      if (parsed.turnId === null) {
+        return;
+      }
+      this.pendingRootTurnCompletions.set(parsed.turnId, parsed);
+      return;
+    }
+    if (parsed.turnId !== this.activeProviderTurnId) {
+      return;
+    }
+    this.completeRootTurn(parsed);
+  }
+
+  private handleLegacyRootTurnTerminalHint(
+    parsed: ParsedLegacyAliasTurnCompletedNotification,
+  ): void {
+    const generation = this.activeTurnGeneration;
+    const threadId = this.currentThreadId;
+    if (generation === null || !threadId || parsed.threadId !== threadId) {
+      return;
+    }
+    if (this.activeProviderTurnId === null) {
+      this.pendingLegacyRootTerminalHint = { generation, threadId };
+      return;
+    }
+    this.scheduleStrictRootTurnReconciliation({
+      generation,
+      threadId,
+      providerTurnId: this.activeProviderTurnId,
+      reason: "legacy_terminal_alias",
+    });
+  }
+
+  private completeRootTurn(parsed: ParsedTurnCompletedNotification): void {
     if (parsed.status === "failed") {
       this.emitEvent({
         type: "turn_failed",
@@ -5281,19 +5528,166 @@ export class CodexAppServerAgentSession implements AgentSession {
     } else if (parsed.status === "interrupted") {
       this.emitEvent({ type: "turn_canceled", provider: CODEX_PROVIDER, reason: "interrupted" });
     } else {
-      if (this.planModeEnabled && this.latestPlanResult?.text) {
-        this.emitSyntheticPlanApprovalRequest(this.latestPlanResult.text);
-      }
-      this.emitEvent({
-        type: "turn_completed",
-        provider: CODEX_PROVIDER,
-        usage: this.latestUsage,
-      });
+      this.emitCompletedRootTurn();
     }
+    this.finalizeRootTurn();
+  }
+
+  private replayPendingRootTurnEvents(turnId: string): void {
+    const sawStarted = this.pendingRootTurnStartedIds.delete(turnId);
+    const completion = this.pendingRootTurnCompletions.get(turnId);
+    this.pendingRootTurnStartedIds.clear();
+    this.pendingRootTurnCompletions.clear();
+    if (sawStarted) {
+      this.acceptRootTurnStarted(turnId);
+    }
+    if (completion) {
+      this.completeRootTurn(completion);
+      return;
+    }
+    if (
+      this.pendingRootIdle &&
+      this.activeTurnGeneration !== null &&
+      this.turnStartedGeneration === this.activeTurnGeneration
+    ) {
+      this.schedulePendingRootIdleReconciliation();
+    }
+    this.pendingRootIdle = false;
+  }
+
+  private consumePendingLegacyRootTerminalHint(generation: number, threadId: string): boolean {
+    const pendingLegacyRootTerminalHint = this.pendingLegacyRootTerminalHint;
+    if (
+      pendingLegacyRootTerminalHint === null ||
+      pendingLegacyRootTerminalHint.generation !== generation ||
+      pendingLegacyRootTerminalHint.threadId !== threadId
+    ) {
+      return false;
+    }
+    this.pendingLegacyRootTerminalHint = null;
+    return true;
+  }
+
+  private emitCompletedRootTurn(): void {
+    if (this.planModeEnabled && this.latestPlanResult?.text) {
+      this.emitSyntheticPlanApprovalRequest(this.latestPlanResult.text);
+    }
+    this.emitEvent({
+      type: "turn_completed",
+      provider: CODEX_PROVIDER,
+      usage: this.latestUsage,
+    });
+  }
+
+  private finalizeRootTurn(): void {
     this.activeForegroundTurnId = null;
-    this.activeClientMessageId = null;
+    this.activeTurnGeneration = null;
+    this.turnStartAcknowledgedGeneration = null;
+    this.turnStartedGeneration = null;
+    this.activeProviderTurnId = null;
+    this.currentTurnId = null;
+    this.pendingRootTurnStartedIds.clear();
+    this.pendingRootTurnCompletions.clear();
+    this.pendingRootIdle = false;
+    this.pendingRootIdleReconciliationGeneration = null;
+    this.pendingLegacyRootTerminalHint = null;
     this.pendingSubAgentNotificationsByThreadId.clear();
     this.resetTurnTrackingState();
+  }
+
+  private schedulePendingRootIdleReconciliation(): void {
+    const generation = this.activeTurnGeneration;
+    const threadId = this.currentThreadId;
+    const providerTurnId = this.activeProviderTurnId;
+    if (
+      generation === null ||
+      !threadId ||
+      !providerTurnId ||
+      this.pendingRootIdleReconciliationGeneration === generation
+    ) {
+      return;
+    }
+    this.pendingRootIdleReconciliationGeneration = generation;
+    void this.reconcileAcceptedRootTurnFromThreadRead({
+      generation,
+      threadId,
+      providerTurnId,
+      reason: "thread_idle",
+    });
+  }
+
+  private scheduleStrictRootTurnReconciliation(params: {
+    generation: number;
+    threadId: string;
+    providerTurnId: string;
+    reason: "thread_idle" | "legacy_terminal_alias";
+  }): void {
+    if (this.pendingRootIdleReconciliationGeneration === params.generation) {
+      return;
+    }
+    this.pendingRootIdleReconciliationGeneration = params.generation;
+    void this.reconcileAcceptedRootTurnFromThreadRead(params);
+  }
+
+  private async reconcileAcceptedRootTurnFromThreadRead(params: {
+    generation: number;
+    threadId: string;
+    providerTurnId: string;
+    reason: "thread_idle" | "legacy_terminal_alias";
+  }): Promise<void> {
+    const { generation, threadId, providerTurnId } = params;
+    try {
+      if (!this.client) {
+        return;
+      }
+      const response = StrictCodexIdleThreadReadResponseSchema.parse(
+        await readCodexThread(this.client, threadId),
+      );
+      if (response.thread.id !== threadId) {
+        return;
+      }
+      if (!isCodexThreadReadTerminalStatus(readCodexThreadStatusType(response.thread.status))) {
+        return;
+      }
+      const terminalTurn = response.thread.turns.find((turn) => turn.id === providerTurnId);
+      if (!terminalTurn) {
+        return;
+      }
+      if (!["completed", "interrupted", "failed"].includes(terminalTurn.status)) {
+        return;
+      }
+      if (
+        this.activeTurnGeneration !== generation ||
+        this.currentThreadId !== threadId ||
+        this.activeProviderTurnId !== providerTurnId
+      ) {
+        return;
+      }
+      this.completeRootTurn({
+        kind: "turn_completed",
+        source: "canonical",
+        turnId: providerTurnId,
+        status: terminalTurn.status,
+        errorMessage: null,
+        threadId,
+      });
+    } catch (error) {
+      this.logger.warn(
+        {
+          agentId: this.agentId,
+          provider: CODEX_PROVIDER,
+          sessionId: threadId,
+          turnId: providerTurnId,
+          reconciliationReason: params.reason,
+          err: error,
+        },
+        "provider.codex.root_turn_idle_reconciliation_failed_closed",
+      );
+    } finally {
+      if (this.pendingRootIdleReconciliationGeneration === generation) {
+        this.pendingRootIdleReconciliationGeneration = null;
+      }
+    }
   }
 
   private resetTurnTrackingState(): void {
@@ -5830,11 +6224,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (!this.rememberCodexUserMessageTurn(timelineItem.messageId)) {
       return;
     }
-    const item = this.activeClientMessageId
-      ? { ...timelineItem, clientMessageId: this.activeClientMessageId }
-      : timelineItem;
-    this.activeClientMessageId = null;
-    this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item });
+    this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item: timelineItem });
   }
 
   private warnUnknownNotificationMethod(method: string, params: unknown): void {

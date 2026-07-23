@@ -667,6 +667,7 @@ function EditableFilePane({
             path,
             size: preview.size,
             modifiedAt: preview.modifiedAt,
+            revision: preview.revision,
           },
         },
         session,
@@ -728,6 +729,7 @@ function EditableFilePane({
       size: snapshot.version.status === "ready" ? snapshot.version.size : preview.size,
       modifiedAt:
         snapshot.version.status === "ready" ? snapshot.version.modifiedAt : preview.modifiedAt,
+      revision: snapshot.version.status === "ready" ? snapshot.version.revision : preview.revision,
     }),
     [preview, snapshot.content, snapshot.version],
   );

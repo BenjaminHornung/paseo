@@ -30,18 +30,23 @@ export interface EnsureAgentLoadedDeps {
   logger: Logger;
 }
 
+export interface EnsureAgentLoadedOptions {
+  touchActivity?: boolean;
+}
+
 export async function ensureUnarchivedAgentLoaded(
   agentId: string,
   deps: EnsureAgentLoadedDeps & {
     agentManager: AgentLoaderManager & Pick<AgentManager, "closeAgent">;
   },
+  options?: EnsureAgentLoadedOptions,
 ): Promise<ManagedAgent> {
   const record = await deps.agentStorage.get(agentId);
   if (record?.archivedAt) {
     throw new Error(`Agent is archived: ${agentId}`);
   }
 
-  const agent = await ensureAgentLoaded(agentId, deps);
+  const agent = await ensureAgentLoaded(agentId, deps, options);
   const latestRecord = await deps.agentStorage.get(agentId);
   if (latestRecord?.archivedAt) {
     await deps.agentManager.closeAgent(agentId).catch((error: unknown) => {
@@ -56,10 +61,13 @@ export async function ensureUnarchivedAgentLoaded(
 export async function ensureAgentLoaded(
   agentId: string,
   deps: EnsureAgentLoadedDeps,
+  options?: EnsureAgentLoadedOptions,
 ): Promise<ManagedAgent> {
   await deps.agentManager.waitForAgentClose?.(agentId);
   const existing =
-    deps.agentManager.touchAgentActivity?.(agentId) ?? deps.agentManager.getAgent(agentId);
+    options?.touchActivity === false
+      ? deps.agentManager.getAgent(agentId)
+      : (deps.agentManager.touchAgentActivity?.(agentId) ?? deps.agentManager.getAgent(agentId));
   if (existing) {
     return existing;
   }

@@ -21,6 +21,11 @@ export const CLIENT_CAPS = {
   // COMPAT(projectUpdates): added in v0.1.109, remove gate after 2027-01-15.
   projectUpdates: "project_updates",
   browserHost: "browser_host",
+  // COMPAT(agentMessageQueueEvents): added in v0.2.0. The daemon sends
+  // queue.agent_message.updated only to clients that know the event type; older
+  // clients can still connect to newer daemons without seeing an unknown frame.
+  // Remove after 2027-01-20 once the supported client floor is >= v0.2.0.
+  agentMessageQueueEvents: "agent_message_queue_events",
 } as const;
 
 export type ClientCapability = (typeof CLIENT_CAPS)[keyof typeof CLIENT_CAPS];

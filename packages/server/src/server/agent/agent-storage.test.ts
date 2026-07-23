@@ -1,11 +1,15 @@
-import { describe, expect, test, beforeEach, afterEach } from "vitest";
+import { describe, expect, test, beforeEach, afterEach, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { promises as fs } from "node:fs";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
-import { AgentStorage } from "./agent-storage.js";
+import {
+  AgentStorage,
+  MAX_CLIENT_MESSAGE_ADMISSIONS,
+  type StoredAgentRecord,
+} from "./agent-storage.js";
 import { buildConfigOverrides, buildSessionConfig } from "../persistence-hooks.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type {
@@ -529,4 +533,242 @@ describe("AgentStorage", () => {
     const after = await afterReload.list();
     expect(after.some((r) => r.id === agentId)).toBe(false);
   });
+
+  test("remove rejects non-ENOENT unlink failures without mutating its cache or indexes", async () => {
+    const agentId = "agent-unlink-denied";
+    await storage.applySnapshot(createManagedAgent({ id: agentId }));
+
+    const unlinkError = Object.assign(new Error("unlink denied"), { code: "EACCES" });
+    const unlinkSpy = vi.spyOn(fs, "unlink").mockRejectedValue(unlinkError);
+    try {
+      await expect(storage.remove(agentId)).rejects.toBe(unlinkError);
+      expect((storage as unknown as { deleting: Set<string> }).deleting.has(agentId)).toBe(true);
+      await expect(storage.get(agentId)).resolves.toMatchObject({ id: agentId });
+      await expect(storage.list()).resolves.toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: agentId })]),
+      );
+    } finally {
+      unlinkSpy.mockRestore();
+    }
+  });
+
+  test("remove remains idempotent when the record file is already absent", async () => {
+    const agentId = "agent-record-already-absent";
+    await storage.applySnapshot(createManagedAgent({ id: agentId }));
+    await fs.unlink(path.join(storagePath, "tmp-project", `${agentId}.json`));
+
+    await expect(storage.remove(agentId)).resolves.toBeUndefined();
+    await expect(storage.get(agentId)).resolves.toBeNull();
+    await expect(storage.list()).resolves.not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: agentId })]),
+    );
+  });
+
+  test("successful removal releases the delete fence for later reuse of the agent id", async () => {
+    const agentId = "agent-id-reused-after-delete";
+    await storage.applySnapshot(createManagedAgent({ id: agentId }));
+
+    await storage.remove(agentId);
+    await storage.applySnapshot(createManagedAgent({ id: agentId }), { title: "Replacement" });
+
+    await expect(storage.get(agentId)).resolves.toMatchObject({
+      id: agentId,
+      title: "Replacement",
+    });
+  });
+
+  test.each(["commit", "release", "initialize"] as const)(
+    "remove cannot be undone by a concurrently queued client-message ledger %s",
+    async (mutation) => {
+      const agentId = `agent-delete-ledger-${mutation}`;
+      await storage.applySnapshot(createManagedAgent({ id: agentId }));
+      if (mutation !== "initialize") {
+        await storage.initializeClientMessageAdmissions(agentId, Object.create(null), false);
+        await storage.admitClientMessage(agentId, "message-1", "fingerprint-a");
+      }
+
+      let releaseWrite: (() => void) | null = null;
+      const writeGate = new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      const storageInternals = storage as unknown as {
+        deleting: Set<string>;
+        writeRecord(record: StoredAgentRecord): Promise<void>;
+      };
+      const originalWriteRecord = storageInternals.writeRecord.bind(storage);
+      storageInternals.writeRecord = async (record) => {
+        await writeGate;
+        await originalWriteRecord(record);
+      };
+
+      const removePromise = storage.remove(agentId);
+      await expect.poll(() => storageInternals.deleting.has(agentId)).toBe(true);
+      let mutationPromise: Promise<void>;
+      if (mutation === "commit") {
+        mutationPromise = storage.commitClientMessageAdmission(
+          agentId,
+          "message-1",
+          "fingerprint-a",
+        );
+      } else if (mutation === "release") {
+        mutationPromise = storage.releaseClientMessageAdmission(
+          agentId,
+          "message-1",
+          "fingerprint-a",
+        );
+      } else {
+        mutationPromise = storage.initializeClientMessageAdmissions(
+          agentId,
+          Object.create(null),
+          false,
+        );
+      }
+      mutationPromise = mutationPromise.catch(() => undefined);
+
+      await removePromise;
+      releaseWrite?.();
+      await mutationPromise;
+
+      const reloaded = new AgentStorage(storagePath, logger);
+      await expect(reloaded.get(agentId)).resolves.toBeNull();
+    },
+  );
+
+  test("pending client message admissions remain pending after reload", async () => {
+    const agentId = "agent-pending-admission";
+    await storage.applySnapshot(createManagedAgent({ id: agentId }));
+    await storage.initializeClientMessageAdmissions(agentId, Object.create(null), false);
+
+    await expect(
+      storage.admitClientMessage(agentId, "message-pending", "fingerprint-a"),
+    ).resolves.toBe("new");
+
+    const reloaded = new AgentStorage(storagePath, logger);
+    await expect(
+      reloaded.admitClientMessage(agentId, "message-pending", "fingerprint-a"),
+    ).resolves.toBe("pending");
+  });
+
+  test("initializeClientMessageAdmissions rejects ledgers beyond the durable capacity", async () => {
+    await storage.applySnapshot(createManagedAgent({ id: "agent-ledger-capacity" }));
+
+    const entries = Object.create(null) as Record<
+      string,
+      { fingerprint: string; status: "committed" }
+    >;
+    for (let index = 0; index <= MAX_CLIENT_MESSAGE_ADMISSIONS; index += 1) {
+      entries[`message-${index}`] = {
+        fingerprint: `fingerprint-${index}`,
+        status: "committed",
+      };
+    }
+
+    await expect(
+      storage.initializeClientMessageAdmissions("agent-ledger-capacity", entries, false),
+    ).rejects.toThrow("Initial client message admission ledger exceeds its durable limit");
+  });
+
+  test("applySnapshot preserves pending client message admissions during metadata updates", async () => {
+    const agentId = "agent-pending-snapshot";
+    await storage.applySnapshot(
+      createManagedAgent({
+        id: agentId,
+        lifecycle: "idle",
+      }),
+    );
+    await storage.initializeClientMessageAdmissions(agentId, Object.create(null), false);
+    await expect(storage.admitClientMessage(agentId, "message-1", "fingerprint-a")).resolves.toBe(
+      "new",
+    );
+
+    await storage.applySnapshot(
+      createManagedAgent({
+        id: agentId,
+        lifecycle: "running",
+        updatedAt: new Date("2025-01-02T00:00:00.000Z"),
+      }),
+    );
+
+    const persisted = await storage.get(agentId);
+    expect(persisted?.clientMessageAdmissions?.entries["message-1"]).toEqual({
+      fingerprint: "fingerprint-a",
+      status: "pending",
+    });
+  });
+
+  test.each(["constructor", "toString", "__proto__"])(
+    "stores prototype-like client message ids safely for committed and legacy entries: %s",
+    async (messageId) => {
+      const committedAgentId = `agent-committed-${messageId}`;
+      await storage.applySnapshot(createManagedAgent({ id: committedAgentId }));
+      await storage.initializeClientMessageAdmissions(committedAgentId, Object.create(null), false);
+
+      await expect(
+        storage.admitClientMessage(committedAgentId, messageId, "fingerprint-a"),
+      ).resolves.toBe("new");
+      await storage.commitClientMessageAdmission(committedAgentId, messageId, "fingerprint-a");
+      await expect(
+        storage.admitClientMessage(committedAgentId, messageId, "fingerprint-a"),
+      ).resolves.toBe("duplicate");
+      await expect(
+        storage.admitClientMessage(committedAgentId, messageId, "fingerprint-b"),
+      ).resolves.toBe("conflict");
+
+      const committedRecord = await storage.get(committedAgentId);
+      expect(committedRecord?.clientMessageAdmissions?.entries[messageId]).toEqual({
+        fingerprint: "fingerprint-a",
+        status: "committed",
+      });
+      expect(Object.getPrototypeOf(committedRecord?.clientMessageAdmissions?.entries)).toBeNull();
+
+      const reloaded = new AgentStorage(storagePath, logger);
+      const reloadedRecord = await reloaded.get(committedAgentId);
+      expect(reloadedRecord?.clientMessageAdmissions?.entries[messageId]).toEqual({
+        fingerprint: "fingerprint-a",
+        status: "committed",
+      });
+      expect(Object.getPrototypeOf(reloadedRecord?.clientMessageAdmissions?.entries)).toBeNull();
+      await expect(
+        reloaded.admitClientMessage(committedAgentId, messageId, "fingerprint-a"),
+      ).resolves.toBe("duplicate");
+      await expect(
+        reloaded.admitClientMessage(committedAgentId, messageId, "fingerprint-b"),
+      ).resolves.toBe("conflict");
+
+      const legacyAgentId = `agent-legacy-${messageId}`;
+      await storage.applySnapshot(createManagedAgent({ id: legacyAgentId }));
+      const legacyEntries = Object.create(null) as Record<
+        string,
+        { fingerprint: string; status: "legacy_unverifiable" }
+      >;
+      legacyEntries[messageId] = {
+        fingerprint: "legacy-unverifiable",
+        status: "legacy_unverifiable",
+      };
+      await storage.initializeClientMessageAdmissions(legacyAgentId, legacyEntries, false);
+
+      const legacyRecord = await storage.get(legacyAgentId);
+      expect(legacyRecord?.clientMessageAdmissions?.entries[messageId]).toEqual({
+        fingerprint: "legacy-unverifiable",
+        status: "legacy_unverifiable",
+      });
+      expect(Object.getPrototypeOf(legacyRecord?.clientMessageAdmissions?.entries)).toBeNull();
+      await expect(
+        storage.admitClientMessage(legacyAgentId, messageId, "legacy-unverifiable"),
+      ).resolves.toBe("legacy_unverifiable");
+
+      const legacyReloaded = new AgentStorage(storagePath, logger);
+      const legacyReloadedRecord = await legacyReloaded.get(legacyAgentId);
+      expect(legacyReloadedRecord?.clientMessageAdmissions?.entries[messageId]).toEqual({
+        fingerprint: "legacy-unverifiable",
+        status: "legacy_unverifiable",
+      });
+      expect(Object.getPrototypeOf(legacyReloadedRecord?.clientMessageAdmissions?.entries)).toBe(
+        null,
+      );
+      await expect(
+        legacyReloaded.admitClientMessage(legacyAgentId, messageId, "legacy-unverifiable"),
+      ).resolves.toBe("legacy_unverifiable");
+    },
+  );
 });

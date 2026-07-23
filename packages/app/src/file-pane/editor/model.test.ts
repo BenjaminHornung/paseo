@@ -73,8 +73,9 @@ class FileSession implements FileEditorSession {
 function ready(
   modifiedAt = "2026-07-18T00:00:00.000Z",
   size = 3,
+  revision?: string,
 ): Extract<FileVersion, { status: "ready" }> {
-  return { status: "ready", cwd: "/workspace", path: "file.ts", size, modifiedAt };
+  return { status: "ready", cwd: "/workspace", path: "file.ts", size, modifiedAt, revision };
 }
 
 function makeModel() {
@@ -105,6 +106,29 @@ describe("FileEditorModel", () => {
     model.receiveFileVersion({ ...ready(), revision: "precise-revision" });
 
     expect(model.getSnapshot().observedVersion).toMatchObject({ revision: "precise-revision" });
+  });
+
+  test("uses the initial preview revision on the first save before any subscription update", async () => {
+    const file = {
+      content: "one",
+      version: ready("2026-07-18T00:00:00.000Z", 3, "preview-rev-1") as Extract<
+        FileVersion,
+        { status: "ready" }
+      >,
+    };
+    const session = new FileSession(file);
+    const model = new FileEditorModel({ file, session, clock: new TestClock() });
+
+    model.edit("two");
+    await model.save();
+
+    expect(session.writes).toEqual([
+      {
+        content: "two",
+        expectedModifiedAt: "2026-07-18T00:00:00.000Z",
+        expectedRevision: "preview-rev-1",
+      },
+    ]);
   });
 
   test("keeps a newer edit modified when an older save finishes", async () => {

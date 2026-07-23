@@ -10,12 +10,27 @@ export type AgentUnarchiveController = Pick<AgentManager, "notifyAgentState" | "
 
 export type AgentRunController = Pick<
   AgentManager,
-  "getAgent" | "tryRunOutOfBand" | "hasInFlightRun" | "replaceAgentRun" | "streamAgent"
+  | "getAgent"
+  | "tryRunOutOfBand"
+  | "hasInFlightRun"
+  | "replaceAgentRun"
+  | "streamAgent"
+  | "waitForAgentRunStart"
 >;
 
 export interface StartAgentRunOptions {
   replaceRunning?: boolean;
   runOptions?: AgentRunOptions;
+}
+
+export interface StartAgentRunResult {
+  outOfBand: boolean;
+  startAcknowledged: AgentRunStartAcknowledgement;
+}
+
+export interface AgentRunStartAcknowledgement {
+  promise: Promise<void>;
+  abort: (reason?: unknown) => void;
 }
 
 export async function startAgentRun(
@@ -24,7 +39,7 @@ export async function startAgentRun(
   prompt: AgentPromptInput,
   logger: Logger,
   options?: StartAgentRunOptions,
-): Promise<{ outOfBand: boolean }> {
+): Promise<StartAgentRunResult> {
   const snapshot = agentManager.getAgent(agentId);
   logger.trace(
     {
@@ -42,7 +57,10 @@ export async function startAgentRun(
   // in-flight turn — replaceAgentRun would interrupt the running turn. The
   // intercept lives at this layer so it covers every prompt entrypoint.
   if (agentManager.tryRunOutOfBand(agentId, prompt)) {
-    return { outOfBand: true };
+    return {
+      outOfBand: true,
+      startAcknowledged: createResolvedStartAcknowledgement(),
+    };
   }
   const shouldReplace = Boolean(options?.replaceRunning && agentManager.hasInFlightRun(agentId));
   const runOptions = options?.runOptions;
@@ -58,6 +76,15 @@ export async function startAgentRun(
     },
     "agent.session.start_stream.iterator_returned",
   );
+  const startAcknowledgedAbort = new AbortController();
+  const startAcknowledged = {
+    promise: agentManager.waitForAgentRunStart(agentId, { signal: startAcknowledgedAbort.signal }),
+    abort: (reason?: unknown) => {
+      if (!startAcknowledgedAbort.signal.aborted) {
+        startAcknowledgedAbort.abort(reason ?? "aborted");
+      }
+    },
+  } satisfies AgentRunStartAcknowledgement;
   void (async () => {
     try {
       for await (const _ of iterator) {
@@ -84,7 +111,7 @@ export async function startAgentRun(
       logger.error({ err: error, agentId }, "Agent stream failed");
     }
   })();
-  return { outOfBand: false };
+  return { outOfBand: false, startAcknowledged };
 }
 
 /**
@@ -127,6 +154,8 @@ export interface SendPromptToAgentParams {
   prompt: AgentPromptInput;
   messageId?: string;
   runOptions?: AgentRunOptions;
+  /** Whether this send may interrupt an active foreground run. Defaults to true. */
+  replaceRunning?: boolean;
   /** Optional mode to set on the agent before the run starts. */
   sessionMode?: string;
   /**
@@ -136,6 +165,12 @@ export interface SendPromptToAgentParams {
    */
   unarchive?: boolean;
   logger: Logger;
+}
+
+export interface SendPromptToAgentResult {
+  outOfBand: boolean;
+  startAcknowledged: AgentRunStartAcknowledgement;
+  skippedReason?: "archived";
 }
 
 export interface StartCreatedAgentInitialPromptParams {
@@ -149,18 +184,80 @@ export interface StartCreatedAgentInitialPromptParams {
 
 const AGENT_RUN_START_TIMEOUT_MS = 15_000;
 
+export class AgentRunStartTimeoutError extends Error {
+  constructor() {
+    super(`Agent run start timed out after ${AGENT_RUN_START_TIMEOUT_MS}ms`);
+    this.name = "AgentRunStartTimeoutError";
+  }
+}
+
 export async function waitForAgentRunStartWithTimeout(
-  agentManager: AgentManager,
-  agentId: string,
+  startAcknowledged: AgentRunStartAcknowledgement,
 ): Promise<void> {
-  const startAbort = new AbortController();
-  const startTimeout = setTimeout(() => startAbort.abort("timeout"), AGENT_RUN_START_TIMEOUT_MS);
+  const startTimeout = setTimeout(
+    () => startAcknowledged.abort("timeout"),
+    AGENT_RUN_START_TIMEOUT_MS,
+  );
 
   try {
-    await agentManager.waitForAgentRunStart(agentId, { signal: startAbort.signal });
+    await startAcknowledged.promise;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.name === "AbortError" &&
+      error.message.toLowerCase().includes("timeout")
+    ) {
+      throw new AgentRunStartTimeoutError();
+    }
+    throw error;
   } finally {
     clearTimeout(startTimeout);
   }
+}
+
+interface BackgroundAgentRunStartOwnershipParams {
+  startAcknowledged: AgentRunStartAcknowledgement;
+  logger: Logger;
+  context: Record<string, unknown>;
+  timeoutMessage: string;
+  failureMessage: string;
+}
+
+function logAgentRunStartOwnershipFailure(
+  logger: Logger,
+  level: "warn" | "error",
+  context: Record<string, unknown>,
+  message: string,
+): void {
+  try {
+    logger[level](context, message);
+  } catch {
+    // Detached ownership must never rethrow from logging.
+  }
+}
+
+export function ownBackgroundAgentRunStart(params: BackgroundAgentRunStartOwnershipParams): void {
+  void (async () => {
+    try {
+      await waitForAgentRunStartWithTimeout(params.startAcknowledged);
+    } catch (error) {
+      if (error instanceof AgentRunStartTimeoutError) {
+        logAgentRunStartOwnershipFailure(
+          params.logger,
+          "warn",
+          { ...params.context, err: error },
+          params.timeoutMessage,
+        );
+        return;
+      }
+      logAgentRunStartOwnershipFailure(
+        params.logger,
+        "warn",
+        { ...params.context, err: error },
+        params.failureMessage,
+      );
+    }
+  })();
 }
 
 /**
@@ -171,18 +268,22 @@ export async function waitForAgentRunStartWithTimeout(
  * chat mentions, notify-on-finish) MUST go through this so behavior can never
  * drift between them.
  *
- * When `unarchive` is false and the agent is archived, the call is a silent
- * no-op (returns `{ outOfBand: false }`) — the agent is not run.
+ * When `unarchive` is false and the agent is archived, the call is a no-op
+ * with `skippedReason: "archived"` — the agent is not run.
  */
 export async function sendPromptToAgent(
   params: SendPromptToAgentParams,
-): Promise<{ outOfBand: boolean }> {
+): Promise<SendPromptToAgentResult> {
   const unarchive = params.unarchive ?? true;
 
   const record = await params.agentStorage.get(params.agentId);
   if (record?.archivedAt) {
     if (!unarchive) {
-      return { outOfBand: false };
+      return {
+        outOfBand: false,
+        startAcknowledged: createResolvedStartAcknowledgement(),
+        skippedReason: "archived",
+      };
     }
     await unarchiveAgentState(params.agentStorage, params.agentManager, params.agentId);
   }
@@ -198,11 +299,11 @@ export async function sendPromptToAgent(
   }
 
   const runOptions = params.messageId
-    ? { ...params.runOptions, clientMessageId: params.messageId }
+    ? { ...params.runOptions, messageId: params.messageId }
     : params.runOptions;
 
   return await startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
-    replaceRunning: true,
+    replaceRunning: params.replaceRunning ?? true,
     runOptions,
   });
 }
@@ -230,7 +331,7 @@ export async function startCreatedAgentInitialPrompt(
   );
 
   if (!dispatchResult.outOfBand) {
-    await waitForAgentRunStartWithTimeout(params.agentManager, params.agentId);
+    await waitForAgentRunStartWithTimeout(dispatchResult.startAcknowledged);
   }
 
   const refreshedSnapshot = params.agentManager.getAgent(params.agentId) ?? params.snapshot ?? null;
@@ -238,6 +339,13 @@ export async function startCreatedAgentInitialPrompt(
     throw new Error(`Agent ${params.agentId} not found`);
   }
   return refreshedSnapshot;
+}
+
+function createResolvedStartAcknowledgement(): AgentRunStartAcknowledgement {
+  return {
+    promise: Promise.resolve(),
+    abort: () => {},
+  };
 }
 
 export interface SetupFinishNotificationParams {
@@ -303,7 +411,7 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
       lastAssistantMessage,
     });
 
-    await sendPromptToAgent({
+    const dispatchResult = await sendPromptToAgent({
       agentManager,
       agentStorage,
       agentId: callerAgentId,
@@ -311,6 +419,15 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
       unarchive: false,
       logger,
     });
+    if (!dispatchResult.outOfBand && !dispatchResult.skippedReason) {
+      ownBackgroundAgentRunStart({
+        startAcknowledged: dispatchResult.startAcknowledged,
+        logger,
+        context: { childAgentId, callerAgentId, reason },
+        timeoutMessage: "Caller agent notification run did not acknowledge start before timeout",
+        failureMessage: "Caller agent notification run failed before start acknowledgement",
+      });
+    }
   }
 
   function notifySafely(reason: "finished" | "errored" | "needs permission"): void {
