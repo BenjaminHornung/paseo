@@ -43,6 +43,11 @@ import {
   type ListImportableSessionsOptions,
 } from "./agent-sdk-types.js";
 import { buildArchivedAgentRecord, type ArchivedStoredAgentRecord } from "./agent-archive.js";
+import {
+  assertAgentCwdExistsSync,
+  pathIsExistingDirectory,
+  resolveSafeReadRecoveryCwd,
+} from "./agent-cwd.js";
 import type { StoredAgentRecord, AgentStorage } from "./agent-storage.js";
 import type { AgentOwner } from "./agent-owner.js";
 import {
@@ -117,7 +122,21 @@ interface PreparedSessionConfig {
 
 interface NormalizeConfigOptions {
   resolveDefaultModel?: boolean;
+  resolveDefaultMode?: boolean;
   env?: Record<string, string>;
+  /** Disable only for persistence resume used to recover timeline/history. */
+  requireExistingCwd?: boolean;
+}
+
+export interface ResumeAgentFromPersistenceOptions {
+  createdAt?: Date;
+  updatedAt?: Date;
+  lastUserMessageAt?: Date | null;
+  labels?: Record<string, string>;
+  workspaceId?: string;
+  owner?: AgentOwner;
+  /** Allow a missing recorded cwd for timeline/log recovery only. */
+  allowMissingCwd?: boolean;
 }
 
 interface TimeoutOptions {
@@ -327,6 +346,12 @@ interface ManagedAgentBase {
   pendingReplacement: boolean;
   persistence: AgentPersistenceHandle | null;
   historyPrimed: boolean;
+  /**
+   * Runtime-only safety marker for sessions launched in a surviving ancestor
+   * solely to recover history after their recorded cwd disappeared. Such a
+   * session must never become writable, even if that pathname is recreated.
+   */
+  recoveryOnly?: boolean;
   lastUserMessageAt: Date | null;
   lastUsage?: AgentUsage;
   lastError?: string;
@@ -1070,14 +1095,7 @@ export class AgentManager {
     handle: AgentPersistenceHandle,
     overrides?: Partial<AgentSessionConfig>,
     agentId?: string,
-    options?: {
-      createdAt?: Date;
-      updatedAt?: Date;
-      lastUserMessageAt?: Date | null;
-      labels?: Record<string, string>;
-      workspaceId?: string;
-      owner?: AgentOwner;
-    },
+    options?: ResumeAgentFromPersistenceOptions,
   ): Promise<ManagedAgent> {
     return this.trackAgentRegistrationOperation(
       this.resumeAgentFromPersistenceInternal(handle, overrides, agentId, options),
@@ -1088,14 +1106,7 @@ export class AgentManager {
     handle: AgentPersistenceHandle,
     overrides?: Partial<AgentSessionConfig>,
     agentId?: string,
-    options?: {
-      createdAt?: Date;
-      updatedAt?: Date;
-      lastUserMessageAt?: Date | null;
-      labels?: Record<string, string>;
-      workspaceId?: string;
-      owner?: AgentOwner;
-    },
+    options?: ResumeAgentFromPersistenceOptions,
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
     const resolvedAgentId = validateAgentId(
@@ -1108,9 +1119,29 @@ export class AgentManager {
       ...overrides,
       provider: handle.provider,
     } as AgentSessionConfig;
+
+    let processCwd: string | undefined;
+    if (options?.allowMissingCwd && mergedConfig.cwd) {
+      const recordedExists = await pathIsExistingDirectory(mergedConfig.cwd);
+      if (!recordedExists) {
+        processCwd = resolveSafeReadRecoveryCwd(resolvedAgentId, mergedConfig.cwd);
+        this.logger.warn(
+          { agentId: resolvedAgentId, recordedCwd: mergedConfig.cwd, processCwd },
+          "Resuming agent for timeline recovery with process-launch-only cwd",
+        );
+      }
+    }
+
+    const isMissingCwdRecovery = processCwd !== undefined;
     const { storedConfig, launchConfig } = await this.prepareSessionConfig(
       mergedConfig,
       resolvedAgentId,
+      undefined,
+      {
+        requireExistingCwd: !isMissingCwdRecovery,
+        resolveDefaultModel: !isMissingCwdRecovery,
+        resolveDefaultMode: !isMissingCwdRecovery,
+      },
     );
 
     const client = this.requireClient(handle.provider);
@@ -1120,12 +1151,15 @@ export class AgentManager {
         `Provider '${handle.provider}' is not available. Please ensure the CLI is installed.`,
       );
     }
-    const launchContext = await this.buildLaunchContext(resolvedAgentId, client);
+    const launchContext = await this.buildLaunchContext(resolvedAgentId, client, undefined, {
+      processCwd,
+    });
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const session = await client.resumeSession(handle, providerLaunchConfig, launchContext);
     return this.registerSession(session, storedConfig, resolvedAgentId, {
       ...options,
       persistence: handle,
+      recoveryOnly: isMissingCwdRecovery,
     });
   }
 
@@ -1225,6 +1259,7 @@ export class AgentManager {
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
     let existing = this.requireSessionAgent(agentId);
+    this.assertAgentCwdRunnable(existing);
     if (this.hasInFlightRun(agentId)) {
       await this.cancelAgentRunBefore(agentId, "reload");
       existing = this.requireSessionAgent(agentId);
@@ -1578,6 +1613,7 @@ export class AgentManager {
 
   async setAgentMode(agentId: string, modeId: string): Promise<AgentProviderNotice | null> {
     const agent = this.requireSessionAgent(agentId);
+    this.assertAgentCwdRunnable(agent);
     const notice = (await agent.session.setMode(modeId)) ?? null;
     await this.drainSessionEvents(agentId);
     const currentMode = (await agent.session.getCurrentMode()) ?? modeId;
@@ -1594,6 +1630,7 @@ export class AgentManager {
 
   async setAgentModel(agentId: string, modelId: string | null): Promise<void> {
     const agent = this.requireSessionAgent(agentId);
+    this.assertAgentCwdRunnable(agent);
     const normalizedModelId =
       typeof modelId === "string" && modelId.trim().length > 0 ? modelId : null;
 
@@ -1615,6 +1652,7 @@ export class AgentManager {
     thinkingOptionId: string | null,
   ): Promise<AgentProviderNotice | null> {
     const agent = this.requireSessionAgent(agentId);
+    this.assertAgentCwdRunnable(agent);
     const normalizedThinkingOptionId =
       typeof thinkingOptionId === "string" && thinkingOptionId.trim().length > 0
         ? thinkingOptionId
@@ -1640,6 +1678,7 @@ export class AgentManager {
 
   async setAgentFeature(agentId: string, featureId: string, value: unknown): Promise<void> {
     const agent = this.requireAgent(agentId);
+    this.assertAgentCwdRunnable(agent);
 
     if (!agent.session.setFeature) {
       throw new Error("Agent session does not support setting features");
@@ -1913,6 +1952,7 @@ export class AgentManager {
    */
   tryRunOutOfBand(agentId: string, prompt: AgentPromptInput): boolean {
     const agent = this.requireSessionAgent(agentId);
+    this.assertAgentCwdRunnable(agent);
     const handler = agent.session.tryHandleOutOfBand?.(prompt);
     if (!handler) {
       return false;
@@ -1984,6 +2024,7 @@ export class AgentManager {
     options?: AgentRunOptions,
   ): AsyncGenerator<AgentStreamEvent> {
     const existingAgent = this.requireSessionAgent(agentId);
+    this.assertAgentCwdRunnable(existingAgent);
     this.logger.trace(
       {
         agentId,
@@ -2129,6 +2170,7 @@ export class AgentManager {
     options?: AgentRunOptions,
   ): Promise<AsyncGenerator<AgentStreamEvent>> {
     const snapshot = this.requireAgent(agentId);
+    this.assertAgentCwdRunnable(snapshot);
     if (
       snapshot.lifecycle !== "running" &&
       !snapshot.activeForegroundTurnId &&
@@ -2267,6 +2309,7 @@ export class AgentManager {
     response: AgentPermissionResponse,
   ): Promise<AgentPermissionResult | void> {
     const agent = this.requireAgent(agentId);
+    this.assertAgentCwdRunnable(agent);
     agent.inFlightPermissionResponses.add(requestId);
 
     try {
@@ -2411,6 +2454,7 @@ export class AgentManager {
 
   async rewind(agentId: string, messageId: string, mode: RewindMode): Promise<void> {
     const agent = this.requireSessionAgent(agentId);
+    this.assertAgentCwdRunnable(agent);
     if (this.hasInFlightRun(agentId)) {
       await this.cancelAgentRunBefore(agentId, "rewind");
     }
@@ -2714,6 +2758,7 @@ export class AgentManager {
       publishWhenReady?: boolean;
       workspaceId?: string;
       owner?: AgentOwner;
+      recoveryOnly?: boolean;
     },
   ): Promise<ManagedAgent> {
     let registered = false;
@@ -2742,6 +2787,7 @@ export class AgentManager {
         config,
         now,
         durableTimelineHasRows,
+        recoveryOnly: options?.recoveryOnly ?? false,
         options,
       });
 
@@ -2840,6 +2886,7 @@ export class AgentManager {
     config: AgentSessionConfig;
     now: Date;
     durableTimelineHasRows: boolean;
+    recoveryOnly: boolean;
     options:
       | {
           createdAt?: Date;
@@ -2856,7 +2903,8 @@ export class AgentManager {
         }
       | undefined;
   }): ActiveManagedAgent {
-    const { resolvedAgentId, session, config, now, durableTimelineHasRows, options } = params;
+    const { resolvedAgentId, session, config, now, durableTimelineHasRows, recoveryOnly, options } =
+      params;
     return {
       id: resolvedAgentId,
       provider: config.provider,
@@ -2885,6 +2933,7 @@ export class AgentManager {
         config.cwd,
       ),
       historyPrimed: options?.historyPrimed ?? durableTimelineHasRows,
+      recoveryOnly,
       lastUserMessageAt: options?.lastUserMessageAt ?? null,
       lastUsage: options?.lastUsage,
       lastError: options?.lastError,
@@ -4065,27 +4114,34 @@ export class AgentManager {
     options: NormalizeConfigOptions = {},
   ): Promise<AgentSessionConfig> {
     const normalized: AgentSessionConfig = { ...config };
+    const requireExistingCwd = options.requireExistingCwd ?? true;
 
     // Always resolve cwd to absolute path for consistent history file lookup
     if (normalized.cwd) {
       normalized.cwd = resolve(normalized.cwd);
-      try {
-        const cwdStats = await stat(normalized.cwd);
-        if (!cwdStats.isDirectory()) {
-          throw new Error(`Working directory is not a directory: ${normalized.cwd}`);
+      if (requireExistingCwd) {
+        try {
+          const cwdStats = await stat(normalized.cwd);
+          if (!cwdStats.isDirectory()) {
+            throw new Error(`Working directory is not a directory: ${normalized.cwd}`);
+          }
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            "code" in error &&
+            (error as NodeJS.ErrnoException).code === "ENOENT"
+          ) {
+            throw new Error(`Working directory does not exist: ${normalized.cwd}`, {
+              cause: error,
+            });
+          }
+          if (error instanceof Error) {
+            throw error;
+          }
+          throw new Error(`Failed to access working directory: ${normalized.cwd}`, {
+            cause: error,
+          });
         }
-      } catch (error) {
-        if (
-          error instanceof Error &&
-          "code" in error &&
-          (error as NodeJS.ErrnoException).code === "ENOENT"
-        ) {
-          throw new Error(`Working directory does not exist: ${normalized.cwd}`, { cause: error });
-        }
-        if (error instanceof Error) {
-          throw error;
-        }
-        throw new Error(`Failed to access working directory: ${normalized.cwd}`, { cause: error });
       }
     }
 
@@ -4102,11 +4158,17 @@ export class AgentManager {
       }
     }
 
-    if (!normalized.modeId) {
-      normalized.modeId = await this.resolveDefaultModeId(normalized, options.env);
-    }
+    await this.applyDefaultMode(normalized, options);
 
     return normalized;
+  }
+
+  private async applyDefaultMode(
+    config: AgentSessionConfig,
+    options: Pick<NormalizeConfigOptions, "env" | "resolveDefaultMode">,
+  ): Promise<void> {
+    if (config.modeId || options.resolveDefaultMode === false) return;
+    config.modeId = await this.resolveDefaultModeId(config, options.env);
   }
 
   private async resolveDefaultModeId(
@@ -4146,8 +4208,17 @@ export class AgentManager {
     config: AgentSessionConfig,
     agentId: string,
     env?: Record<string, string>,
+    options?: Pick<
+      NormalizeConfigOptions,
+      "requireExistingCwd" | "resolveDefaultModel" | "resolveDefaultMode"
+    >,
   ): Promise<PreparedSessionConfig> {
-    const storedConfig = await this.normalizeConfig(stripInternalPaseoMcpServer(config), { env });
+    const storedConfig = await this.normalizeConfig(stripInternalPaseoMcpServer(config), {
+      env,
+      requireExistingCwd: options?.requireExistingCwd,
+      resolveDefaultModel: options?.resolveDefaultModel,
+      resolveDefaultMode: options?.resolveDefaultMode,
+    });
     const launchConfig = this.applyDaemonAppendSystemPrompt(
       withRuntimePaseoMcpServer({
         config: storedConfig,
@@ -4176,6 +4247,7 @@ export class AgentManager {
     agentId: string,
     client: AgentClient,
     env?: Record<string, string>,
+    options?: { processCwd?: string },
   ): Promise<AgentLaunchContext> {
     const context: AgentLaunchContext = {
       agentId,
@@ -4183,6 +4255,7 @@ export class AgentManager {
         ...env,
         PASEO_AGENT_ID: agentId,
       },
+      ...(options?.processCwd ? { processCwd: options.processCwd } : {}),
     };
     if (
       this.paseoToolsEnabled &&
@@ -4292,6 +4365,15 @@ export class AgentManager {
       throw new Error(`Agent '${agent.id}' has no managed session`);
     }
     return agent;
+  }
+
+  private assertAgentCwdRunnable(agent: { id: string; cwd: string; recoveryOnly?: boolean }): void {
+    assertAgentCwdExistsSync(agent.id, agent.cwd);
+    if (agent.recoveryOnly) {
+      throw new Error(
+        `Agent ${agent.id} was loaded for history recovery only and cannot run new work; reload it from its recorded working directory`,
+      );
+    }
   }
 
   private requirePublicAgent(id: string): LiveManagedAgent {

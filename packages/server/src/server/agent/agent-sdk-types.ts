@@ -588,6 +588,12 @@ export interface AgentLaunchContext {
   agentId?: string;
   env?: Record<string, string>;
   /**
+   * Runtime-only, non-persisted cwd for provider process launch and recovery
+   * loadSession/unstable_resumeSession calls; AgentSessionConfig.cwd remains
+   * the logical recorded cwd.
+   */
+  processCwd?: string;
+  /**
    * Runtime-only internal Paseo tools. This must never be persisted into
    * AgentSessionConfig; providers may adapt it to their native tool surface.
    */

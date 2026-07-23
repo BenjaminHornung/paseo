@@ -531,6 +531,7 @@ function buildResumeStartInput(input: {
 }): PiStartSessionInput {
   return {
     cwd: input.resumeConfig.cwd,
+    ...(input.launchContext?.processCwd ? { processCwd: input.launchContext.processCwd } : {}),
     env: input.launchContext?.env,
     session: input.sessionFile,
     model: input.resumeConfig.model,
@@ -2310,7 +2311,11 @@ export class PiRpcAgentClient implements AgentClient {
       ...this.runtimeSettings?.env,
       ...launchContext?.env,
     };
-    const mcpConfig = await this.prepareMcpConfig(config.cwd, config.mcpServers, mcpEnv);
+    const mcpConfig = await this.prepareMcpConfig(
+      launchContext?.processCwd ?? config.cwd,
+      config.mcpServers,
+      mcpEnv,
+    );
     const paseoExtension = createPiPaseoExtensionFile(
       composeSystemPromptParts(config.systemPrompt, config.daemonAppendSystemPrompt),
     );
@@ -2318,6 +2323,7 @@ export class PiRpcAgentClient implements AgentClient {
     try {
       runtimeSession = await this.runtime.startSession({
         cwd: config.cwd,
+        ...(launchContext?.processCwd ? { processCwd: launchContext.processCwd } : {}),
         model: config.model,
         thinkingOptionId:
           normalizePiThinkingOption(config.thinkingOptionId) ?? DEFAULT_PI_THINKING_LEVEL,
@@ -2366,7 +2372,7 @@ export class PiRpcAgentClient implements AgentClient {
       ...launchContext?.env,
     };
     const mcpConfig = await this.prepareMcpConfig(
-      resumeConfig.cwd,
+      launchContext?.processCwd ?? resumeConfig.cwd,
       resumeConfig.config.mcpServers,
       mcpEnv,
     );
@@ -2487,14 +2493,14 @@ export class PiRpcAgentClient implements AgentClient {
   }
 
   private async prepareMcpConfig(
-    cwd: string,
+    probeCwd: string,
     servers: Record<string, McpServerConfig> | undefined,
     env: Record<string, string> | undefined,
   ): Promise<PiMcpConfigFile | null> {
     if (!servers || Object.keys(servers).length === 0) {
       return null;
     }
-    if (!(await this.detectMcpAdapter(cwd, env))) {
+    if (!(await this.detectMcpAdapter(probeCwd, env))) {
       return null;
     }
     return createPiMcpConfigFile(servers, { piGlobalConfigEnv: env });

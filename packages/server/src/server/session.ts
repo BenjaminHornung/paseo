@@ -5808,6 +5808,7 @@ export class Session {
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         logger: this.sessionLogger,
+        allowMissingCwd: true,
       });
       const agentPayload = await this.buildAgentPayload(snapshot);
 

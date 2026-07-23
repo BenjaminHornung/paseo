@@ -150,6 +150,25 @@ describe("PiCliRuntime", () => {
     ]);
   });
 
+  test("uses processCwd only for process launch", async () => {
+    const child = createPiChild();
+    replyToCommands(child, () => ({}));
+    const launches: PiRuntimeLaunch[] = [];
+    const runtime = createRuntime(child, launches);
+
+    await runtime.startSession({
+      cwd: "/missing/worktree-path",
+      processCwd: "/workspace/safe-parent",
+    });
+
+    expect(launches).toEqual([
+      expect.objectContaining({
+        cwd: "/workspace/safe-parent",
+        argv: ["pi", "--mode", "rpc"],
+      }),
+    ]);
+  });
+
   test("passes an MCP config path to Pi", async () => {
     const child = createPiChild();
     replyToCommands(child, () => ({}));

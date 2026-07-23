@@ -1,6 +1,6 @@
 import { expect, test, vi } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -116,6 +116,7 @@ class TestAgentClient implements AgentClient {
   readonly capabilities = TEST_CAPABILITIES;
   readonly createdConfigs: AgentSessionConfig[] = [];
   readonly resumeOverrides: Array<Partial<AgentSessionConfig> | undefined> = [];
+  readonly resumeLaunchContexts: Array<AgentLaunchContext | undefined> = [];
 
   constructor(provider: AgentProvider = "codex") {
     this.provider = provider;
@@ -157,9 +158,10 @@ class TestAgentClient implements AgentClient {
   async resumeSession(
     _handle: AgentPersistenceHandle,
     config?: Partial<AgentSessionConfig>,
-    _launchContext?: AgentLaunchContext,
+    launchContext?: AgentLaunchContext,
   ): Promise<AgentSession> {
     this.resumeOverrides.push(config);
+    this.resumeLaunchContexts.push(launchContext);
     return new TestAgentSession({
       provider: this.provider,
       cwd: config?.cwd ?? process.cwd(),
@@ -2127,6 +2129,102 @@ test("createAgent fails when cwd does not exist", async () => {
       { workspaceId: undefined },
     ),
   ).rejects.toThrow("Working directory does not exist");
+});
+
+test("missing-cwd history resume preserves logical cwd and isolates process cwd", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-recovery-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const client = new TestAgentClient();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+  const missingCwd = join(workdir, "deleted-worktree");
+  const agentId = "11111111-1111-4111-8111-111111111111";
+  const handle = {
+    provider: "codex" as const,
+    sessionId: "thread-missing-cwd",
+    metadata: { provider: "codex", cwd: missingCwd },
+  };
+
+  await expect(
+    manager.resumeAgentFromPersistence(handle, { cwd: missingCwd }, agentId),
+  ).rejects.toThrow("Working directory does not exist");
+
+  const resumed = await manager.resumeAgentFromPersistence(handle, { cwd: missingCwd }, agentId, {
+    allowMissingCwd: true,
+  });
+  expect(resumed.cwd).toBe(missingCwd);
+  expect(resumed.config.cwd).toBe(missingCwd);
+  expect(client.resumeOverrides[0]?.cwd).toBe(missingCwd);
+  const processCwd = client.resumeLaunchContexts[0]?.processCwd;
+  expect(processCwd).toBe(realpathSync.native(workdir));
+  expect(existsSync(processCwd!)).toBe(true);
+
+  expect(() => manager.streamAgent(agentId, "continue")).toThrow(/working directory is missing/i);
+  expect(() => manager.tryRunOutOfBand(agentId, "/goal pause")).toThrow(
+    /working directory is missing/i,
+  );
+  await expect(manager.replaceAgentRun(agentId, "replace")).rejects.toThrow(
+    /working directory is missing/i,
+  );
+
+  mkdirSync(missingCwd);
+  expect(() => manager.streamAgent(agentId, "continue after recreation")).toThrow(
+    /history recovery only/i,
+  );
+  expect(() => manager.tryRunOutOfBand(agentId, "/goal pause")).toThrow(/history recovery only/i);
+  await expect(manager.replaceAgentRun(agentId, "replace after recreation")).rejects.toThrow(
+    /history recovery only/i,
+  );
+  await expect(manager.reloadAgentSession(agentId)).rejects.toThrow(/history recovery only/i);
+  await expect(manager.setAgentMode(agentId, "default")).rejects.toThrow(/history recovery only/i);
+  await expect(
+    manager.respondToPermission(agentId, "permission-1", { behavior: "deny" }),
+  ).rejects.toThrow(/history recovery only/i);
+  for (const mode of ["conversation", "files", "both"] as const) {
+    await expect(manager.rewind(agentId, "message-1", mode)).rejects.toThrow(
+      /history recovery only/i,
+    );
+  }
+  expect(client.resumeOverrides).toHaveLength(1);
+});
+
+test.each([
+  { label: "missing", model: undefined, agentId: "33333333-3333-4333-8333-333333333333" },
+  { label: "legacy default", model: "default", agentId: "44444444-4444-4444-8444-444444444444" },
+])("missing-cwd recovery skips $label model and mode probes", async ({ model, agentId }) => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-recovery-probes-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class ProbeTrackingClient extends TestAgentClient {
+    readonly defaultModeProbe = vi.fn(async () => "auto");
+
+    override async resolveDefaultModeId(input: ResolveAgentDefaultModeInput): Promise<string> {
+      return await this.defaultModeProbe(input);
+    }
+  }
+
+  const client = new ProbeTrackingClient();
+  const catalogProbe = vi.spyOn(client, "fetchCatalog");
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+  const missingCwd = join(workdir, "deleted-worktree");
+  const handle = {
+    provider: "codex" as const,
+    sessionId: `thread-${agentId}`,
+    metadata: { provider: "codex", cwd: missingCwd, model },
+  };
+
+  const resumed = await manager.resumeAgentFromPersistence(
+    handle,
+    { cwd: missingCwd, model },
+    agentId,
+    { allowMissingCwd: true },
+  );
+
+  expect(catalogProbe).not.toHaveBeenCalled();
+  expect(client.defaultModeProbe).not.toHaveBeenCalled();
+  expect(client.resumeLaunchContexts[0]?.processCwd).toBe(realpathSync.native(workdir));
+  expect(resumed.cwd).toBe(missingCwd);
+  expect(resumed.config.cwd).toBe(missingCwd);
+  expect(client.resumeOverrides[0]?.cwd).toBe(missingCwd);
 });
 
 test("createAgent reports configured providers when provider is unknown", async () => {
