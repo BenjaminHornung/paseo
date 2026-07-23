@@ -7,7 +7,7 @@ export const PaseoServicePortAllocationSchema = z
     range: z.string().trim().regex(TCP_PORT_RANGE_PATTERN).optional(),
     portScript: z.string().trim().min(1).optional(),
   })
-  .strict()
+  .passthrough()
   .refine(
     (value) => value.range !== undefined || value.portScript !== undefined,
     "Expected range or portScript",

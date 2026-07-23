@@ -227,6 +227,11 @@ Single file, validated with `PersistedConfigSchema`.
 
 All fields are optional with sensible defaults.
 
+Known fields are still type-checked, while unrecognized object fields are retained. This lets an
+older daemon read a config written by a newer Paseo version without losing future settings when it
+updates a password or another mutable setting. Fields that were explicitly removed remain subject
+to their documented compatibility migration instead of being retained as unknown data.
+
 `agents.metadataGeneration.providers` controls the preferred structured-generation fallback order for daemon-side metadata tasks such as commit messages, PR text, branch names, and generated agent titles. Entries are tried first in the configured order, then Paseo falls through to dynamically discovered defaults and finally the current selection when available.
 
 Local speech model ids are intentionally narrow: STT uses `parakeet-tdt-0.6b-v2-int8`, TTS uses `kokoro-en-v0_19`, and turn detection uses the bundled Silero VAD model.

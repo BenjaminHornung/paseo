@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -597,8 +597,8 @@ describe("PersistedConfigSchema logging config", () => {
     expect(parsed.log?.format).toBe("json");
   });
 
-  test("rejects unknown logging config fields", () => {
-    const result = PersistedConfigSchema.safeParse({
+  test("preserves unknown logging config fields", () => {
+    const parsed = PersistedConfigSchema.parse({
       log: {
         console: {
           level: "info",
@@ -607,7 +607,7 @@ describe("PersistedConfigSchema logging config", () => {
       },
     });
 
-    expect(result.success).toBe(false);
+    expect(parsed.log?.console).toEqual({ level: "info", color: "red" });
   });
 });
 
@@ -677,6 +677,139 @@ describe("loadPersistedConfig", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  test("preserves unrecognized fields across load and save", () => {
+    const home = createTempHome();
+    const configPath = path.join(home, "config.json");
+    try {
+      writeFileSync(
+        configPath,
+        `${JSON.stringify(
+          {
+            version: 1,
+            futureRootSetting: { enabled: true },
+            daemon: {
+              listen: "127.0.0.1:6767",
+              futureDaemonSetting: "keep",
+              relay: {
+                enabled: true,
+                futureRelaySetting: { transport: "quic" },
+              },
+            },
+            worktrees: {
+              futureWorktreeSetting: true,
+              servicePorts: {
+                range: "41000-41100",
+                futurePortSetting: "reserved",
+              },
+            },
+            agents: {
+              futureAgentsSetting: "keep",
+              providers: {
+                claude: {
+                  enabled: true,
+                  futureProviderSetting: { fast: true },
+                  models: [
+                    {
+                      id: "future-model",
+                      label: "Future model",
+                      futureModelSetting: 42,
+                      thinkingOptions: [
+                        {
+                          id: "deep",
+                          label: "Deep",
+                          futureThinkingSetting: true,
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+              metadataGeneration: {
+                futureMetadataSetting: true,
+                providers: [
+                  {
+                    provider: "claude",
+                    futureMetadataProviderSetting: "keep",
+                  },
+                ],
+              },
+            },
+            log: {
+              console: {
+                level: "info",
+                futureConsoleSetting: "keep",
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      const loaded = loadPersistedConfig(home) as Record<string, unknown>;
+      expect(loaded.futureRootSetting).toEqual({ enabled: true });
+      expect(
+        ((loaded.daemon as Record<string, unknown>).relay as Record<string, unknown>)
+          .futureRelaySetting,
+      ).toEqual({ transport: "quic" });
+
+      savePersistedConfig(home, {
+        ...(loaded as ReturnType<typeof loadPersistedConfig>),
+        daemon: {
+          ...(loaded.daemon as ReturnType<typeof loadPersistedConfig>["daemon"]),
+          listen: "127.0.0.1:7777",
+        },
+      });
+
+      const saved = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+      const daemon = saved.daemon as Record<string, unknown>;
+      const worktrees = saved.worktrees as Record<string, unknown>;
+      const servicePorts = worktrees.servicePorts as Record<string, unknown>;
+      const agents = saved.agents as Record<string, unknown>;
+      const providers = agents.providers as Record<string, Record<string, unknown>>;
+      const claude = providers.claude;
+      const model = (claude.models as Array<Record<string, unknown>>)[0];
+      const thinking = (model.thinkingOptions as Array<Record<string, unknown>>)[0];
+      const metadata = agents.metadataGeneration as Record<string, unknown>;
+      const metadataProvider = (metadata.providers as Array<Record<string, unknown>>)[0];
+      const log = saved.log as Record<string, unknown>;
+      const consoleConfig = log.console as Record<string, unknown>;
+
+      expect(daemon.listen).toBe("127.0.0.1:7777");
+      expect(saved.futureRootSetting).toEqual({ enabled: true });
+      expect(daemon.futureDaemonSetting).toBe("keep");
+      expect((daemon.relay as Record<string, unknown>).futureRelaySetting).toEqual({
+        transport: "quic",
+      });
+      expect(worktrees.futureWorktreeSetting).toBe(true);
+      expect(servicePorts.futurePortSetting).toBe("reserved");
+      expect(agents.futureAgentsSetting).toBe("keep");
+      expect(claude.futureProviderSetting).toEqual({ fast: true });
+      expect(model.futureModelSetting).toBe(42);
+      expect(thinking.futureThinkingSetting).toBe(true);
+      expect(metadata.futureMetadataSetting).toBe(true);
+      expect(metadataProvider.futureMetadataProviderSetting).toBe("keep");
+      expect(consoleConfig.futureConsoleSetting).toBe("keep");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("still rejects malformed known fields when unknown fields are present", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({
+        futureRootSetting: true,
+        daemon: {
+          futureDaemonSetting: true,
+          relay: {
+            enabled: "yes",
+            futureRelaySetting: true,
+          },
+        },
+      }),
+    ).toThrow();
   });
 
   test("loads a config that still uses the removed providers.openai.voice block", () => {

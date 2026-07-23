@@ -14,6 +14,11 @@ export type { MutableDaemonConfig, MutableDaemonConfigPatch } from "@getpaseo/pr
 type MutableDaemonConfig = import("@getpaseo/protocol/messages").MutableDaemonConfig;
 type MutableDaemonConfigPatch = import("@getpaseo/protocol/messages").MutableDaemonConfigPatch;
 type ProviderOverride = import("./agent/provider-launch-config.js").ProviderOverride;
+type MetadataGenerationProvider = {
+  provider: string;
+  model?: string;
+  thinkingOptionId?: string;
+} & Record<string, unknown>;
 
 interface LoggerLike {
   child(bindings: Record<string, unknown>): LoggerLike;
@@ -274,9 +279,10 @@ function mergeMutableConfigIntoPersistedConfig(params: {
     mutable.providers,
   );
   const persistedAgents = omitProvidersFromPersistedAgents(persisted.agents);
-  const persistedMetadataGeneration = {
-    providers: metadataGenerationProviders,
-  };
+  const persistedMetadataGeneration = mergeMetadataGenerationConfig(
+    persisted.agents?.metadataGeneration,
+    metadataGenerationProviders,
+  );
   const shouldPersistMetadataGeneration =
     metadataGenerationProviders.length > 0 || persisted.agents?.metadataGeneration !== undefined;
 
@@ -329,7 +335,7 @@ function readBrowserToolsEnabled(mutable: MutableDaemonConfig): boolean {
 
 function readMetadataGenerationProviders(
   mutable: MutableDaemonConfig,
-): Array<{ provider: string; model?: string; thinkingOptionId?: string }> {
+): MetadataGenerationProvider[] {
   const metadataGeneration = mutable.metadataGeneration;
   if (!isRecord(metadataGeneration)) {
     return [];
@@ -342,8 +348,15 @@ function readMetadataGenerationProviders(
     if (!isRecord(entry) || typeof entry["provider"] !== "string") {
       return [];
     }
+    const {
+      provider: _provider,
+      model: _model,
+      thinkingOptionId: _thinkingOptionId,
+      ...rest
+    } = entry;
     return [
       {
+        ...rest,
         provider: entry["provider"],
         ...(typeof entry["model"] === "string" ? { model: entry["model"] } : {}),
         ...(typeof entry["thinkingOptionId"] === "string"
@@ -352,4 +365,44 @@ function readMetadataGenerationProviders(
       },
     ];
   });
+}
+
+function mergeMetadataGenerationConfig(
+  persistedMetadataGeneration: unknown,
+  mutableProviders: readonly MetadataGenerationProvider[],
+): Record<string, unknown> & { providers: MetadataGenerationProvider[] } {
+  const persistedRoot: Record<string, unknown> = isRecord(persistedMetadataGeneration)
+    ? persistedMetadataGeneration
+    : {};
+  const persistedProvidersById = new Map<string, Record<string, unknown>>();
+
+  const persistedProviders = persistedRoot["providers"];
+  if (Array.isArray(persistedProviders)) {
+    for (const entry of persistedProviders) {
+      if (!isRecord(entry) || typeof entry["provider"] !== "string") {
+        continue;
+      }
+      persistedProvidersById.set(entry["provider"], entry);
+    }
+  }
+
+  const { providers: _persistedProviders, ...persistedRootUnknownFields } = persistedRoot;
+  const nextProviders = mutableProviders.map((entry) => {
+    const persistedEntry = persistedProvidersById.get(entry.provider) ?? {};
+    const {
+      provider: _persistedProvider,
+      model: _persistedModel,
+      thinkingOptionId: _persistedThinkingOptionId,
+      ...persistedUnknownFields
+    } = persistedEntry;
+    return {
+      ...persistedUnknownFields,
+      ...entry,
+    };
+  });
+
+  return {
+    ...persistedRootUnknownFields,
+    providers: nextProviders,
+  };
 }
