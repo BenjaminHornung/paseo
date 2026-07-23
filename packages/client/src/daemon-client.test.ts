@@ -1,6 +1,11 @@
 import { afterEach, expect, expectTypeOf, test, vi } from "vitest";
 import { z } from "zod";
-import { DaemonClient, type DaemonTransport, type Logger } from "./daemon-client";
+import {
+  AgentCreateRejectedError,
+  DaemonClient,
+  type DaemonTransport,
+  type Logger,
+} from "./daemon-client";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 import { BROWSER_AUTOMATION_COMMAND_NAMES } from "@getpaseo/protocol/browser-automation/rpc-schemas";
 import {
@@ -2038,7 +2043,51 @@ test("sends create_agent_request with workspace and caller identity", async () =
     }),
   );
 
-  await expect(createPromise).rejects.toThrow("compat test sentinel");
+  await expect(createPromise).rejects.toEqual(new Error("compat test sentinel"));
+});
+
+test("classifies only explicitly uncreated agent failures as definitive rejections", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const createPromise = client.createAgent({
+    provider: "codex",
+    cwd: "/tmp/project",
+    title: "Rejected agent",
+  });
+  const request = parseSentFrame(mock.sent[0]);
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "status",
+      payload: {
+        status: "agent_create_failed",
+        requestId: request.requestId,
+        error: "definitive rejection",
+        agentCreated: false,
+      },
+    }),
+  );
+
+  await expect(createPromise).rejects.toMatchObject({
+    name: "AgentCreateRejectedError",
+    code: "AGENT_CREATE_REJECTED",
+    message: "definitive rejection",
+    requestId: request.requestId,
+  } satisfies Partial<AgentCreateRejectedError>);
 });
 
 test("sends worktree target and autoArchive in create_agent_request", async () => {

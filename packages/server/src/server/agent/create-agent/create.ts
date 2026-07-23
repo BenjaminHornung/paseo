@@ -68,6 +68,7 @@ export interface CreateAgentFromSessionInput {
   env?: Record<string, string>;
   provisionalTitle: string | null;
   firstAgentContext: FirstAgentContext;
+  onAgentRegistered?: (agentId: string) => void;
   buildSessionConfig: (
     config: AgentSessionConfig,
     gitOptions?: GitSetupOptions,
@@ -287,6 +288,7 @@ async function resolveSessionCreateAgent(
       // agent belongs to that workspace, not the source one. createdWorkspaceId
       // is the freshly created worktree's workspace.
       workspaceId: requireResolvedWorkspaceId(workspaceId),
+      onRegistered: input.onAgentRegistered,
     },
     prompt: hasPromptContent ? prompt : undefined,
     runOptions,

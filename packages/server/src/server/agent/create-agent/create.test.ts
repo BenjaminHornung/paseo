@@ -40,6 +40,35 @@ function fakeWorktreeCreator(args: { repoRoot: string; createdWorkspaceId: strin
     }) as unknown as CreatePaseoWorktreeWorkflowResult;
 }
 
+test("agent manager reports registration only after the agent enters the live registry", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-registration-boundary-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const agentId = "11111111-1111-4111-8111-111111111111";
+  const agentManager = new AgentManager({
+    clients: createTestAgentClients(),
+    registry: storage,
+    logger,
+    idFactory: () => agentId,
+  });
+
+  try {
+    await expect(
+      agentManager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+        workspaceId: "workspace-registration-boundary",
+        onRegistered: (registeredAgentId) => {
+          expect(registeredAgentId).toBe(agentId);
+          expect(agentManager.getAgent(registeredAgentId)?.id).toBe(agentId);
+          throw new Error("post-registration sentinel");
+        },
+      }),
+    ).rejects.toThrow("post-registration sentinel");
+
+    expect(agentManager.getAgent(agentId)?.id).toBe(agentId);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("session create forwards clientMessageId to the initial prompt run options", async () => {
   const snapshot = {
     id: "agent-1",
@@ -77,6 +106,50 @@ test("session create forwards clientMessageId to the initial prompt run options"
   expect(streamAgent).toHaveBeenCalledWith("agent-1", "hello from create", {
     clientMessageId: "msg-create-1",
   });
+});
+
+test("session create reports registration before an initial prompt startup failure", async () => {
+  const snapshot = {
+    id: "agent-registered-before-prompt",
+    provider: "codex",
+    cwd: "/tmp/paseo-create-test",
+    runtimeInfo: null,
+  } as ManagedAgent;
+  const onAgentRegistered = vi.fn();
+  const dependencies: Parameters<typeof createAgentCommand>[0] = {
+    agentManager: {
+      createAgent: vi.fn(async (_config, _agentId, options) => {
+        options.onRegistered?.(snapshot.id);
+        return snapshot;
+      }),
+      getAgent: vi.fn(() => snapshot),
+      tryRunOutOfBand: vi.fn(() => false),
+      hasInFlightRun: vi.fn(() => false),
+      streamAgent: vi.fn(() => (async function* noop() {})()),
+      waitForAgentRunStart: vi.fn(async () => {
+        throw new Error("initial prompt failed to start");
+      }),
+    } as unknown as Parameters<typeof createAgentCommand>[0]["agentManager"],
+    agentStorage: {} as Parameters<typeof createAgentCommand>[0]["agentStorage"],
+    logger: createTestLogger(),
+    providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+  };
+
+  await expect(
+    createAgentCommand(dependencies, {
+      kind: "session",
+      config: { provider: "codex", cwd: "/tmp/paseo-create-test" },
+      workspaceId: "ws-create-test",
+      initialPrompt: "hello from create",
+      labels: {},
+      provisionalTitle: null,
+      firstAgentContext: { attachments: [] },
+      buildSessionConfig: async (config) => ({ sessionConfig: config }),
+      onAgentRegistered,
+    }),
+  ).rejects.toThrow("initial prompt failed to start");
+
+  expect(onAgentRegistered).toHaveBeenCalledWith(snapshot.id);
 });
 
 test("session create validates the requested mode against the provider's modes", async () => {

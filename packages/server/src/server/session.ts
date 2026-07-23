@@ -2894,6 +2894,9 @@ export class Session {
           env,
           provisionalTitle,
           firstAgentContext,
+          onAgentRegistered: (agentId) => {
+            createdAgentId = agentId;
+          },
           buildSessionConfig: (sessionConfig, gitOptions, legacyWorktreeName, ctx) =>
             this.buildAgentSessionConfig(sessionConfig, gitOptions, legacyWorktreeName, ctx),
         },
@@ -2947,6 +2950,7 @@ export class Session {
             requestId,
             error: wireError.message,
             errorCode: wireError.code,
+            ...(createdAgentId === null ? { agentCreated: false as const } : {}),
           },
         });
       }
