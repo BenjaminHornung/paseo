@@ -3,6 +3,7 @@ import {
   extensionFromPath,
   highlightToKeyedLines,
   MAX_HIGHLIGHT_CHARS,
+  splitToKeyedPlainLines,
   tokenizeToLines,
 } from "./highlight-cache";
 
@@ -61,5 +62,24 @@ describe("highlightToKeyedLines", () => {
 
   it("returns null when highlighting is unavailable", () => {
     expect(highlightToKeyedLines("text", null)).toBeNull();
+  });
+});
+
+describe("splitToKeyedPlainLines", () => {
+  it("preserves whitespace, duplicate lines, and empty lines", () => {
+    expect(splitToKeyedPlainLines("  same\n\n  same")).toEqual([
+      { key: "line-0", text: "  same" },
+      { key: "line-1", text: "" },
+      { key: "line-2", text: "  same" },
+    ]);
+  });
+
+  it("uses bounded positional keys for very long lines", () => {
+    const longLine = "x".repeat(50_000);
+
+    expect(splitToKeyedPlainLines(`${longLine}\n${longLine}`).map(({ key }) => key)).toEqual([
+      "line-0",
+      "line-1",
+    ]);
   });
 });

@@ -15,6 +15,11 @@ export interface KeyedLine {
   tokens: KeyedToken[];
 }
 
+export interface KeyedPlainLine {
+  key: string;
+  text: string;
+}
+
 // Above this, highlighting a whole document on the main thread risks a visible
 // stall when a large Read/Write block is expanded. Callers fall back to plain
 // monospace text. Generous enough to cover the vast majority of real blocks.
@@ -76,6 +81,15 @@ function toKeyedLine(tokens: HighlightToken[], lineIndex: number): KeyedLine {
 export function highlightToKeyedLines(code: string, ext: string | null): KeyedLine[] | null {
   const lines = tokenizeToLines(code, ext);
   return lines ? lines.map(toKeyedLine) : null;
+}
+
+// Keep keys bounded and independent of line contents. Long or repeated lines
+// are common in generated output and must not become React keys themselves.
+export function splitToKeyedPlainLines(code: string): KeyedPlainLine[] {
+  return code.split("\n").map((text, lineIndex) => ({
+    key: `line-${lineIndex}`,
+    text,
+  }));
 }
 
 // Extension for grammar selection from a file path. We only need the suffix —

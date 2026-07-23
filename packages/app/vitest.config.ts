@@ -13,6 +13,13 @@ const resolvePackageEntry = (packageName: string) => {
 };
 
 export default defineConfig({
+  esbuild: {
+    jsx: "automatic",
+  },
+  optimizeDeps: {
+    exclude: ["expo-clipboard"],
+    include: ["react/jsx-dev-runtime"],
+  },
   test: {
     environment: "node",
     exclude: [...configDefaults.exclude, "e2e/**"],
