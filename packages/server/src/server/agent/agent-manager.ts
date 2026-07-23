@@ -43,7 +43,13 @@ import {
   type ListImportableSessionsOptions,
 } from "./agent-sdk-types.js";
 import { buildArchivedAgentRecord, type ArchivedStoredAgentRecord } from "./agent-archive.js";
-import type { StoredAgentRecord, AgentStorage } from "./agent-storage.js";
+import {
+  MAX_CLIENT_MESSAGE_ADMISSIONS,
+  MAX_CLIENT_MESSAGE_ID_LENGTH,
+  type ClientMessageAdmissionDisposition,
+  type StoredAgentRecord,
+  type AgentStorage,
+} from "./agent-storage.js";
 import type { AgentOwner } from "./agent-owner.js";
 import {
   InMemoryAgentTimelineStore,
@@ -66,6 +72,8 @@ import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
 import { isSystemInjectedEnvelope } from "./agent-prompt.js";
 import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
+import { normalizeClientMessageId } from "../client-message-id.js";
+import { fingerprintAgentPrompt } from "./agent-prompt-fingerprint.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
 import {
   ProviderSubagentStore,
@@ -269,6 +277,33 @@ export interface WaitForAgentResult {
 
 export interface WaitForAgentStartOptions {
   signal?: AbortSignal;
+}
+
+export interface ClientMessageAdmission {
+  disposition:
+    | "new"
+    | "duplicate"
+    | "conflict"
+    | "in_flight"
+    | "pending"
+    | "capacity"
+    | "legacy_unverifiable"
+    | "legacy_load_required";
+  messageId?: string;
+  fingerprint?: string;
+  completion?: Promise<ClientMessageDispatchOutcome>;
+  error?: string;
+}
+
+export interface ClientMessageDispatchOutcome {
+  accepted: boolean;
+  error: string | null;
+}
+
+interface InFlightClientMessageAdmission {
+  fingerprint: string;
+  completion: Promise<ClientMessageDispatchOutcome>;
+  resolve: (outcome: ClientMessageDispatchOutcome) => void;
 }
 
 type AttentionState =
@@ -585,6 +620,12 @@ export class AgentManager {
   private readonly backgroundTasks = new Set<Promise<void>>();
   private readonly agentRegistrationTasks = new Set<Promise<void>>();
   private readonly inFlightAgentCloses = new Map<string, Promise<void>>();
+  private readonly transientClientMessageAdmissions = new Map<string, Map<string, string>>();
+  private readonly inFlightClientMessageAdmissions = new Map<
+    string,
+    InFlightClientMessageAdmission
+  >();
+  private readonly clientMessageAdmissionLocks = new Map<string, Promise<void>>();
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
   private readonly mcpAuthToken: string | null;
@@ -982,6 +1023,318 @@ export class AgentManager {
   getTimeline(id: string): AgentTimelineItem[] {
     this.requireAgent(id);
     return this.timelineStore.getItems(id);
+  }
+
+  async admitRecordedUserMessage(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: { messageId?: string },
+  ): Promise<ClientMessageAdmission> {
+    const normalizedMessageId = normalizeClientMessageId(options?.messageId);
+    if (!normalizedMessageId) {
+      return { disposition: "new" };
+    }
+
+    if (normalizedMessageId.length > MAX_CLIENT_MESSAGE_ID_LENGTH) {
+      return {
+        disposition: "capacity",
+        messageId: normalizedMessageId,
+        error: `Client messageId exceeds ${MAX_CLIENT_MESSAGE_ID_LENGTH} characters`,
+      };
+    }
+
+    const fingerprint = fingerprintAgentPrompt(prompt);
+    const flightKey = this.clientMessageAdmissionKey(agentId, normalizedMessageId);
+    return await this.withClientMessageAdmissionLock(flightKey, async () => {
+      const existingFlight = this.inFlightClientMessageAdmissions.get(flightKey);
+      if (existingFlight) {
+        if (existingFlight.fingerprint !== fingerprint) {
+          return {
+            disposition: "conflict",
+            messageId: normalizedMessageId,
+            fingerprint,
+          };
+        }
+        return {
+          disposition: "in_flight",
+          messageId: normalizedMessageId,
+          fingerprint,
+          completion: existingFlight.completion,
+        };
+      }
+
+      if (this.registry) {
+        const record = await this.registry.get(agentId);
+        if (!record) {
+          throw new Error(`Agent ${agentId} not found`);
+        }
+        if (!record.clientMessageAdmissions) {
+          if (!this.agents.has(agentId)) {
+            return {
+              disposition: "legacy_load_required",
+              messageId: normalizedMessageId,
+              fingerprint,
+            };
+          }
+          await this.initializeLegacyClientMessageAdmissions(agentId, normalizedMessageId);
+        }
+      } else {
+        this.requireAgent(agentId);
+      }
+
+      let resolveCompletion!: (outcome: ClientMessageDispatchOutcome) => void;
+      const completion = new Promise<ClientMessageDispatchOutcome>((fulfill) => {
+        resolveCompletion = fulfill;
+      });
+      this.inFlightClientMessageAdmissions.set(flightKey, {
+        fingerprint,
+        completion,
+        resolve: resolveCompletion,
+      });
+
+      let disposition: ClientMessageAdmissionDisposition;
+      try {
+        disposition = this.registry
+          ? await this.registry.admitClientMessage(agentId, normalizedMessageId, fingerprint)
+          : this.admitTransientClientMessage(agentId, normalizedMessageId, fingerprint);
+      } catch (error) {
+        this.resolveClientMessageFlight(agentId, normalizedMessageId, fingerprint, {
+          accepted: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+      if (disposition === "new") {
+        return { disposition, messageId: normalizedMessageId, fingerprint };
+      }
+
+      let error: string | null = null;
+      if (disposition === "pending") {
+        error = "A previous delivery with this client messageId has an unknown outcome";
+      } else if (disposition === "capacity") {
+        error = `Client message admission ledger reached its ${MAX_CLIENT_MESSAGE_ADMISSIONS}-entry limit`;
+      } else if (disposition === "legacy_unverifiable") {
+        error =
+          "This client messageId was only observed in legacy history and cannot be safely replay-verified; resend with a new messageId";
+      } else if (disposition === "legacy") {
+        error = "Legacy client message admissions require the agent timeline to be loaded";
+      }
+      this.resolveClientMessageFlight(agentId, normalizedMessageId, fingerprint, {
+        accepted: disposition === "duplicate",
+        error,
+      });
+      return {
+        disposition: disposition === "legacy" ? "legacy_load_required" : disposition,
+        messageId: normalizedMessageId,
+        fingerprint,
+        ...(error ? { error } : {}),
+      };
+    });
+  }
+
+  async commitRecordedUserMessageAdmissionForAgent(
+    agentId: string,
+    admission: ClientMessageAdmission,
+  ): Promise<void> {
+    if (
+      admission.disposition !== "new" ||
+      admission.messageId === undefined ||
+      admission.fingerprint === undefined
+    ) {
+      return;
+    }
+    if (this.registry) {
+      try {
+        await this.registry.commitClientMessageAdmission(
+          agentId,
+          admission.messageId,
+          admission.fingerprint,
+        );
+      } catch (error) {
+        this.resolveClientMessageFlight(agentId, admission.messageId, admission.fingerprint, {
+          accepted: false,
+          error:
+            "Provider dispatch succeeded but durable replay commit failed; delivery outcome is unknown",
+        });
+        throw error;
+      }
+    }
+    this.resolveClientMessageFlight(agentId, admission.messageId, admission.fingerprint, {
+      accepted: true,
+      error: null,
+    });
+  }
+
+  async releaseRecordedUserMessageAdmissionForAgent(
+    agentId: string,
+    admission: ClientMessageAdmission,
+    errorMessage = "Failed to dispatch agent message",
+  ): Promise<void> {
+    if (
+      admission.disposition !== "new" ||
+      admission.messageId === undefined ||
+      admission.fingerprint === undefined
+    ) {
+      return;
+    }
+    try {
+      if (this.registry) {
+        await this.registry.releaseClientMessageAdmission(
+          agentId,
+          admission.messageId,
+          admission.fingerprint,
+        );
+      } else {
+        this.removeTransientClientMessageAdmission(
+          agentId,
+          admission.messageId,
+          admission.fingerprint,
+        );
+      }
+    } finally {
+      this.resolveClientMessageFlight(agentId, admission.messageId, admission.fingerprint, {
+        accepted: false,
+        error: errorMessage,
+      });
+    }
+  }
+
+  settleRecordedUserMessageAdmissionPendingForAgent(
+    agentId: string,
+    admission: ClientMessageAdmission,
+    errorMessage: string,
+  ): void {
+    if (
+      admission.disposition !== "new" ||
+      admission.messageId === undefined ||
+      admission.fingerprint === undefined
+    ) {
+      return;
+    }
+    this.resolveClientMessageFlight(agentId, admission.messageId, admission.fingerprint, {
+      accepted: false,
+      error: errorMessage,
+    });
+  }
+
+  private async initializeLegacyClientMessageAdmissions(
+    agentId: string,
+    requestedMessageId: string,
+  ): Promise<void> {
+    const registry = this.registry;
+    if (!registry) {
+      return;
+    }
+    this.requireAgent(agentId);
+    const entries: Record<
+      string,
+      { fingerprint: string; status: "committed" | "legacy_unverifiable" }
+    > = Object.create(null) as Record<
+      string,
+      { fingerprint: string; status: "committed" | "legacy_unverifiable" }
+    >;
+    let legacyOverflow = false;
+    for (const row of this.timelineStore.getRows(agentId)) {
+      if (row.item.type !== "user_message") continue;
+      const messageId = normalizeClientMessageId(row.item.clientMessageId);
+      if (!messageId) continue;
+      const existing = Object.hasOwn(entries, messageId) ? entries[messageId] : undefined;
+      if (!existing && Object.keys(entries).length >= MAX_CLIENT_MESSAGE_ADMISSIONS) {
+        legacyOverflow = true;
+        continue;
+      }
+      entries[messageId] = {
+        fingerprint: "legacy-unverifiable",
+        status: "legacy_unverifiable",
+      };
+    }
+
+    if (legacyOverflow && !entries[requestedMessageId]) {
+      const requestedSeen = this.timelineStore
+        .getRows(agentId)
+        .some(
+          (row) =>
+            row.item.type === "user_message" &&
+            normalizeClientMessageId(row.item.clientMessageId) === requestedMessageId,
+        );
+      if (requestedSeen) {
+        const removable = Object.keys(entries).find(
+          (messageId) => messageId !== requestedMessageId,
+        );
+        if (removable) delete entries[removable];
+        entries[requestedMessageId] = {
+          fingerprint: "legacy-unverifiable",
+          status: "legacy_unverifiable",
+        };
+      }
+    }
+
+    await registry.initializeClientMessageAdmissions(agentId, entries, legacyOverflow);
+  }
+
+  private clientMessageAdmissionKey(agentId: string, messageId: string): string {
+    return `${agentId}\u0000${messageId}`;
+  }
+
+  private async withClientMessageAdmissionLock<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.clientMessageAdmissionLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((unlock) => {
+      release = unlock;
+    });
+    const current = previous.catch(() => undefined).then(() => gate);
+    this.clientMessageAdmissionLocks.set(key, current);
+    await previous.catch(() => undefined);
+    try {
+      return await work();
+    } finally {
+      release();
+      if (this.clientMessageAdmissionLocks.get(key) === current) {
+        this.clientMessageAdmissionLocks.delete(key);
+      }
+    }
+  }
+
+  private resolveClientMessageFlight(
+    agentId: string,
+    messageId: string,
+    fingerprint: string,
+    outcome: ClientMessageDispatchOutcome,
+  ): void {
+    const key = this.clientMessageAdmissionKey(agentId, messageId);
+    const flight = this.inFlightClientMessageAdmissions.get(key);
+    if (!flight || flight.fingerprint !== fingerprint) return;
+    this.inFlightClientMessageAdmissions.delete(key);
+    flight.resolve(outcome);
+  }
+
+  private removeTransientClientMessageAdmission(
+    agentId: string,
+    messageId: string,
+    fingerprint: string,
+  ): void {
+    const admissions = this.transientClientMessageAdmissions.get(agentId);
+    if (admissions?.get(messageId) === fingerprint) {
+      admissions.delete(messageId);
+      if (admissions.size === 0) {
+        this.transientClientMessageAdmissions.delete(agentId);
+      }
+    }
+  }
+
+  private admitTransientClientMessage(
+    agentId: string,
+    messageId: string,
+    fingerprint: string,
+  ): "new" | "duplicate" | "conflict" {
+    const admissions = this.transientClientMessageAdmissions.get(agentId) ?? new Map();
+    this.transientClientMessageAdmissions.set(agentId, admissions);
+    const existing = admissions.get(messageId);
+    if (existing !== undefined) {
+      return existing === fingerprint ? "duplicate" : "conflict";
+    }
+    admissions.set(messageId, fingerprint);
+    return "new";
   }
 
   async getTimelineRows(id: string): Promise<AgentTimelineRow[]> {
@@ -2943,6 +3296,7 @@ export class AgentManager {
 
   private discardRetainedAgentState(agentId: string): void {
     this.timelineStore.delete(agentId);
+    this.transientClientMessageAdmissions.delete(agentId);
     for (const event of this.providerSubagents.deleteParent(agentId)) {
       this.dispatch({ type: "provider_subagent", event });
     }

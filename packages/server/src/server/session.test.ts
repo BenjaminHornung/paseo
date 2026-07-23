@@ -21,6 +21,7 @@ import {
 import { isSessionRpcAllowed, Session } from "./session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import { StructuredAgentFallbackError } from "./agent/agent-response-loop.js";
+import { AgentRunStartTimeoutError } from "./agent/agent-prompt.js";
 import type { StoredAgentRecord } from "./agent/agent-storage.js";
 import type { AgentManagerEvent } from "./agent/agent-manager.js";
 import type { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
@@ -177,6 +178,286 @@ test("legacy cancel_agent_request reports refusal through the activity log", asy
       },
     },
   ]);
+});
+
+test("send_agent_message_request commits replay admission only after confirmed provider start", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const waitForStart = deferred<void>();
+  const commitAdmission = vi.fn(async () => undefined);
+  const releaseAdmission = vi.fn(async () => undefined);
+  const settlePendingAdmission = vi.fn();
+  const streamAgent = vi.fn(async function* () {
+    yield* [];
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      listAgents: vi.fn(() => [{ id: "agent-1" }]),
+      getAgent: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      touchAgentActivity: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      admitRecordedUserMessage: vi.fn(async () => ({
+        disposition: "new",
+        messageId: "msg-1",
+        fingerprint: "fp-1",
+      })),
+      commitRecordedUserMessageAdmissionForAgent: commitAdmission,
+      releaseRecordedUserMessageAdmissionForAgent: releaseAdmission,
+      settleRecordedUserMessageAdmissionPendingForAgent: settlePendingAdmission,
+      tryRunOutOfBand: vi.fn(() => null),
+      hasInFlightRun: vi.fn(() => false),
+      streamAgent,
+      waitForAgentRunStart: vi.fn(() => waitForStart.promise),
+    },
+    agentStorage: {
+      list: vi.fn().mockResolvedValue([{ id: "agent-1", internal: false }]),
+    },
+  });
+
+  const pending = session.handleMessage({
+    type: "send_agent_message_request",
+    requestId: "send-commit-after-start",
+    agentId: "agent-1",
+    text: "ship it",
+    messageId: "  msg-1  ",
+  });
+
+  await expect.poll(() => streamAgent.mock.calls.length).toBe(1);
+  expect(streamAgent).toHaveBeenCalledWith("agent-1", "ship it", {
+    clientMessageId: "msg-1",
+  });
+  expect(commitAdmission).not.toHaveBeenCalled();
+
+  waitForStart.resolve();
+  await pending;
+
+  expect(commitAdmission).toHaveBeenCalledTimes(1);
+  expect(releaseAdmission).not.toHaveBeenCalled();
+  expect(settlePendingAdmission).not.toHaveBeenCalled();
+  expect(messages).toContainEqual({
+    type: "send_agent_message_response",
+    payload: {
+      requestId: "send-commit-after-start",
+      agentId: "agent-1",
+      accepted: true,
+      error: null,
+    },
+  });
+});
+
+test("send_agent_message_request omits a whitespace-only replay id from provider dispatch", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const streamAgent = vi.fn(async function* () {
+    yield* [];
+  });
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      listAgents: vi.fn(() => [{ id: "agent-1" }]),
+      getAgent: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      touchAgentActivity: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      admitRecordedUserMessage: vi.fn(async () => ({
+        disposition: "new",
+        messageId: undefined,
+        fingerprint: "fp-no-id",
+      })),
+      commitRecordedUserMessageAdmissionForAgent: vi.fn(async () => undefined),
+      releaseRecordedUserMessageAdmissionForAgent: vi.fn(async () => undefined),
+      settleRecordedUserMessageAdmissionPendingForAgent: vi.fn(),
+      tryRunOutOfBand: vi.fn(() => null),
+      hasInFlightRun: vi.fn(() => false),
+      streamAgent,
+      waitForAgentRunStart: vi.fn(async () => undefined),
+    },
+    agentStorage: {
+      list: vi.fn().mockResolvedValue([{ id: "agent-1", internal: false }]),
+    },
+  });
+
+  await session.handleMessage({
+    type: "send_agent_message_request",
+    requestId: "send-whitespace-id",
+    agentId: "agent-1",
+    text: "ship it",
+    messageId: "   ",
+  });
+
+  expect(streamAgent).toHaveBeenCalledWith("agent-1", "ship it", undefined);
+});
+
+test("send_agent_message_request releases replay admission on definitive pre-start failure", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const commitAdmission = vi.fn(async () => undefined);
+  const releaseAdmission = vi.fn(async () => undefined);
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      listAgents: vi.fn(() => [{ id: "agent-1" }]),
+      getAgent: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      touchAgentActivity: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      admitRecordedUserMessage: vi.fn(async () => ({
+        disposition: "new",
+        messageId: "msg-1",
+        fingerprint: "fp-1",
+      })),
+      commitRecordedUserMessageAdmissionForAgent: commitAdmission,
+      releaseRecordedUserMessageAdmissionForAgent: releaseAdmission,
+      settleRecordedUserMessageAdmissionPendingForAgent: vi.fn(),
+      tryRunOutOfBand: vi.fn(() => null),
+      hasInFlightRun: vi.fn(() => false),
+      streamAgent: vi.fn(async function* () {
+        yield* [];
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }),
+      waitForAgentRunStart: vi.fn(async () => {
+        throw new Error("provider rejected start");
+      }),
+    },
+    agentStorage: {
+      list: vi.fn().mockResolvedValue([{ id: "agent-1", internal: false }]),
+    },
+  });
+
+  await session.handleMessage({
+    type: "send_agent_message_request",
+    requestId: "send-start-reject",
+    agentId: "agent-1",
+    text: "ship it",
+    messageId: "msg-1",
+  });
+
+  expect(commitAdmission).not.toHaveBeenCalled();
+  expect(releaseAdmission).toHaveBeenCalledWith(
+    "agent-1",
+    expect.objectContaining({ disposition: "new", messageId: "msg-1" }),
+    "provider rejected start",
+  );
+  expect(messages).toContainEqual({
+    type: "send_agent_message_response",
+    payload: {
+      requestId: "send-start-reject",
+      agentId: "agent-1",
+      accepted: false,
+      error: "provider rejected start",
+    },
+  });
+});
+
+test("send_agent_message_request keeps durable pending but settles in-memory replay flight on start timeout", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const commitAdmission = vi.fn(async () => undefined);
+  const releaseAdmission = vi.fn(async () => undefined);
+  const settlePendingAdmission = vi.fn();
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      listAgents: vi.fn(() => [{ id: "agent-1" }]),
+      getAgent: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      touchAgentActivity: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      admitRecordedUserMessage: vi.fn(async () => ({
+        disposition: "new",
+        messageId: "msg-1",
+        fingerprint: "fp-1",
+      })),
+      commitRecordedUserMessageAdmissionForAgent: commitAdmission,
+      releaseRecordedUserMessageAdmissionForAgent: releaseAdmission,
+      settleRecordedUserMessageAdmissionPendingForAgent: settlePendingAdmission,
+      tryRunOutOfBand: vi.fn(() => null),
+      hasInFlightRun: vi.fn(() => false),
+      streamAgent: vi.fn(async function* () {
+        yield* [];
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }),
+      waitForAgentRunStart: vi.fn(async () => {
+        throw new AgentRunStartTimeoutError();
+      }),
+    },
+    agentStorage: {
+      list: vi.fn().mockResolvedValue([{ id: "agent-1", internal: false }]),
+    },
+  });
+
+  await session.handleMessage({
+    type: "send_agent_message_request",
+    requestId: "send-start-timeout",
+    agentId: "agent-1",
+    text: "ship it",
+    messageId: "msg-1",
+  });
+
+  expect(commitAdmission).not.toHaveBeenCalled();
+  expect(releaseAdmission).not.toHaveBeenCalled();
+  expect(settlePendingAdmission).toHaveBeenCalledWith(
+    "agent-1",
+    expect.objectContaining({ disposition: "new", messageId: "msg-1" }),
+    "Provider start timed out; delivery outcome is unknown",
+  );
+  expect(messages).toContainEqual({
+    type: "send_agent_message_response",
+    payload: {
+      requestId: "send-start-timeout",
+      agentId: "agent-1",
+      accepted: false,
+      error: "Provider start timed out; delivery outcome is unknown",
+    },
+  });
+});
+
+test("send_agent_message_request commits replay admission immediately for out-of-band acceptance", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const commitAdmission = vi.fn(async () => undefined);
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      listAgents: vi.fn(() => [{ id: "agent-1" }]),
+      getAgent: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      touchAgentActivity: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      admitRecordedUserMessage: vi.fn(async () => ({
+        disposition: "new",
+        messageId: "goal-msg-1",
+        fingerprint: "fp-goal-1",
+      })),
+      commitRecordedUserMessageAdmissionForAgent: commitAdmission,
+      releaseRecordedUserMessageAdmissionForAgent: vi.fn(async () => undefined),
+      settleRecordedUserMessageAdmissionPendingForAgent: vi.fn(),
+      tryRunOutOfBand: vi.fn(() => ({
+        run: async () => undefined,
+      })),
+      hasInFlightRun: vi.fn(() => false),
+      streamAgent: vi.fn(async function* () {
+        yield* [];
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }),
+      waitForAgentRunStart: vi.fn(async () => undefined),
+    },
+    agentStorage: {
+      list: vi.fn().mockResolvedValue([{ id: "agent-1", internal: false }]),
+    },
+  });
+
+  await session.handleMessage({
+    type: "send_agent_message_request",
+    requestId: "send-goal-pause",
+    agentId: "agent-1",
+    text: "/goal pause",
+    messageId: "goal-msg-1",
+  });
+
+  expect(commitAdmission).toHaveBeenCalledTimes(1);
+  expect(messages).toContainEqual({
+    type: "send_agent_message_response",
+    payload: {
+      requestId: "send-goal-pause",
+      agentId: "agent-1",
+      accepted: true,
+      error: null,
+    },
+  });
 });
 
 const checkoutGitMocks = vi.hoisted(() => ({

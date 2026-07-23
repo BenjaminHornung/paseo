@@ -149,6 +149,13 @@ export interface StartCreatedAgentInitialPromptParams {
 
 const AGENT_RUN_START_TIMEOUT_MS = 15_000;
 
+export class AgentRunStartTimeoutError extends Error {
+  constructor() {
+    super(`Agent run start timed out after ${AGENT_RUN_START_TIMEOUT_MS}ms`);
+    this.name = "AgentRunStartTimeoutError";
+  }
+}
+
 export async function waitForAgentRunStartWithTimeout(
   agentManager: AgentManager,
   agentId: string,
@@ -158,6 +165,11 @@ export async function waitForAgentRunStartWithTimeout(
 
   try {
     await agentManager.waitForAgentRunStart(agentId, { signal: startAbort.signal });
+  } catch (error) {
+    if (startAbort.signal.aborted && startAbort.signal.reason === "timeout") {
+      throw new AgentRunStartTimeoutError();
+    }
+    throw error;
   } finally {
     clearTimeout(startTimeout);
   }
