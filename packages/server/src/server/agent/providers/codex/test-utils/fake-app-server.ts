@@ -1,9 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-
 import type { AgentSession, AgentStreamEvent } from "../../../agent-sdk-types.js";
-
 type JsonObject = Record<string, unknown>;
 type FakeCodexAppServerHandler = (params: unknown) => unknown;
 interface FakeSubAgentActivity {
@@ -43,7 +41,6 @@ type CodexAppServerChildProcess = ChildProcessWithoutNullStreams & {
   stdout: PassThrough;
   stderr: PassThrough;
 };
-
 export interface FakeCodexAppServer {
   readonly child: CodexAppServerChildProcess;
   readonly recordedRollbacks: JsonObject[];
@@ -51,7 +48,14 @@ export interface FakeCodexAppServer {
   waitForTurnStart(): Promise<JsonObject>;
   nextResponse(): Promise<string>;
   startsTurn(params: { threadId: string; turnId?: string }): void;
-  completeTurn(params?: { threadId?: string }): void;
+  submitsUserMessage(params: {
+    threadId?: string;
+    itemId: string;
+    text: string;
+    clientMessageId?: string;
+  }): void;
+  completeTurn(params?: { threadId?: string; turnId?: string }): void;
+  changesThreadStatus(params: { threadId?: string; status: string }): void;
   startsSubAgent(params: {
     callId: string;
     threadId: string;
@@ -93,7 +97,6 @@ export interface FakeCodexAppServer {
   waitForMcpElicitationDecision(): Promise<unknown>;
   resolvesMcpElicitation(): void;
 }
-
 export function createCodexAppServerChildProcess(): CodexAppServerChildProcess {
   const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(),
@@ -108,31 +111,36 @@ export function createCodexAppServerChildProcess(): CodexAppServerChildProcess {
   }) as ChildProcessWithoutNullStreams["kill"];
   return child;
 }
-
 export function createFakeCodexAppServer(
   handlers: Record<string, FakeCodexAppServerHandler> = {},
 ): FakeCodexAppServer {
   const child = createCodexAppServerChildProcess();
   const recordedRollbacks: JsonObject[] = [];
+  let nextTurnOrdinal = 0;
+  let latestTurnId = "turn-1";
+  let latestClientUserMessageId: string | undefined;
   const responseHandlers: Record<string, FakeCodexAppServerHandler> = {
     initialize: () => ({}),
     "collaborationMode/list": () => ({ data: [] }),
     "config/read": () => ({ config: {} }),
     getUserSavedConfig: () => ({ config: {} }),
     "model/list": () => ({
-      data: [
-        {
-          id: "gpt-5.4",
-          isDefault: true,
-          defaultReasoningEffort: "medium",
-        },
-      ],
+      data: [{ id: "gpt-5.4", isDefault: true, defaultReasoningEffort: "medium" }],
     }),
     "skills/list": () => ({ data: [] }),
     "thread/start": () => ({ thread: { id: "thread-1" } }),
     "thread/loaded/list": () => ({ data: [] }),
     "thread/resume": () => ({}),
-    "turn/start": () => ({}),
+    "turn/start": (params) => {
+      const turnStart = toJsonObject(params);
+      nextTurnOrdinal += 1;
+      latestTurnId = `turn-${nextTurnOrdinal}`;
+      latestClientUserMessageId =
+        typeof turnStart.clientUserMessageId === "string"
+          ? turnStart.clientUserMessageId
+          : undefined;
+      return { turn: { id: latestTurnId, status: "inProgress", items: [] } };
+    },
     "thread/fork": (params) => ({
       thread: {
         id: "forked-thread",
@@ -177,7 +185,6 @@ export function createFakeCodexAppServer(
   }>();
   let buffer = "";
   let nextServerRequestId = 1;
-
   function processMessage(message: JsonObject): void {
     messages.push(message);
     for (const waiter of Array.from(waiters)) {
@@ -186,17 +193,14 @@ export function createFakeCodexAppServer(
         waiter.resolve(message);
       }
     }
-
     if (typeof message.id !== "number" || typeof message.method !== "string") {
       return;
     }
-
     const handler = responseHandlers[message.method];
     if (!handler) {
       errors.push(new Error(`Unexpected Codex app-server request: ${message.method}`));
       return;
     }
-
     Promise.resolve(handler(message.params))
       .then((result) => {
         child.stdout.write(`${JSON.stringify({ id: message.id, result })}\n`);
@@ -204,15 +208,11 @@ export function createFakeCodexAppServer(
       })
       .catch((error) => {
         child.stdout.write(
-          `${JSON.stringify({
-            id: message.id,
-            error: { message: error instanceof Error ? error.message : String(error) },
-          })}\n`,
+          `${JSON.stringify({ id: message.id, error: { message: error instanceof Error ? error.message : String(error) } })}\n`,
         );
         return undefined;
       });
   }
-
   child.stdin.on("data", (chunk) => {
     buffer += chunk.toString();
     for (;;) {
@@ -235,7 +235,6 @@ export function createFakeCodexAppServer(
       }
     }
   });
-
   function waitForMessage(
     predicate: (message: JsonObject) => boolean,
     label: string,
@@ -259,7 +258,6 @@ export function createFakeCodexAppServer(
       waiters.add(waiter);
     });
   }
-
   function writeSubAgentActivity(
     method: "item/started" | "item/completed",
     params: FakeSubAgentActivity,
@@ -275,19 +273,15 @@ export function createFakeCodexAppServer(
       },
     });
   }
-
   function writeNotification(method: string, params: JsonObject): void {
     child.stdout.write(`${JSON.stringify({ method, params })}\n`);
   }
-
   function completeItem(threadId: string, item: JsonObject): void {
     writeNotification("item/completed", { threadId, item });
   }
-
   function writeLegacyEvent(threadId: string, method: string, msg: JsonObject): void {
     writeNotification(method, { threadId, msg });
   }
-
   return {
     child,
     recordedRollbacks,
@@ -309,23 +303,31 @@ export function createFakeCodexAppServer(
       });
     },
     startsTurn(params) {
+      latestTurnId = params.turnId ?? latestTurnId;
       child.stdout.write(
-        `${JSON.stringify({
-          method: "turn/started",
-          params: {
-            threadId: params.threadId,
-            turn: { id: params.turnId ?? `turn-${params.threadId}` },
-          },
-        })}\n`,
+        `${JSON.stringify({ method: "turn/started", params: { threadId: params.threadId, turn: { id: latestTurnId } } })}\n`,
       );
+    },
+    submitsUserMessage(params) {
+      completeItem(params.threadId ?? "thread-1", {
+        type: "userMessage",
+        id: params.itemId,
+        ...((params.clientMessageId ?? latestClientUserMessageId)
+          ? { clientId: params.clientMessageId ?? latestClientUserMessageId }
+          : {}),
+        content: [{ type: "text", text: params.text }],
+      });
     },
     completeTurn(params = {}) {
       child.stdout.write(
-        `${JSON.stringify({
-          method: "turn/completed",
-          params: { threadId: params.threadId ?? "thread-1", turn: { status: "completed" } },
-        })}\n`,
+        `${JSON.stringify({ method: "turn/completed", params: { threadId: params.threadId ?? "thread-1", turn: { id: params.turnId ?? latestTurnId, status: "completed" } } })}\n`,
       );
+    },
+    changesThreadStatus(params) {
+      writeNotification("thread/status/changed", {
+        threadId: params.threadId ?? "thread-1",
+        status: { type: params.status },
+      });
     },
     startsSubAgent(params) {
       writeSubAgentActivity("item/completed", { ...params, kind: "started" });
@@ -371,13 +373,7 @@ export function createFakeCodexAppServer(
       });
     },
     appliesLegacyPatch(params) {
-      const changes = [
-        {
-          path: params.path,
-          kind: "modify",
-          unified_diff: params.diff,
-        },
-      ];
+      const changes = [{ path: params.path, kind: "modify", unified_diff: params.diff }];
       for (const [method, type] of [
         ["codex/event/patch_apply_begin", "patch_apply_begin"],
         ["codex/event/patch_apply_end", "patch_apply_end"],
@@ -435,14 +431,7 @@ export function createFakeCodexAppServer(
       if (params.itemId) {
         for (const chunk of params.chunks ?? [params.text]) {
           child.stdout.write(
-            `${JSON.stringify({
-              method: "item/agentMessage/delta",
-              params: {
-                threadId: params.threadId,
-                itemId: params.itemId,
-                delta: chunk,
-              },
-            })}\n`,
+            `${JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: params.threadId, itemId: params.itemId, delta: chunk } })}\n`,
           );
         }
       }
@@ -457,12 +446,7 @@ export function createFakeCodexAppServer(
       nextServerRequestId += 1;
       approvalRequestIds.set(params.itemId, requestId);
       child.stdout.write(
-        `${JSON.stringify({
-          jsonrpc: "2.0",
-          id: requestId,
-          method: "item/commandExecution/requestApproval",
-          params,
-        })}\n`,
+        `${JSON.stringify({ jsonrpc: "2.0", id: requestId, method: "item/commandExecution/requestApproval", params })}\n`,
       );
     },
     async waitForCommandApprovalDecision(itemId) {
@@ -482,16 +466,7 @@ export function createFakeCodexAppServer(
       nextServerRequestId += 1;
       mcpElicitationRequestId = requestId;
       child.stdout.write(
-        `${JSON.stringify({
-          jsonrpc: "2.0",
-          id: requestId,
-          method: "mcpServer/elicitation/request",
-          params: {
-            ...params,
-            mode: "openai/form",
-            _meta: null,
-          },
-        })}\n`,
+        `${JSON.stringify({ jsonrpc: "2.0", id: requestId, method: "mcpServer/elicitation/request", params: { ...params, mode: "openai/form", _meta: null } })}\n`,
       );
     },
     async waitForMcpElicitationDecision() {
@@ -515,17 +490,14 @@ export function createFakeCodexAppServer(
     },
   };
 }
-
 function toJsonObject(value: unknown): JsonObject {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return value as JsonObject;
   }
   return {};
 }
-
 type StreamEventType = AgentStreamEvent["type"];
 type StreamEventOfType<TType extends StreamEventType> = Extract<AgentStreamEvent, { type: TType }>;
-
 function waitForNextEvent<TType extends StreamEventType>(
   session: AgentSession,
   type: TType,
@@ -550,20 +522,16 @@ function waitForNextEvent<TType extends StreamEventType>(
     });
   });
 }
-
 type TimelineEvent = StreamEventOfType<"timeline">;
 type ProviderSubagentEvent = StreamEventOfType<"provider_subagent">;
-
 export function waitForNextPermission(
   session: AgentSession,
 ): Promise<StreamEventOfType<"permission_requested">> {
   return waitForNextEvent(session, "permission_requested");
 }
-
 export function waitForNextTimelineItem(session: AgentSession): Promise<TimelineEvent> {
   return waitForNextEvent(session, "timeline");
 }
-
 export function waitForTimelineToolCall(
   session: AgentSession,
   callId: string,
@@ -574,7 +542,6 @@ export function waitForTimelineToolCall(
     (event) => event.item.type === "tool_call" && event.item.callId === callId,
   );
 }
-
 export function waitForProviderSubagent(
   session: AgentSession,
   id: string,
