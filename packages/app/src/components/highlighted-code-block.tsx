@@ -1,5 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
+import {
+  Pressable,
+  Text,
+  View,
+  type StyleProp,
+  type TextStyle,
+  type ViewStyle,
+} from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { MarkdownTextSpan } from "@/components/markdown-text";
 import * as Clipboard from "expo-clipboard";
@@ -10,7 +17,11 @@ import { isNative, isWeb } from "@/constants/platform";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { syntaxTokenStyleFor } from "@/styles/syntax-token-styles";
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
-import { highlightToKeyedLines, type KeyedLine } from "@/utils/highlight-cache";
+import {
+  highlightToKeyedLines,
+  splitToKeyedPlainLines,
+  type KeyedLine,
+} from "@/utils/highlight-cache";
 
 interface HighlightedCodeBlockProps {
   code: string;
@@ -84,28 +95,53 @@ export const HighlightedCodeBlock = React.memo(function HighlightedCodeBlock({
       onPointerLeave={handlePointerLeave}
     >
       {keyedLines ? (
-        <MarkdownTextSpan style={innerTextStyle}>{renderCodeSegments(keyedLines)}</MarkdownTextSpan>
+        <HighlightedCodeLines lines={keyedLines} textStyle={innerTextStyle} />
       ) : (
-        <MarkdownTextSpan style={innerTextStyle}>{renderedCode}</MarkdownTextSpan>
+        <PlainCodeLines code={renderedCode} textStyle={innerTextStyle} />
       )}
       <CopyButton getCode={getCode} visible={controlsVisible} />
     </View>
   );
 });
 
-function renderCodeSegments(keyedLines: KeyedLine[]): React.ReactNode[] {
-  const segments: React.ReactNode[] = [];
-  for (let lineIndex = 0; lineIndex < keyedLines.length; lineIndex += 1) {
-    const line = keyedLines[lineIndex];
-    if (lineIndex > 0) {
-      segments.push(<CodeTextSpan key={`${line.key}-newline`} text={"\n"} />);
-    }
-    for (const { key, token } of line.tokens) {
-      segments.push(<TokenSpan key={`${line.key}-${key}`} token={token} />);
-    }
-  }
-  return segments;
+interface HighlightedCodeLinesProps {
+  lines: KeyedLine[];
+  textStyle: StyleProp<TextStyle>;
 }
+
+const EMPTY_LINE_PLACEHOLDER = "\u200b";
+const EMPTY_LINE_PLACEHOLDER_STYLE: TextStyle = isWeb ? ({ userSelect: "none" } as TextStyle) : {};
+
+function EmptyCodeLine({ textStyle }: { textStyle: StyleProp<TextStyle> }) {
+  return (
+    <Text selectable={false} aria-hidden style={[textStyle, EMPTY_LINE_PLACEHOLDER_STYLE]}>
+      {EMPTY_LINE_PLACEHOLDER}
+    </Text>
+  );
+}
+
+const HighlightedCodeLines = React.memo(function HighlightedCodeLines({
+  lines,
+  textStyle,
+}: HighlightedCodeLinesProps) {
+  return (
+    <View dataSet={CODE_SURFACE_DATASET}>
+      {lines.map((line) => (
+        <View key={line.key}>
+          {line.tokens.length === 0 || line.tokens.every(({ token }) => token.text.length === 0) ? (
+            <EmptyCodeLine textStyle={textStyle} />
+          ) : (
+            <MarkdownTextSpan style={textStyle}>
+              {line.tokens.map(({ key, token }) => (
+                <TokenSpan key={key} token={token} />
+              ))}
+            </MarkdownTextSpan>
+          )}
+        </View>
+      ))}
+    </View>
+  );
+});
 
 interface TokenSpanProps {
   token: HighlightToken;
@@ -119,12 +155,29 @@ const TokenSpan = React.memo(function TokenSpan({ token }: TokenSpanProps) {
   );
 });
 
-interface CodeTextSpanProps {
-  text: string;
+interface PlainCodeLinesProps {
+  code: string;
+  textStyle: StyleProp<TextStyle>;
 }
 
-const CodeTextSpan = React.memo(function CodeTextSpan({ text }: CodeTextSpanProps) {
-  return <MarkdownTextSpan>{text}</MarkdownTextSpan>;
+const PlainCodeLines = React.memo(function PlainCodeLines({
+  code,
+  textStyle,
+}: PlainCodeLinesProps) {
+  const lines = useMemo(() => splitToKeyedPlainLines(code), [code]);
+  return (
+    <View dataSet={CODE_SURFACE_DATASET}>
+      {lines.map((line) => (
+        <View key={line.key}>
+          {line.text.length === 0 ? (
+            <EmptyCodeLine textStyle={textStyle} />
+          ) : (
+            <MarkdownTextSpan style={textStyle}>{line.text}</MarkdownTextSpan>
+          )}
+        </View>
+      ))}
+    </View>
+  );
 });
 
 interface SplitStyles {
@@ -133,17 +186,20 @@ interface SplitStyles {
 }
 
 const CONTAINER_BASE: ViewStyle = { position: "relative" };
-const WEB_SELECTABLE: TextStyle = isWeb ? ({ userSelect: "text" } as TextStyle) : {};
+const WEB_CODE_TEXT: TextStyle = isWeb
+  ? ({ userSelect: "text", whiteSpace: "pre", overflowWrap: "normal" } as TextStyle)
+  : {};
+const WEB_CODE_CONTAINER: ViewStyle = isWeb ? ({ overflowX: "auto" } as ViewStyle) : {};
 
 function splitFenceStyle(inheritedStyles: TextStyle, textStyle: TextStyle): SplitStyles {
   const { fontFamily, fontSize, color, ...box } = textStyle;
-  const textOnly: TextStyle = { ...WEB_SELECTABLE };
+  const textOnly: TextStyle = { ...WEB_CODE_TEXT };
   if (fontFamily !== undefined) textOnly.fontFamily = fontFamily;
   if (fontSize !== undefined) textOnly.fontSize = fontSize;
   if (fontSize !== undefined) textOnly.lineHeight = Math.round(fontSize * 1.45);
   if (color !== undefined) textOnly.color = color;
   return {
-    containerStyle: [box as ViewStyle, CONTAINER_BASE],
+    containerStyle: [box as ViewStyle, CONTAINER_BASE, WEB_CODE_CONTAINER],
     innerTextStyle: [inheritedStyles, textOnly],
   };
 }
