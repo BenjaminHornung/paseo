@@ -424,6 +424,11 @@ interface ACPAgentSessionOptions {
   handle?: AgentPersistenceHandle;
   agentId?: string;
   launchEnv?: Record<string, string>;
+  /**
+   * Runtime-only, non-persisted cwd for process launch and recovery
+   * loadSession/unstable_resumeSession requests; config.cwd remains logical.
+   */
+  processCwd?: string;
   waitForInitialCommands?: boolean;
   initialCommandsWaitTimeoutMs?: number;
   terminateProcess?: ProcessTerminator;
@@ -789,6 +794,7 @@ export class ACPAgentClient implements AgentClient {
         capabilities: this.capabilities,
         agentId: launchContext?.agentId,
         launchEnv: launchContext?.env,
+        processCwd: launchContext?.processCwd,
         extensionCommandsParser: this.extensionCommandsParser,
         waitForInitialCommands: this.waitForInitialCommands,
         initialCommandsWaitTimeoutMs: this.initialCommandsWaitTimeoutMs,
@@ -840,6 +846,7 @@ export class ACPAgentClient implements AgentClient {
       handle,
       agentId: launchContext?.agentId,
       launchEnv: launchContext?.env,
+      processCwd: launchContext?.processCwd,
       extensionCommandsParser: this.extensionCommandsParser,
       waitForInitialCommands: this.waitForInitialCommands,
       initialCommandsWaitTimeoutMs: this.initialCommandsWaitTimeoutMs,
@@ -1300,6 +1307,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   ) => Promise<void>;
   private readonly agentId?: string;
   private readonly launchEnv?: Record<string, string>;
+  private readonly processCwd?: string;
   private readonly subscribers = new Set<(event: AgentStreamEvent) => void>();
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private readonly messageAssemblies = new Map<string, MessageAssemblyState>();
@@ -1360,6 +1368,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     this.availableModes = options.defaultModes;
     this.agentId = options.agentId;
     this.launchEnv = options.launchEnv;
+    this.processCwd = options.processCwd;
     this.initialHandle = options.handle;
     this.config = { ...config, provider: options.provider };
     this.currentMode = config.modeId ?? null;
@@ -1412,6 +1421,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     this.agentCapabilities = spawned.initialize.agentCapabilities ?? null;
     this.sessionId = handle.sessionId;
     this.bootstrapThreadEventPending = true;
+    const resumeCwd = this.processCwd ?? this.config.cwd;
 
     const sessionCapabilities = this.agentCapabilities?.sessionCapabilities;
     if (this.agentCapabilities?.loadSession) {
@@ -1419,7 +1429,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       const response = await this.runACPRequest(() =>
         this.connection!.loadSession({
           sessionId: handle.sessionId,
-          cwd: this.config.cwd,
+          cwd: resumeCwd,
           mcpServers: this.acpMcpServers(),
         }),
       );
@@ -1430,7 +1440,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       const response = await this.runACPRequest(() =>
         this.connection!.unstable_resumeSession({
           sessionId: handle.sessionId,
-          cwd: this.config.cwd,
+          cwd: resumeCwd,
           mcpServers: this.acpMcpServers(),
         }),
       );
@@ -2300,7 +2310,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     const command = prefix.command;
     const args = [...prefix.args, ...this.defaultCommand.slice(1)];
     const child = spawnProcess(command, args, {
-      cwd: this.config.cwd,
+      cwd: this.processCwd ?? this.config.cwd,
       ...createProviderEnvSpec({
         runtimeSettings: this.runtimeSettings,
         overlays: [this.launchEnv],

@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import type { AgentPromptInput, AgentRunOptions } from "./agent-sdk-types.js";
 import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
+import { assertAgentCwdExists } from "./agent-cwd.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 
@@ -285,6 +286,17 @@ export async function sendPromptToAgent(
         skippedReason: "archived",
       };
     }
+  }
+
+  const liveBeforeLoad = params.agentManager.getAgent(params.agentId);
+  const cwd = liveBeforeLoad?.cwd ?? record?.cwd;
+  if (cwd) {
+    await assertAgentCwdExists(params.agentId, cwd);
+  } else if (!record && !liveBeforeLoad) {
+    throw new Error(`Agent not found: ${params.agentId}`);
+  }
+
+  if (record?.archivedAt && unarchive) {
     await unarchiveAgentState(params.agentStorage, params.agentManager, params.agentId);
   }
 
@@ -292,6 +304,7 @@ export async function sendPromptToAgent(
     agentManager: params.agentManager,
     agentStorage: params.agentStorage,
     logger: params.logger,
+    allowMissingCwd: false,
   });
 
   if (params.sessionMode) {

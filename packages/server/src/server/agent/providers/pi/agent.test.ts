@@ -107,6 +107,61 @@ test("forwards launch-context env to the Pi process launch", async () => {
   await session.close();
 });
 
+test("uses processCwd for Pi spawn while persistence keeps config.cwd", async () => {
+  const pi = new FakePi();
+  const client = createClient(pi);
+  const originalCwd = "/missing/worktree-path";
+  const processCwd = "/workspace/safe-parent";
+
+  const session = await client.createSession(createConfig({ cwd: originalCwd }), { processCwd });
+
+  expect(pi.recordedLaunches[0]?.cwd).toBe(processCwd);
+  expect(session.describePersistence()?.metadata).toMatchObject({ cwd: originalCwd });
+  await session.close();
+});
+
+test("uses processCwd for Pi MCP probing and resumed spawn without changing logical cwd", async () => {
+  const pi = new FakePi();
+  pi.queueCommands([
+    {
+      name: "mcp",
+      description: "Show MCP server status",
+      source: "extension",
+      sourceInfo: { source: "npm:pi-mcp-adapter" },
+    },
+  ]);
+  const client = createClient(pi);
+  const originalCwd = "/missing/worktree-path";
+  const processCwd = "/workspace/safe-parent";
+
+  const session = await client.resumeSession(
+    {
+      provider: "pi",
+      sessionId: "pi-session-recovery",
+      nativeHandle: "/tmp/native-pi-session-recovery",
+      metadata: { cwd: originalCwd, model: "openrouter/model-a" },
+    },
+    {
+      cwd: originalCwd,
+      mcpServers: {
+        paseo: { type: "http", url: "http://127.0.0.1:6767/mcp/agents" },
+      },
+    },
+    { processCwd },
+  );
+
+  expect(pi.recordedLaunches).toHaveLength(2);
+  expect(pi.recordedLaunches[0]?.cwd).toBe(processCwd);
+  expect(pi.recordedLaunches[1]).toMatchObject({
+    cwd: processCwd,
+    session: "/tmp/native-pi-session-recovery",
+  });
+  expect(pi.recordedLaunches[1]?.mcpConfigPath).toEqual(expect.any(String));
+  expect(session.capabilities.supportsMcpServers).toBe(true);
+  expect(session.describePersistence()?.metadata).toMatchObject({ cwd: originalCwd });
+  await session.close();
+});
+
 test("starts internal Pi agents without persisting a native session", async () => {
   const pi = new FakePi();
   const client = createClient(pi);

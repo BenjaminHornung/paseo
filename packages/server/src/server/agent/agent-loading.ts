@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import type { AgentProvider } from "./agent-sdk-types.js";
 import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
+import { MissingAgentCwdError, pathIsExistingDirectory } from "./agent-cwd.js";
 import {
   buildConfigOverrides,
   buildSessionConfig,
@@ -28,6 +29,8 @@ export interface EnsureAgentLoadedDeps {
   agentStorage: AgentStorage;
   validProviders?: Iterable<AgentProvider>;
   logger: Logger;
+  /** Timeline/log recovery only. Send/continue and new work must remain strict. */
+  allowMissingCwd?: boolean;
 }
 
 export interface EnsureAgentLoadedOptions {
@@ -94,6 +97,7 @@ export async function ensureAgentLoaded(
     }
 
     const handle = toAgentPersistenceHandle(validProviders, record.persistence);
+    const cwdMissing = Boolean(record.cwd) && !(await pathIsExistingDirectory(record.cwd));
 
     let snapshot: ManagedAgent;
     if (handle) {
@@ -101,10 +105,16 @@ export async function ensureAgentLoaded(
         handle,
         buildConfigOverrides(record),
         agentId,
-        extractTimestamps(record),
+        {
+          ...extractTimestamps(record),
+          allowMissingCwd: deps.allowMissingCwd === true,
+        },
       );
       deps.logger.info({ agentId, provider: record.provider }, "Agent resumed from persistence");
     } else {
+      if (cwdMissing) {
+        throw new MissingAgentCwdError(agentId, record.cwd);
+      }
       const config = buildSessionConfig(record, {
         validProviders,
       });
@@ -119,7 +129,18 @@ export async function ensureAgentLoaded(
       deps.logger.info({ agentId, provider: record.provider }, "Agent created from stored config");
     }
 
-    await deps.agentManager.hydrateTimelineFromProvider(agentId);
+    try {
+      await deps.agentManager.hydrateTimelineFromProvider(agentId);
+    } catch (error) {
+      if (deps.allowMissingCwd && cwdMissing) {
+        deps.logger.warn(
+          { err: error, agentId, cwd: record.cwd },
+          "Timeline hydrate failed after missing-cwd resume; serving recovered session state",
+        );
+      } else {
+        throw error;
+      }
+    }
     return deps.agentManager.getAgent(agentId) ?? snapshot;
   })();
 

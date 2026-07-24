@@ -1,5 +1,6 @@
 import { type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { PassThrough, Readable, Writable } from "node:stream";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   AgentSideConnection,
@@ -50,6 +51,7 @@ import { createTestLogger } from "../../../test-utils/test-logger.js";
 import { buildStringCommandShellInvocation } from "../../../utils/string-command-shell.js";
 import { asInternals } from "../../test-utils/class-mocks.js";
 import * as spawnUtils from "../../../utils/spawn.js";
+import * as providerLaunchConfig from "../provider-launch-config.js";
 
 describe("buildACPClientCapabilities", () => {
   test("keeps filesystem and terminal execution with the agent by default", () => {
@@ -2793,6 +2795,8 @@ describe("ACP session/load invariant — cwd and mcpServers always passed", () =
   function makeTestSession(args: {
     capabilities?: AgentCapabilityFlags;
     handle: AgentPersistenceHandle;
+    cwd?: string;
+    processCwd?: string;
     loadSession?: ReturnType<typeof vi.fn>;
     unstableResumeSession?: ReturnType<typeof vi.fn>;
   }) {
@@ -2829,7 +2833,7 @@ describe("ACP session/load invariant — cwd and mcpServers always passed", () =
 
     // Pass handle through the typed constructor option (no private-field casts).
     const session = new TestSession(
-      { provider: "claude-acp", cwd: "/tmp/paseo-acp-test" },
+      { provider: "claude-acp", cwd: args.cwd ?? "/tmp/paseo-acp-test" },
       {
         provider: "claude-acp",
         logger: createTestLogger(),
@@ -2845,6 +2849,7 @@ describe("ACP session/load invariant — cwd and mcpServers always passed", () =
           ...args.capabilities,
         },
         handle: args.handle,
+        processCwd: args.processCwd,
       },
     );
 
@@ -2992,5 +2997,172 @@ describe("ACP session/load invariant — cwd and mcpServers always passed", () =
       cwd: "/tmp/paseo-acp-test",
       mcpServers: [],
     });
+  });
+
+  test("loadSession uses processCwd in recovery mode but preserves logical cwd metadata", async () => {
+    const originalCwd = "/missing/worktree-path";
+    const { session, loadSession } = makeTestSession({
+      capabilities: { loadSession: true },
+      handle: { sessionId: "session-1", provider: "claude-acp" },
+      cwd: originalCwd,
+      processCwd: "/workspace/safe-parent",
+    });
+
+    await session.initializeResumedSession();
+    expect(loadSession).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      cwd: "/workspace/safe-parent",
+      mcpServers: [],
+    });
+    expect(session.describePersistence()?.metadata).toMatchObject({ cwd: originalCwd });
+  });
+
+  test("unstable_resumeSession uses processCwd in recovery mode but preserves logical cwd metadata", async () => {
+    const originalCwd = "/missing/worktree-path";
+    const { session, unstableResumeSession } = makeTestSession({
+      capabilities: { sessionCapabilities: { resume: {} } },
+      handle: { sessionId: "session-1", provider: "claude-acp" },
+      cwd: originalCwd,
+      processCwd: "/workspace/safe-parent",
+    });
+
+    await session.initializeResumedSession();
+    expect(unstableResumeSession).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      cwd: "/workspace/safe-parent",
+      mcpServers: [],
+    });
+    expect(session.describePersistence()?.metadata).toMatchObject({ cwd: originalCwd });
+  });
+
+  test("loadSession keeps config.cwd when processCwd is not set", async () => {
+    const originalCwd = "/workspace/existing";
+    const { session, loadSession } = makeTestSession({
+      capabilities: { loadSession: true },
+      handle: { sessionId: "session-1", provider: "claude-acp" },
+      cwd: originalCwd,
+    });
+
+    await session.initializeResumedSession();
+    expect(loadSession).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      cwd: originalCwd,
+      mcpServers: [],
+    });
+  });
+
+  test("unstable_resumeSession keeps config.cwd when processCwd is not set", async () => {
+    const originalCwd = "/workspace/existing";
+    const { session, unstableResumeSession } = makeTestSession({
+      capabilities: { sessionCapabilities: { resume: {} } },
+      handle: { sessionId: "session-1", provider: "claude-acp" },
+      cwd: originalCwd,
+    });
+
+    await session.initializeResumedSession();
+    expect(unstableResumeSession).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      cwd: originalCwd,
+      mcpServers: [],
+    });
+  });
+});
+
+describe("ACP processCwd is runtime-only for launch and recovery RPCs", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function createHandshakeChild(protocolCwds: string[]): ChildProcessWithoutNullStreams {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = Object.assign(new EventEmitter(), {
+      stdin,
+      stdout,
+      stderr,
+      exitCode: null,
+      signalCode: null,
+      killed: false,
+      pid: 42_001,
+    }) as ChildProcessWithoutNullStreams;
+    child.kill = vi.fn(() => {
+      child.killed = true;
+      queueMicrotask(() => child.emit("exit", 0, null));
+      return true;
+    }) as ChildProcessWithoutNullStreams["kill"];
+
+    const agent: Agent = {
+      async initialize() {
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          agentCapabilities: { loadSession: true },
+          authMethods: [],
+        };
+      },
+      async newSession(params) {
+        protocolCwds.push(params.cwd);
+        return { sessionId: "session-new-1", modes: null, models: null, configOptions: [] };
+      },
+      async loadSession(params) {
+        protocolCwds.push(params.cwd);
+        return { sessionId: params.sessionId, modes: null, models: null, configOptions: [] };
+      },
+      async prompt() {
+        return { stopReason: "end_turn" };
+      },
+      async authenticate() {},
+      async cancel() {},
+    };
+    const agentConnection = new AgentSideConnection(
+      () => agent,
+      ndJsonStream(Writable.toWeb(stdout), Readable.toWeb(stdin)),
+    );
+    Object.assign(child, { agentConnection });
+    return child;
+  }
+
+  function createProcessCwdSession(cwd: string, processCwd?: string): ACPAgentSession {
+    return new ACPAgentSession(
+      { provider: "claude-acp", cwd },
+      {
+        provider: "claude-acp",
+        logger: createTestLogger(),
+        defaultCommand: ["claude", "--acp"],
+        defaultModes: [],
+        capabilities: {
+          supportsStreaming: true,
+          supportsSessionPersistence: true,
+          supportsDynamicModes: true,
+          supportsMcpServers: true,
+          supportsReasoningStream: true,
+          supportsToolInvocations: true,
+        },
+        processCwd,
+        terminateProcess: async () => "terminated",
+      },
+    );
+  }
+
+  test("spawns in processCwd while ACP newSession keeps the logical config.cwd", async () => {
+    const originalCwd = "/missing/worktree-path";
+    const processCwd = "/workspace/safe-parent";
+    const protocolCwds: string[] = [];
+    const spawn = vi
+      .spyOn(spawnUtils, "spawnProcess")
+      .mockImplementation(() => createHandshakeChild(protocolCwds));
+    vi.spyOn(providerLaunchConfig, "checkProviderLaunchAvailable").mockResolvedValue({
+      available: true,
+      resolvedPath: "/fake/claude",
+    });
+
+    const session = createProcessCwdSession(originalCwd, processCwd);
+    await session.initializeNewSession();
+    expect(spawn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Array),
+      expect.objectContaining({ cwd: processCwd }),
+    );
+    expect(protocolCwds).toEqual([originalCwd]);
+    expect(session.describePersistence()?.metadata).toMatchObject({ cwd: originalCwd });
+    await session.close();
   });
 });

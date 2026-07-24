@@ -438,6 +438,7 @@ test("sendPromptToAgent forwards the client message id as run options", async ()
   const agent: ManagedAgent = Object.create(null);
   Reflect.set(agent, "id", "agent-1");
   Reflect.set(agent, "provider", "codex");
+  Reflect.set(agent, "cwd", process.cwd());
 
   const streamAgentSpy = vi.fn(() => (async function* noop() {})());
   const agentManager: AgentManager = Object.create(AgentManager.prototype);
@@ -551,6 +552,79 @@ test("waitForAgentRunStartWithTimeout aborts the authoritative start waiter with
   expect(activeWaiters).toBe(0);
   expect(maxActiveWaiters).toBe(1);
   vi.useRealTimers();
+});
+
+test("sendPromptToAgent rejects missing archived cwd before unarchive side effects", async () => {
+  const root = mkdtempSync(join(tmpdir(), "paseo-prompt-missing-"));
+  const missingCwd = join(root, "deleted-worktree");
+  const unarchive = vi.fn(async () => true);
+  const manager = Object.assign(Object.create(AgentManager.prototype), {
+    getAgent: vi.fn(() => null),
+    unarchiveSnapshot: unarchive,
+    notifyAgentState: vi.fn(),
+  }) as AgentManager;
+  const storage = Object.assign(Object.create(AgentStorage.prototype), {
+    get: vi.fn(async () => ({
+      id: "agent-missing",
+      provider: "codex",
+      cwd: missingCwd,
+      archivedAt: "2026-07-01T00:00:00.000Z",
+    })),
+  }) as AgentStorage;
+
+  try {
+    await expect(
+      sendPromptToAgent({
+        agentManager: manager,
+        agentStorage: storage,
+        agentId: "agent-missing",
+        prompt: "continue",
+        logger: createTestLogger(),
+      }),
+    ).rejects.toThrow(/working directory is missing/i);
+    expect(unarchive).not.toHaveBeenCalled();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("sendPromptToAgent prefers a live rebound cwd over stale storage", async () => {
+  const root = mkdtempSync(join(tmpdir(), "paseo-prompt-live-cwd-"));
+  const staleCwd = join(root, "deleted-worktree");
+  const liveAgent = {
+    id: "agent-rebound",
+    provider: "codex",
+    cwd: root,
+  } as ManagedAgent;
+  const streamAgent = vi.fn(() => (async function* noop() {})());
+  const manager = Object.assign(Object.create(AgentManager.prototype), {
+    getAgent: vi.fn(() => liveAgent),
+    tryRunOutOfBand: vi.fn(() => false),
+    hasInFlightRun: vi.fn(() => false),
+    waitForAgentRunStart: vi.fn(async () => {}),
+    streamAgent,
+  }) as AgentManager;
+  const storage = Object.assign(Object.create(AgentStorage.prototype), {
+    get: vi.fn(async () => ({
+      id: "agent-rebound",
+      provider: "codex",
+      cwd: staleCwd,
+      archivedAt: null,
+    })),
+  }) as AgentStorage;
+
+  try {
+    await sendPromptToAgent({
+      agentManager: manager,
+      agentStorage: storage,
+      agentId: "agent-rebound",
+      prompt: "continue",
+      logger: createTestLogger(),
+    });
+    expect(streamAgent).toHaveBeenCalledWith("agent-rebound", "continue", undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("finish notifications tell the parent the child's last assistant message", async () => {
@@ -724,6 +798,11 @@ test("real-manager finish notifications time out a hung caller start, clean up t
     await waitForAgentRunStartWithTimeout(childDispatch.startAcknowledged);
   }
 
+  await vi.advanceTimersByTimeAsync(0);
+  await vi.waitFor(() => {
+    expect(harness.getActiveStartWaiters()).toBe(1);
+  });
+  await vi.advanceTimersByTimeAsync(0);
   await vi.advanceTimersByTimeAsync(15_000);
   await vi.waitFor(() => {
     expect(
