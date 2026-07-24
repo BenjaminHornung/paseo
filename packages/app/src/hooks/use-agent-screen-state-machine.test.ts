@@ -1,3 +1,7 @@
+/**
+ * @vitest-environment jsdom
+ */
+import { renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { Agent } from "@/contexts/session-context";
 import {
@@ -5,6 +9,7 @@ import {
   type AgentScreenMachineInput,
   type AgentScreenMachineMemory,
   type AgentScreenViewState,
+  useAgentScreenStateMachine,
 } from "./use-agent-screen-state-machine";
 
 type ReadyState = Extract<AgentScreenViewState, { tag: "ready" }>;
@@ -331,6 +336,114 @@ describe("deriveAgentScreenViewState", () => {
     expect(result.state.message).toContain("network timeout");
   });
 
+  it("keeps a previously rendered timeline visible when history sync fails for the current agent", () => {
+    const memory = createBaseMemory({
+      hasRenderedReady: true,
+      lastReadyAgent: createAgent("agent-1"),
+    });
+    const input: AgentScreenMachineInput = {
+      ...createBaseInput(),
+      agent: createAgent("agent-1"),
+      needsAuthoritativeSync: true,
+      isHistorySyncing: false,
+      hasHydratedHistoryBefore: false,
+      missingAgentState: { kind: "error", message: "history sync failed" },
+    };
+
+    const result = deriveAgentScreenViewState({ input, memory });
+    const ready = expectReadyState(result.state);
+
+    expect(ready.agent.id).toBe("agent-1");
+    expect(ready.source).toBe("authoritative");
+    expectSyncErrorSync(ready);
+    expect(result.memory.hadInitialSyncFailure).toBe(true);
+
+    const retry = deriveAgentScreenViewState({
+      input: {
+        ...input,
+        missingAgentState: { kind: "idle" },
+      },
+      memory: result.memory,
+    });
+    const retryReady = expectReadyState(retry.state);
+    const retrySync = expectCatchingUpSync(retryReady);
+    expect(retrySync.ui).toBe("silent");
+  });
+
+  it("keeps first-load errors blocking when no agent timeline can be rendered", () => {
+    const memory = createBaseMemory();
+    const input: AgentScreenMachineInput = {
+      ...createBaseInput(),
+      agent: null,
+      needsAuthoritativeSync: true,
+      missingAgentState: { kind: "error", message: "history sync failed" },
+    };
+
+    const result = deriveAgentScreenViewState({ input, memory });
+
+    expect(result.state).toEqual({
+      tag: "error",
+      message: "history sync failed",
+    });
+  });
+
+  it("keeps first-load sync errors blocking before any ready render even when an authoritative agent exists", () => {
+    const result = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        agent: createAgent("agent-1"),
+        missingAgentState: { kind: "error", message: "history sync failed" },
+        needsAuthoritativeSync: true,
+        hasHydratedHistoryBefore: false,
+      },
+      memory: createBaseMemory(),
+    });
+
+    expect(result.state).toEqual({
+      tag: "error",
+      message: "history sync failed",
+    });
+    expect(result.memory.hasRenderedReady).toBe(false);
+    expect(result.memory.lastReadyAgent).toBeNull();
+    expect(result.memory.hadInitialSyncFailure).toBe(true);
+  });
+
+  it("keeps retry blocked after an initial sync failure that never rendered history", () => {
+    const errorResult = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        agent: null,
+        missingAgentState: { kind: "error", message: "history sync failed" },
+      },
+      memory: createBaseMemory(),
+    });
+
+    expect(errorResult.state).toEqual({
+      tag: "error",
+      message: "history sync failed",
+    });
+    expect(errorResult.memory.hasRenderedReady).toBe(false);
+    expect(errorResult.memory.hadInitialSyncFailure).toBe(true);
+
+    const retryResult = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        agent: createAgent("agent-1"),
+        needsAuthoritativeSync: true,
+        hasHydratedHistoryBefore: false,
+      },
+      memory: errorResult.memory,
+    });
+
+    expect(retryResult.state).toEqual({
+      tag: "boot",
+      reason: "loading",
+      source: "none",
+    });
+    expect(retryResult.memory.hasRenderedReady).toBe(false);
+    expect(retryResult.memory.lastReadyAgent).toBeNull();
+  });
+
   it("returns not_found when resolver confirms missing agent", () => {
     const memory = createBaseMemory({
       hasRenderedReady: true,
@@ -556,5 +669,164 @@ describe("deriveAgentScreenViewState", () => {
 
     expect(sync.ui).toBe("silent");
     expect(result.memory.hadInitialSyncFailure).toBe(false);
+  });
+
+  it("keeps successfully hydrated history visible when a later sync fails", () => {
+    const hydrated = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        agent: createAgent("agent-1"),
+        hasHydratedHistoryBefore: true,
+      },
+      memory: createBaseMemory({ hadInitialSyncFailure: true }),
+    });
+
+    expect(expectReadyState(hydrated.state).sync.status).toBe("idle");
+    expect(hydrated.memory.hadInitialSyncFailure).toBe(false);
+
+    const failedRefresh = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        agent: createAgent("agent-1"),
+        hasHydratedHistoryBefore: true,
+        missingAgentState: { kind: "error", message: "history sync failed" },
+      },
+      memory: hydrated.memory,
+    });
+
+    expectSyncErrorSync(expectReadyState(failedRefresh.state));
+    expect(failedRefresh.memory.hadInitialSyncFailure).toBe(false);
+  });
+
+  it("stays non-blocking from a post-hydration error through retry and success", () => {
+    const hydratedMemory = createBaseMemory({
+      hasRenderedReady: true,
+      lastReadyAgent: createAgent("agent-1"),
+    });
+    const failedRefresh = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        agent: createAgent("agent-1"),
+        hasHydratedHistoryBefore: true,
+        missingAgentState: { kind: "error", message: "history sync failed" },
+      },
+      memory: hydratedMemory,
+    });
+    expectSyncErrorSync(expectReadyState(failedRefresh.state));
+
+    const retry = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        agent: createAgent("agent-1"),
+        hasHydratedHistoryBefore: true,
+        needsAuthoritativeSync: true,
+      },
+      memory: failedRefresh.memory,
+    });
+    const retrySync = expectCatchingUpSync(expectReadyState(retry.state));
+    expect(retrySync.ui).toBe("silent");
+
+    const success = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        agent: createAgent("agent-1"),
+        hasHydratedHistoryBefore: true,
+      },
+      memory: retry.memory,
+    });
+    expect(expectReadyState(success.state).sync.status).toBe("idle");
+    expect(success.memory.hadInitialSyncFailure).toBe(false);
+  });
+
+  it("recovers a hydrated candidate after remount when sync fails", () => {
+    const result = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        agent: createAgent("agent-1"),
+        hasHydratedHistoryBefore: true,
+        missingAgentState: { kind: "error", message: "history sync failed" },
+      },
+      memory: createBaseMemory(),
+    });
+
+    const ready = expectReadyState(result.state);
+    expect(ready.source).toBe("authoritative");
+    expectSyncErrorSync(ready);
+  });
+
+  it("uses the stale agent when a post-hydration sync failure temporarily removes the candidate", () => {
+    const result = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        hasHydratedHistoryBefore: true,
+        missingAgentState: { kind: "error", message: "history sync failed" },
+      },
+      memory: createBaseMemory({
+        hasRenderedReady: true,
+        lastReadyAgent: createAgent("agent-1"),
+      }),
+    });
+
+    const ready = expectReadyState(result.state);
+    expect(ready.agent.id).toBe("agent-1");
+    expect(ready.source).toBe("stale");
+    expectSyncErrorSync(ready);
+  });
+
+  it("keeps hydrated empty history renderable when a later sync fails", () => {
+    const emptyHydration = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        agent: createAgent("agent-1"),
+        hasHydratedHistoryBefore: true,
+      },
+      memory: createBaseMemory(),
+    });
+    expect(expectReadyState(emptyHydration.state).sync.status).toBe("idle");
+
+    const failedRefresh = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        agent: createAgent("agent-1"),
+        hasHydratedHistoryBefore: true,
+        missingAgentState: { kind: "error", message: "history sync failed" },
+      },
+      memory: emptyHydration.memory,
+    });
+
+    expectSyncErrorSync(expectReadyState(failedRefresh.state));
+  });
+});
+
+describe("useAgentScreenStateMachine", () => {
+  it("does not inherit hydrated recovery memory after a route switch", () => {
+    const hydratedInput: AgentScreenMachineInput = {
+      ...createBaseInput(),
+      agent: createAgent("agent-1"),
+      hasHydratedHistoryBefore: true,
+    };
+    const { result, rerender } = renderHook(
+      ({ routeKey, input }: { routeKey: string; input: AgentScreenMachineInput }) =>
+        useAgentScreenStateMachine({ routeKey, input }),
+      {
+        initialProps: { routeKey: "agent-1", input: hydratedInput },
+      },
+    );
+    expect(result.current.tag).toBe("ready");
+
+    rerender({
+      routeKey: "agent-2",
+      input: {
+        ...createBaseInput(),
+        agent: createAgent("agent-2"),
+        needsAuthoritativeSync: true,
+        missingAgentState: { kind: "error", message: "history sync failed" },
+      },
+    });
+
+    expect(result.current).toEqual({
+      tag: "error",
+      message: "history sync failed",
+    });
   });
 });

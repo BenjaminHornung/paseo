@@ -59,10 +59,14 @@ function hasOptimisticCreateContinuity(input: AgentScreenMachineInput): boolean 
   return input.continuity.kind === "optimistic-create";
 }
 
-function shouldBlockInitialAuthoritativeReadyState(input: AgentScreenMachineInput): boolean {
+function shouldBlockInitialAuthoritativeReadyState(
+  input: AgentScreenMachineInput,
+  canRecoverVisibleHistory: boolean,
+): boolean {
   return (
     !hasOptimisticCreateContinuity(input) &&
     !input.hasHydratedHistoryBefore &&
+    !canRecoverVisibleHistory &&
     (input.needsAuthoritativeSync || input.isHistorySyncing)
   );
 }
@@ -208,7 +212,16 @@ export function deriveAgentScreenViewState({
 
   const useOptimisticCreateFlowAgent = shouldUseOptimisticCreateFlowAgent(input);
   const candidateAgent = resolveCandidateAgent({ input, useOptimisticCreateFlowAgent });
-  const shouldBlockReadyState = shouldBlockInitialAuthoritativeReadyState(input);
+  const hasDisplayableAgent =
+    Boolean(candidateAgent) || (nextMemory.hasRenderedReady && Boolean(nextMemory.lastReadyAgent));
+  const canRecoverVisibleHistory =
+    hasDisplayableAgent &&
+    (input.hasHydratedHistoryBefore ||
+      (nextMemory.hadInitialSyncFailure && nextMemory.hasRenderedReady));
+  const shouldBlockReadyState = shouldBlockInitialAuthoritativeReadyState(
+    input,
+    canRecoverVisibleHistory,
+  );
 
   if (input.missingAgentState.kind === "not_found") {
     return {
@@ -220,7 +233,7 @@ export function deriveAgentScreenViewState({
     };
   }
 
-  if (input.missingAgentState.kind === "error" && !nextMemory.hasRenderedReady) {
+  if (input.missingAgentState.kind === "error" && !canRecoverVisibleHistory) {
     return {
       state: {
         tag: "error",
