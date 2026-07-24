@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, afterEach } from "vitest";
+import { describe, expect, test, beforeEach, afterEach, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
@@ -532,6 +532,49 @@ describe("AgentStorage", () => {
     const afterReload = new AgentStorage(storagePath, logger);
     const after = await afterReload.list();
     expect(after.some((r) => r.id === agentId)).toBe(false);
+  });
+
+  test("remove rejects non-ENOENT unlink failures without mutating its cache or indexes", async () => {
+    const agentId = "agent-unlink-denied";
+    await storage.applySnapshot(createManagedAgent({ id: agentId }));
+
+    const unlinkError = Object.assign(new Error("unlink denied"), { code: "EACCES" });
+    const unlinkSpy = vi.spyOn(fs, "unlink").mockRejectedValue(unlinkError);
+    try {
+      await expect(storage.remove(agentId)).rejects.toBe(unlinkError);
+      expect((storage as unknown as { deleting: Set<string> }).deleting.has(agentId)).toBe(true);
+      await expect(storage.get(agentId)).resolves.toMatchObject({ id: agentId });
+      await expect(storage.list()).resolves.toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: agentId })]),
+      );
+    } finally {
+      unlinkSpy.mockRestore();
+    }
+  });
+
+  test("remove remains idempotent when the record file is already absent", async () => {
+    const agentId = "agent-record-already-absent";
+    await storage.applySnapshot(createManagedAgent({ id: agentId }));
+    await fs.unlink(path.join(storagePath, "tmp-project", `${agentId}.json`));
+
+    await expect(storage.remove(agentId)).resolves.toBeUndefined();
+    await expect(storage.get(agentId)).resolves.toBeNull();
+    await expect(storage.list()).resolves.not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: agentId })]),
+    );
+  });
+
+  test("successful removal releases the delete fence for later reuse of the agent id", async () => {
+    const agentId = "agent-id-reused-after-delete";
+    await storage.applySnapshot(createManagedAgent({ id: agentId }));
+
+    await storage.remove(agentId);
+    await storage.applySnapshot(createManagedAgent({ id: agentId }), { title: "Replacement" });
+
+    await expect(storage.get(agentId)).resolves.toMatchObject({
+      id: agentId,
+      title: "Replacement",
+    });
   });
 
   test.each(["commit", "release", "initialize"] as const)(

@@ -55,6 +55,8 @@ export interface FakeCodexAppServer {
     clientMessageId?: string;
   }): void;
   completeTurn(params?: { threadId?: string; turnId?: string }): void;
+  completeTurnLegacy(params?: { threadId?: string }): void;
+  abortTurnLegacy(params?: { threadId?: string }): void;
   changesThreadStatus(params: { threadId?: string; status: string }): void;
   startsSubAgent(params: {
     callId: string;
@@ -322,6 +324,16 @@ export function createFakeCodexAppServer(
       child.stdout.write(
         `${JSON.stringify({ method: "turn/completed", params: { threadId: params.threadId ?? "thread-1", turn: { id: params.turnId ?? latestTurnId, status: "completed" } } })}\n`,
       );
+    },
+    completeTurnLegacy(params = {}) {
+      writeLegacyEvent(params.threadId ?? "thread-1", "codex/event/task_complete", {
+        type: "task_complete",
+      });
+    },
+    abortTurnLegacy(params = {}) {
+      writeLegacyEvent(params.threadId ?? "thread-1", "codex/event/turn_aborted", {
+        type: "turn_aborted",
+      });
     },
     changesThreadStatus(params) {
       writeNotification("thread/status/changed", {

@@ -38,6 +38,7 @@ import type { GitSetupOptions } from "@getpaseo/protocol/messages";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { getHostRuntimeStore, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useVoiceAudioEngineOptional, useVoiceRuntimeOptional } from "@/contexts/voice-context";
+import { shouldDrainLegacyQueuedAgentMessage } from "./session-context-queue-drain";
 import type { AudioPlaybackSource } from "@/voice/audio-engine-types";
 import { useSessionStore, type MessageEntry, type SessionState } from "@/stores/session-store";
 import { useWorkspaceSetupStore } from "@/stores/workspace-setup-store";
@@ -60,6 +61,12 @@ import { showProviderNoticeToast } from "@/utils/provider-notice-toast";
 import { applyCheckoutStatusUpdateFromEvent } from "@/git/checkout-status-cache";
 import { useProviderSubagentStore } from "@/subagents/provider-store";
 import { revalidateSessionAfterResume } from "@/contexts/session-resume-revalidation";
+import {
+  createAgentMessageQueueSyncState,
+  mountAgentMessageQueueSync,
+  registerAgentMessageQueueSyncState,
+  unregisterAgentMessageQueueSyncState,
+} from "@/runtime/agent-message-queue-sync";
 
 // Re-export types from session-store and draft-store for backward compatibility
 export type { DraftInput } from "@/stores/draft-store";
@@ -312,7 +319,12 @@ function finalizeTimelineApplication(input: {
     markAgentHistorySynchronized(serverId, agentId);
     const session = useSessionStore.getState().sessions[serverId];
     const agent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
-    if (agent && agent.status !== "running") {
+    if (
+      shouldDrainLegacyQueuedAgentMessage({
+        agentStatus: agent?.status,
+        daemonOwnsQueue: session?.serverInfo?.features?.agentMessageQueue === true,
+      })
+    ) {
       getHostRuntimeStore().drainQueuedAgentMessage(serverId, agentId);
     }
   }
@@ -387,6 +399,8 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
   const toast = useToast();
 
   // Zustand store actions
+  const initializeSession = useSessionStore((state) => state.initializeSession);
+  const clearSession = useSessionStore((state) => state.clearSession);
   const setIsPlayingAudio = useSessionStore((state) => state.setIsPlayingAudio);
   const setMessages = useSessionStore((state) => state.setMessages);
   const setCurrentAssistantMessage = useSessionStore((state) => state.setCurrentAssistantMessage);
@@ -408,9 +422,11 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
   const setWorkspaces = useSessionStore((state) => state.setWorkspaces);
   const flushAgentLastActivity = useSessionStore((state) => state.flushAgentLastActivity);
   const setPendingPermissions = useSessionStore((state) => state.setPendingPermissions);
+  const updateSessionClient = useSessionStore((state) => state.updateSessionClient);
   const updateSessionServerInfo = useSessionStore((state) => state.updateSessionServerInfo);
   const setViewedTimelineSync = useSessionStore((state) => state.setViewedTimelineSync);
   const upsertWorkspaceSetupProgress = useWorkspaceSetupStore((state) => state.upsertProgress);
+  const clearWorkspaceSetupServer = useWorkspaceSetupStore((state) => state.clearServer);
 
   // Track focused agent for heartbeat
   const focusedAgentId = useSessionStore(
@@ -425,6 +441,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
   const viewedTimelineSyncRef = useRef<ViewedTimelineSync | null>(null);
   const audioOutputBuffersRef = useRef<Map<string, BufferedAudioChunk[]>>(new Map());
   const activeAudioGroupsRef = useRef<Set<string>>(new Set());
+  const agentMessageQueueSyncStateRef = useRef(createAgentMessageQueueSyncState());
   const isAppVisible = useAppVisible();
 
   useEffect(() => {
@@ -520,6 +537,17 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
     [serverId],
   );
 
+  // Initialize session in store
+  useEffect(() => {
+    const generation = getHostRuntimeStore().getSnapshot(serverId)?.clientGeneration ?? 0;
+    initializeSession(serverId, client, generation);
+  }, [serverId, client, initializeSession]);
+
+  useEffect(() => {
+    const generation = getHostRuntimeStore().getSnapshot(serverId)?.clientGeneration ?? 0;
+    updateSessionClient(serverId, client, generation);
+  }, [serverId, client, updateSessionClient]);
+
   useEffect(() => {
     const serverInfo = client.getLastServerInfoMessage();
     if (!serverInfo) {
@@ -537,6 +565,39 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       ...(serverInfo.features ? { features: serverInfo.features } : {}),
     });
   }, [client, serverId, updateSessionServerInfo]);
+
+  const serverQueuesAgentMessages = useSessionStore(
+    (state) => state.sessions[serverId]?.serverInfo?.features?.agentMessageQueue === true,
+  );
+
+  useEffect(() => {
+    if (!serverQueuesAgentMessages) {
+      unregisterAgentMessageQueueSyncState(serverId, agentMessageQueueSyncStateRef.current);
+      return;
+    }
+    const queueSyncState = agentMessageQueueSyncStateRef.current;
+    registerAgentMessageQueueSyncState(serverId, queueSyncState);
+    return () => {
+      unregisterAgentMessageQueueSyncState(serverId, queueSyncState);
+    };
+  }, [serverId, serverQueuesAgentMessages]);
+
+  useEffect(() => {
+    if (!serverQueuesAgentMessages) {
+      agentMessageQueueSyncStateRef.current.revisions.clear();
+      agentMessageQueueSyncStateRef.current.unacknowledged.clear();
+      agentMessageQueueSyncStateRef.current.intentVersions.clear();
+      agentMessageQueueSyncStateRef.current.inFlightEnqueues.clear();
+      agentMessageQueueSyncStateRef.current.pendingEnqueueFollowUps.clear();
+      return;
+    }
+    if (!isConnected) return;
+    return mountAgentMessageQueueSync({
+      client,
+      serverId,
+      state: agentMessageQueueSyncStateRef.current,
+    });
+  }, [client, isConnected, serverId, serverQueuesAgentMessages]);
 
   useEffect(() => {
     if (!isConnected) {
@@ -1311,6 +1372,14 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
     },
     [client],
   );
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      clearWorkspaceSetupServer(serverId);
+      clearSession(serverId);
+    };
+  }, [clearSession, clearWorkspaceSetupServer, serverId]);
 
   return children;
 }

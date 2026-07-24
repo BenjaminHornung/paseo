@@ -84,6 +84,8 @@ import type {
   DaemonGetPairingOfferResponse,
   DiagnosticsResponse,
   AgentRewindResponseMessage,
+  QueueAgentMessageResponseMessage,
+  QueueAgentMessageListResponseMessage,
   ListTerminalsResponse,
   CreateTerminalResponse,
   SubscribeTerminalResponse,
@@ -331,6 +333,8 @@ export interface AgentAttentionRequiredNotification {
   shouldNotify: boolean;
   notification?: AgentAttentionNotificationPayload;
 }
+
+export type QueueAgentMessageOptions = SendMessageOptions;
 
 type AgentConfigOverrides = Partial<Omit<AgentSessionConfig, "provider" | "cwd">>;
 
@@ -982,6 +986,11 @@ function decodeBase64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
+function getLegacyExplorerFileRevision(file: LegacyFileExplorerFilePayload): string | undefined {
+  const candidate = (file as { revision?: unknown }).revision;
+  return typeof candidate === "string" ? candidate : undefined;
+}
+
 function legacyExplorerFileToBytes(file: LegacyFileExplorerFilePayload): FileReadResult {
   let bytes: Uint8Array;
   if (file.encoding === "base64" && file.content) {
@@ -999,7 +1008,7 @@ function legacyExplorerFileToBytes(file: LegacyFileExplorerFilePayload): FileRea
     path: file.path,
     kind: file.kind,
     modifiedAt: file.modifiedAt,
-    revision: file.revision,
+    revision: getLegacyExplorerFileRevision(file),
   };
 }
 
@@ -2851,6 +2860,76 @@ export class DaemonClient {
 
   async sendMessage(agentId: string, text: string, options?: SendMessageOptions): Promise<void> {
     await this.sendAgentMessage(agentId, text, options);
+  }
+
+  async queueAgentMessage(
+    agentId: string,
+    text: string,
+    options?: QueueAgentMessageOptions,
+  ): Promise<QueueAgentMessageResponseMessage["payload"]["message"]> {
+    const messageId = options?.messageId ?? crypto.randomUUID();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"queue.agent_message.enqueue.response">({
+        message: {
+          type: "queue.agent_message.enqueue.request",
+          agentId,
+          text,
+          messageId,
+          ...(options?.images ? { images: options.images } : {}),
+          ...(options?.attachments ? { attachments: options.attachments } : {}),
+        },
+      });
+    if (!payload.accepted) {
+      throw new Error(payload.error ?? "queueAgentMessage rejected");
+    }
+    return payload.message;
+  }
+
+  async listQueuedAgentMessages(
+    agentId?: string,
+  ): Promise<QueueAgentMessageListResponseMessage["payload"]["queues"]> {
+    if (agentId !== undefined && agentId.trim().length === 0) {
+      throw new Error("agentId must not be blank");
+    }
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"queue.agent_message.list.response">({
+        message: {
+          type: "queue.agent_message.list.request",
+          ...(agentId !== undefined ? { agentId } : {}),
+        },
+      });
+    if (payload.error !== null) {
+      throw new Error(payload.error.trim() || "listQueuedAgentMessages rejected");
+    }
+    return payload.queues;
+  }
+
+  async cancelQueuedAgentMessage(agentId: string, queuedMessageId: string): Promise<void> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"queue.agent_message.cancel.response">({
+        message: {
+          type: "queue.agent_message.cancel.request",
+          agentId,
+          queuedMessageId,
+        },
+      });
+    if (!payload.accepted) {
+      throw new Error(payload.error ?? "cancelQueuedAgentMessage rejected");
+    }
+  }
+
+  async dispatchQueuedAgentMessage(agentId: string, queuedMessageId: string): Promise<void> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"queue.agent_message.dispatch.response">({
+        message: {
+          type: "queue.agent_message.dispatch.request",
+          agentId,
+          queuedMessageId,
+        },
+      });
+    if (!payload.accepted) {
+      throw new Error(payload.error ?? "dispatchQueuedAgentMessage rejected");
+    }
   }
 
   async rewindAgent(
@@ -5216,6 +5295,7 @@ export class DaemonClient {
             [CLIENT_CAPS.terminalReflowableSnapshot]: true,
             [CLIENT_CAPS.providerSubagents]: true,
             [CLIENT_CAPS.projectUpdates]: true,
+            [CLIENT_CAPS.agentMessageQueueEvents]: true,
             ...this.config.capabilities,
           },
           ...(this.config.appVersion ? { appVersion: this.config.appVersion } : {}),

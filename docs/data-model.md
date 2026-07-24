@@ -46,6 +46,7 @@ $PASEO_HOME/
 ├── agents/
 │   └── {sanitized-cwd}/
 │       └── {agentId}.json               # One file per agent
+├── agent-message-queue.json              # Durable queued agent messages + revisions
 ├── schedules/
 │   └── {scheduleId}.json                # One file per schedule
 ├── chat/
@@ -156,6 +157,16 @@ Each agent is stored as a separate JSON file, grouped by project directory.
 | `icon`        | `string?`             |
 | `value`       | `string \| null`      |
 | `options`     | `AgentSelectOption[]` |
+
+### Durable Agent Message Queue
+
+**Path:** `$PASEO_HOME/agent-message-queue.json`
+
+Queued agent messages and their per-agent revisions are persisted atomically in this shared store.
+Archiving an agent clears its pending messages but retains an incremented revision tombstone so
+clients can observe the queue becoming empty. Hard deletion removes both the pending queue and its
+revision. The server reports hard-delete success and removes agent/workspace projections only after
+the queue, committed timeline, and agent record have all been durably cleaned up.
 
 ---
 

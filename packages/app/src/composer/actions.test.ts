@@ -8,15 +8,27 @@ import type {
 } from "@/attachments/types";
 import type { StreamItem } from "@/types/stream";
 import {
+  applyQueuedComposerEditDraftIfUnchanged,
+  buildRecoverableQueuedComposerDraftAttachments,
   cancelComposerAgent,
+  createQueuedComposerActionController,
   dispatchComposerAgentMessage,
   editQueuedComposerMessage,
   findGithubItemByOption,
+  getQueuedComposerMessageEditDraft,
   isAttachmentSelectedForGithubItem,
   openComposerAttachment,
   pickAndPersistImages,
+  preserveQueuedComposerMessage,
+  orchestrateQueuedComposerServerEditCancellation,
+  queueComposerServerMessage,
   queueComposerMessage,
+  recoverQueuedComposerEditCancellation,
+  removeComposerNormalAttachmentIfCurrent,
+  removeComposerAttachmentWithWorkspaceSupport,
+  removeQueuedComposerMessage,
   removeComposerAttachmentAtIndex,
+  runQueuedComposerControlledAction,
   sendQueuedComposerMessageNow,
   toggleGithubAttachment,
   toggleGithubAttachmentFromPicker,
@@ -64,6 +76,20 @@ const prItem: ForgeSearchItem = {
 
 function imageWithId(id: string): AttachmentMetadata {
   return { ...imageMetadata, id, storageKey: id, fileName: `${id}.png` };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
 }
 
 function reviewWorkspaceAttachment(
@@ -540,6 +566,67 @@ describe("queueComposerMessage", () => {
   });
 });
 
+describe("getQueuedComposerMessageEditDraft", () => {
+  it("returns null when the message id is missing", () => {
+    const result = getQueuedComposerMessageEditDraft({
+      messages: [{ id: "other", text: "other", attachments: [] }],
+      messageId: "missing",
+    });
+    expect(result).toBeNull();
+  });
+
+  it("returns the text and only user attachments from a readonly queue mirror", () => {
+    const review = reviewWorkspaceAttachment("Queued snapshot.");
+    const image = imageWithId("img-queued-server-edit");
+    const result = getQueuedComposerMessageEditDraft({
+      messages: [
+        {
+          id: "msg-1",
+          text: "server queued draft",
+          attachments: [{ kind: "image", metadata: image }, review],
+        },
+      ],
+      messageId: "msg-1",
+    });
+
+    expect(result).toEqual({
+      text: "server queued draft",
+      attachments: [
+        { kind: "image", metadata: image },
+        { kind: "agent_attachment", attachment: review.attachment },
+      ],
+    });
+  });
+});
+
+describe("buildRecoverableQueuedComposerDraftAttachments", () => {
+  it("preserves every represented image and structured attachment for queued edits", () => {
+    const image = imageWithId("img-recoverable");
+    const review = reviewWorkspaceAttachment("Keep my review.");
+    const browserElement = browserElementWorkspaceAttachment();
+
+    expect(
+      buildRecoverableQueuedComposerDraftAttachments([
+        { kind: "image", metadata: image },
+        review,
+        browserElement,
+      ]),
+    ).toEqual([
+      { kind: "image", metadata: image },
+      { kind: "agent_attachment", attachment: review.attachment },
+      {
+        kind: "agent_attachment",
+        attachment: {
+          type: "text",
+          mimeType: "text/plain",
+          title: "Browser element · button",
+          text: browserElement.attachment.formatted,
+        },
+      },
+    ]);
+  });
+});
+
 describe("editQueuedComposerMessage", () => {
   it("returns null and leaves the queue untouched when the message id is missing", () => {
     const queue = createFakeQueue(
@@ -571,9 +658,528 @@ describe("editQueuedComposerMessage", () => {
     const result = editQueuedComposerMessage({ agentId: "agent", messageId: "msg-1", queue });
     expect(result).toEqual({
       text: "queued draft",
-      attachments: [{ kind: "image", metadata: image }],
+      attachments: [
+        { kind: "image", metadata: image },
+        { kind: "agent_attachment", attachment: review.attachment },
+      ],
     });
     expect(queue.state.get("agent")).toEqual([]);
+  });
+});
+
+describe("applyQueuedComposerEditDraftIfUnchanged", () => {
+  it("restores the queued draft only when the composer generation is unchanged", () => {
+    let generation = 3;
+    const setUserInput = vi.fn();
+    const setAttachments = vi.fn();
+    const draft = {
+      text: "queued draft",
+      attachments: [
+        { kind: "image", metadata: imageWithId("img-generation") },
+      ] satisfies UserComposerAttachment[],
+    };
+
+    expect(
+      applyQueuedComposerEditDraftIfUnchanged({
+        startedGeneration: 3,
+        getCurrentGeneration: () => generation,
+        draft,
+        setUserInput,
+        setAttachments,
+      }),
+    ).toBe(true);
+    expect(setUserInput).toHaveBeenCalledWith("queued draft");
+    expect(setAttachments).toHaveBeenCalledWith(draft.attachments);
+
+    generation = 4;
+    setUserInput.mockClear();
+    setAttachments.mockClear();
+
+    expect(
+      applyQueuedComposerEditDraftIfUnchanged({
+        startedGeneration: 3,
+        getCurrentGeneration: () => generation,
+        draft,
+        setUserInput,
+        setAttachments,
+      }),
+    ).toBe(false);
+    expect(setUserInput).not.toHaveBeenCalled();
+    expect(setAttachments).not.toHaveBeenCalled();
+  });
+});
+
+describe("preserveQueuedComposerMessage", () => {
+  it("keeps the original queued draft recoverable when newer composer input already exists", () => {
+    let generation = 3;
+    const setUserInput = vi.fn();
+    const setAttachments = vi.fn();
+    const queue = createFakeQueue(
+      new Map([["agent", [{ id: "msg-1", text: "original draft", attachments: [] }]]]),
+    );
+
+    expect(
+      applyQueuedComposerEditDraftIfUnchanged({
+        startedGeneration: 3,
+        getCurrentGeneration: () => generation,
+        draft: { text: "original draft", attachments: [] },
+        setUserInput,
+        setAttachments,
+      }),
+    ).toBe(true);
+
+    generation = 4;
+    expect(
+      applyQueuedComposerEditDraftIfUnchanged({
+        startedGeneration: 3,
+        getCurrentGeneration: () => generation,
+        draft: { text: "original draft", attachments: [] },
+        setUserInput,
+        setAttachments,
+      }),
+    ).toBe(false);
+
+    preserveQueuedComposerMessage({
+      agentId: "agent",
+      queue,
+      message: { id: "msg-1", text: "original draft", attachments: [] },
+    });
+
+    expect(queue.state.get("agent")).toEqual([
+      { id: "msg-1", text: "original draft", attachments: [] },
+    ]);
+  });
+});
+
+describe("recoverQueuedComposerEditCancellation", () => {
+  it("re-registers the same stable id before recoverable local requeue when newer typing wins", () => {
+    const queue = createFakeQueue();
+    const registered: QueuedComposerMessage[] = [];
+    const outcome = recoverQueuedComposerEditCancellation({
+      agentId: "agent",
+      queue,
+      message: { id: "msg-1", text: "original draft", attachments: [] },
+      startedGeneration: 3,
+      getCurrentGeneration: () => 4,
+      draft: { text: "original draft", attachments: [] },
+      setUserInput: vi.fn(),
+      setAttachments: vi.fn(),
+      registerRecoverableIntent: (message) => registered.push(message),
+    });
+
+    expect(outcome).toBe("requeued");
+    expect(registered).toEqual([{ id: "msg-1", text: "original draft", attachments: [] }]);
+    expect(queue.state.get("agent")).toEqual([
+      { id: "msg-1", text: "original draft", attachments: [] },
+    ]);
+  });
+});
+
+describe("removeComposerAttachmentWithWorkspaceSupport", () => {
+  it("bumps generation only for actual workspace removal and stays no-op for stale selections", () => {
+    const review = reviewWorkspaceAttachment("Workspace attachment");
+    const marked: ComposerAttachment[] = [];
+    let bumps = 0;
+    const removeNormalAttachment = vi.fn();
+
+    expect(
+      removeComposerAttachmentWithWorkspaceSupport({
+        selectedAttachments: [review],
+        index: 0,
+        markGithubAttachmentRemoved: (attachment) => {
+          if (attachment) {
+            marked.push(attachment);
+          }
+        },
+        removeWorkspaceAttachment: () => "removed",
+        removeNormalAttachment: () => {
+          removeNormalAttachment();
+          return "removed";
+        },
+        bumpGeneration: () => {
+          bumps += 1;
+        },
+      }),
+    ).toBe("removed-workspace");
+    expect(bumps).toBe(1);
+    expect(removeNormalAttachment).not.toHaveBeenCalled();
+    expect(marked).toEqual([review]);
+
+    expect(
+      removeComposerAttachmentWithWorkspaceSupport({
+        selectedAttachments: [review],
+        index: 0,
+        markGithubAttachmentRemoved: () => undefined,
+        removeWorkspaceAttachment: () => "noop",
+        removeNormalAttachment: () => {
+          throw new Error("unexpected user remove");
+        },
+        bumpGeneration: () => {
+          bumps += 1;
+        },
+      }),
+    ).toBe("noop");
+    expect(bumps).toBe(1);
+
+    expect(
+      removeComposerAttachmentWithWorkspaceSupport({
+        selectedAttachments: [],
+        index: 0,
+        markGithubAttachmentRemoved: () => {
+          throw new Error("unexpected mark");
+        },
+        removeWorkspaceAttachment: () => {
+          throw new Error("unexpected workspace remove");
+        },
+        removeNormalAttachment: () => {
+          throw new Error("unexpected user remove");
+        },
+        bumpGeneration: () => {
+          bumps += 1;
+        },
+      }),
+    ).toBe("noop");
+    expect(bumps).toBe(1);
+  });
+
+  it("only invokes normal removal and bumps once for an actual non-workspace removal", () => {
+    let bumps = 0;
+    const attachments = [{ kind: "image", metadata: imageWithId("img-normal") }] as const;
+    expect(
+      removeComposerAttachmentWithWorkspaceSupport({
+        selectedAttachments: attachments,
+        index: 0,
+        markGithubAttachmentRemoved: () => undefined,
+        removeWorkspaceAttachment: () => "not-workspace",
+        removeNormalAttachment: () => {
+          const next = removeComposerAttachmentAtIndex({
+            attachments: [...attachments],
+            index: 0,
+            deleteAttachments: () => undefined,
+          });
+          return next.length === attachments.length ? "noop" : "removed";
+        },
+        bumpGeneration: () => {
+          bumps += 1;
+        },
+      }),
+    ).toBe("removed-user");
+    expect(bumps).toBe(1);
+  });
+
+  it("does not bump for stale or missing non-workspace removal", () => {
+    let bumps = 0;
+    expect(
+      removeComposerAttachmentWithWorkspaceSupport({
+        selectedAttachments: [{ kind: "image", metadata: imageWithId("img-normal") }],
+        index: 0,
+        markGithubAttachmentRemoved: () => undefined,
+        removeWorkspaceAttachment: () => "not-workspace",
+        removeNormalAttachment: () => "noop",
+        bumpGeneration: () => {
+          bumps += 1;
+        },
+      }),
+    ).toBe("noop");
+    expect(bumps).toBe(0);
+  });
+
+  it("does not let a stale repeated normal remove callback delete the next attachment", () => {
+    const imageA = { kind: "image", metadata: imageWithId("img-a") } as const;
+    const imageB = { kind: "image", metadata: imageWithId("img-b") } as const;
+    const deletedBatches: AttachmentMetadata[][] = [];
+    let bumps = 0;
+    const selectedAttachments: ComposerAttachment[] = [imageA, imageB];
+    const selectedAttachmentsRef: { current: ComposerAttachment[] } = {
+      current: selectedAttachments,
+    };
+    const removeNormalAttachment = () => {
+      const result = removeComposerNormalAttachmentIfCurrent({
+        currentAttachments: selectedAttachmentsRef.current,
+        expectedAttachment: imageA,
+        index: 0,
+        deleteAttachments: (metadata) => {
+          deletedBatches.push(metadata);
+        },
+      });
+      if (result.status === "removed") {
+        selectedAttachmentsRef.current = result.nextAttachments;
+      }
+      return result.status;
+    };
+
+    expect(
+      removeComposerAttachmentWithWorkspaceSupport({
+        selectedAttachments,
+        index: 0,
+        markGithubAttachmentRemoved: () => undefined,
+        removeWorkspaceAttachment: () => "not-workspace",
+        removeNormalAttachment,
+        bumpGeneration: () => {
+          bumps += 1;
+        },
+      }),
+    ).toBe("removed-user");
+    expect(
+      removeComposerAttachmentWithWorkspaceSupport({
+        selectedAttachments,
+        index: 0,
+        markGithubAttachmentRemoved: () => undefined,
+        removeWorkspaceAttachment: () => "not-workspace",
+        removeNormalAttachment,
+        bumpGeneration: () => {
+          bumps += 1;
+        },
+      }),
+    ).toBe("noop");
+    expect(selectedAttachmentsRef.current).toEqual([imageB]);
+    expect(bumps).toBe(1);
+    expect(deletedBatches).toEqual([[imageA.metadata]]);
+  });
+});
+
+describe("removeComposerNormalAttachmentIfCurrent", () => {
+  it("removes a recreated equivalent attachment with stable identity semantics", () => {
+    const imageA = { kind: "image", metadata: imageWithId("img-a") } as const;
+    const recreatedImageA = { kind: "image", metadata: { ...imageA.metadata } } as const;
+    const imageB = { kind: "image", metadata: imageWithId("img-b") } as const;
+    const deletedBatches: AttachmentMetadata[][] = [];
+
+    const result = removeComposerNormalAttachmentIfCurrent({
+      currentAttachments: [recreatedImageA, imageB],
+      expectedAttachment: imageA,
+      index: 0,
+      deleteAttachments: (metadata) => {
+        deletedBatches.push(metadata);
+      },
+    });
+
+    expect(result.status).toBe("removed");
+    expect(result.nextAttachments).toEqual([imageB]);
+    expect(result.nextUserAttachments).toEqual([imageB]);
+    expect(deletedBatches).toEqual([[recreatedImageA.metadata]]);
+  });
+
+  it("returns noop when the current index no longer holds the captured attachment identity", () => {
+    const imageA = { kind: "image", metadata: imageWithId("img-a") } as const;
+    const imageB = { kind: "image", metadata: imageWithId("img-b") } as const;
+    const deletedBatches: AttachmentMetadata[][] = [];
+
+    const result = removeComposerNormalAttachmentIfCurrent({
+      currentAttachments: [imageB],
+      expectedAttachment: imageA,
+      index: 0,
+      deleteAttachments: (metadata) => {
+        deletedBatches.push(metadata);
+      },
+    });
+
+    expect(result.status).toBe("noop");
+    expect(result.nextAttachments).toEqual([imageB]);
+    expect(result.nextUserAttachments).toEqual([imageB]);
+    expect(deletedBatches).toEqual([]);
+  });
+});
+
+describe("queueComposerServerMessage", () => {
+  it("registers the stable intent before a lost queue response and reuses the same id", async () => {
+    const queue = createFakeQueue();
+    const registered: QueuedComposerMessage[] = [];
+    const send = vi.fn(async (_message: QueuedComposerMessage) => {
+      throw new Error("response lost after durable accept");
+    });
+
+    const prepared = queueComposerServerMessage({
+      agentId: "agent",
+      text: "queued durable",
+      attachments: [],
+      queue,
+      messageId: "stable-id",
+      registerIntent: (message) => registered.push(message),
+      send,
+    });
+
+    expect(prepared.queued).toEqual({ id: "stable-id", text: "queued durable", attachments: [] });
+    expect(registered).toEqual([{ id: "stable-id", text: "queued durable", attachments: [] }]);
+    expect(queue.state.get("agent")).toEqual([
+      { id: "stable-id", text: "queued durable", attachments: [] },
+    ]);
+    await expect(prepared.submit?.()).rejects.toThrow("response lost after durable accept");
+    expect(send).toHaveBeenCalledWith({
+      id: "stable-id",
+      text: "queued durable",
+      attachments: [],
+    });
+  });
+});
+
+describe("orchestrateQueuedComposerServerEditCancellation", () => {
+  it("keeps a workspace attachment removal visible across deferred edit recovery", async () => {
+    const queue = createFakeQueue();
+    const removedWorkspaceAttachment = reviewWorkspaceAttachment("workspace review");
+    let generation = 10;
+    const setUserInput = vi.fn();
+    const setAttachments = vi.fn();
+    const compensationIds: string[] = [];
+
+    const removalResult = removeComposerAttachmentWithWorkspaceSupport({
+      selectedAttachments: [removedWorkspaceAttachment],
+      index: 0,
+      markGithubAttachmentRemoved: () => undefined,
+      removeWorkspaceAttachment: () => "removed",
+      removeNormalAttachment: () => {
+        throw new Error("unexpected normal removal");
+      },
+      bumpGeneration: () => {
+        generation += 1;
+      },
+    });
+    expect(removalResult).toBe("removed-workspace");
+
+    const result = await orchestrateQueuedComposerServerEditCancellation({
+      agentId: "agent",
+      messageId: "stable-id",
+      message: {
+        id: "stable-id",
+        text: "queued draft",
+        attachments: [reviewWorkspaceAttachment("queued")],
+      },
+      queue,
+      startedGeneration: 10,
+      getCurrentGeneration: () => generation,
+      draft: {
+        text: "queued draft",
+        attachments: [],
+      },
+      setUserInput,
+      setAttachments,
+      registerIntent: () => null,
+      clearIntentIfCurrent: () => false,
+      enqueueCompensation: (messageId) => {
+        compensationIds.push(messageId);
+      },
+      cancelMessage: async () => undefined,
+      onError: () => undefined,
+    });
+
+    expect(result).toBe("requeued");
+    expect(setUserInput).not.toHaveBeenCalled();
+    expect(setAttachments).not.toHaveBeenCalled();
+    expect(queue.state.get("agent")?.[0]?.id).toBe("stable-id");
+    expect(compensationIds).toEqual(["stable-id"]);
+  });
+
+  it("clears only the original ownership on restored success and preserves a newer same-id replacement", async () => {
+    const queue = createFakeQueue(
+      new Map([["agent", [{ id: "stable-id", text: "queued draft", attachments: [] }]]]),
+    );
+    const originalToken = {};
+    const replacementToken = {};
+    let currentToken: object | null = null;
+    const result = await orchestrateQueuedComposerServerEditCancellation({
+      agentId: "agent",
+      messageId: "stable-id",
+      message: { id: "stable-id", text: "queued draft", attachments: [] },
+      queue,
+      startedGeneration: 1,
+      getCurrentGeneration: () => 1,
+      draft: { text: "queued draft", attachments: [] },
+      setUserInput: vi.fn(),
+      setAttachments: vi.fn(),
+      registerIntent: (message) => {
+        const token = currentToken === null ? originalToken : replacementToken;
+        currentToken = token;
+        if (token === replacementToken) {
+          preserveQueuedComposerMessage({
+            agentId: "agent",
+            queue,
+            message: { ...message, text: "replacement draft" },
+          });
+        }
+        return token;
+      },
+      clearIntentIfCurrent: (_messageId, token) => token === currentToken,
+      enqueueCompensation: () => undefined,
+      cancelMessage: async () => {
+        currentToken = replacementToken;
+        preserveQueuedComposerMessage({
+          agentId: "agent",
+          queue,
+          message: { id: "stable-id", text: "replacement draft", attachments: [] },
+        });
+      },
+      onError: () => undefined,
+    });
+
+    expect(result).toBe("restored");
+    expect(queue.state.get("agent")).toEqual([
+      { id: "stable-id", text: "replacement draft", attachments: [] },
+    ]);
+  });
+});
+
+describe("createQueuedComposerActionController", () => {
+  it("synchronously blocks same-tick duplicate and cross-action invocations for the same id", () => {
+    const snapshots: string[][] = [];
+    const controller = createQueuedComposerActionController({
+      onChange: (pending) => snapshots.push(Array.from(pending).sort()),
+    });
+
+    expect(controller.tryAcquire("msg-1")).toBe(true);
+    expect(controller.tryAcquire("msg-1")).toBe(false);
+    expect(controller.isPending("msg-1")).toBe(true);
+    controller.release("msg-1");
+    expect(controller.tryAcquire("msg-1")).toBe(true);
+    controller.release("msg-1");
+
+    expect(snapshots).toEqual([["msg-1"], [], ["msg-1"], []]);
+  });
+});
+
+describe("runQueuedComposerControlledAction", () => {
+  it("uses the same controller wiring as the component and releases the UI lock after rejection", async () => {
+    const snapshots: string[][] = [];
+    const controller = createQueuedComposerActionController({
+      onChange: (pending) => snapshots.push(Array.from(pending).sort()),
+    });
+    const first = deferred<void>();
+    const firstRun = vi.fn(async () => await first.promise);
+    const secondRun = vi.fn(async () => undefined);
+
+    const firstPromise = runQueuedComposerControlledAction({
+      messageId: "msg-1",
+      controller,
+      run: firstRun,
+    });
+    const blocked = await runQueuedComposerControlledAction({
+      messageId: "msg-1",
+      controller,
+      run: secondRun,
+    });
+
+    expect(blocked).toEqual({ status: "blocked" });
+    expect(controller.isPending("msg-1")).toBe(true);
+    expect(secondRun).not.toHaveBeenCalled();
+
+    first.resolve();
+    await expect(firstPromise).resolves.toEqual({
+      status: "completed",
+      result: undefined,
+    });
+    expect(controller.isPending("msg-1")).toBe(false);
+
+    const rejectRun = vi.fn(async () => {
+      throw new Error("cancel failed");
+    });
+    await expect(
+      runQueuedComposerControlledAction({
+        messageId: "msg-1",
+        controller,
+        run: rejectRun,
+      }),
+    ).rejects.toThrow("cancel failed");
+    expect(controller.isPending("msg-1")).toBe(false);
+    expect(snapshots).toEqual([["msg-1"], [], ["msg-1"], []]);
   });
 });
 
@@ -635,6 +1241,58 @@ describe("sendQueuedComposerMessageNow", () => {
     expect(result).toEqual({ status: "failed", errorMessage: "network down" });
     const state = queue.state.get("agent");
     expect(state?.map((m) => m.id)).toEqual(["msg-1", "msg-2"]);
+  });
+});
+
+describe("removeQueuedComposerMessage", () => {
+  it("fails closed in server-backed mode when no remote cancel RPC is available", async () => {
+    const queue = createFakeQueue(
+      new Map([["agent", [{ id: "msg-1", text: "keep me", attachments: [] }]]]),
+    );
+
+    await expect(
+      removeQueuedComposerMessage({
+        agentId: "agent",
+        messageId: "msg-1",
+        queue,
+        requireRemoteCancel: true,
+        failedToRemoveMessage: "remote unavailable",
+      }),
+    ).resolves.toEqual({ status: "failed", errorMessage: "remote unavailable" });
+    expect(queue.state.get("agent")).toEqual([{ id: "msg-1", text: "keep me", attachments: [] }]);
+  });
+
+  it("removes a local queued entry immediately when no remote cancel is needed", async () => {
+    const queue = createFakeQueue(
+      new Map([["agent", [{ id: "msg-1", text: "remove me", attachments: [] }]]]),
+    );
+
+    await expect(
+      removeQueuedComposerMessage({
+        agentId: "agent",
+        messageId: "msg-1",
+        queue,
+      }),
+    ).resolves.toEqual({ status: "removed" });
+    expect(queue.state.get("agent")).toEqual([]);
+  });
+
+  it("leaves the mirror unchanged when remote cancellation fails", async () => {
+    const queue = createFakeQueue(
+      new Map([["agent", [{ id: "msg-1", text: "keep me", attachments: [] }]]]),
+    );
+
+    await expect(
+      removeQueuedComposerMessage({
+        agentId: "agent",
+        messageId: "msg-1",
+        queue,
+        cancelMessage: async () => {
+          throw new Error("cancel failed");
+        },
+      }),
+    ).resolves.toEqual({ status: "failed", errorMessage: "cancel failed" });
+    expect(queue.state.get("agent")).toEqual([{ id: "msg-1", text: "keep me", attachments: [] }]);
   });
 });
 

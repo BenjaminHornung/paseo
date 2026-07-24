@@ -1890,6 +1890,12 @@ function readCodexThreadStatusType(status: z.infer<typeof CodexThreadStatusValue
   return typeof status === "string" ? status : status.type;
 }
 
+function isCodexThreadReadTerminalStatus(statusType: string): boolean {
+  return ["idle", "completed", "interrupted", "failed", "canceled", "cancelled"].includes(
+    statusType,
+  );
+}
+
 async function requestCodexThreadHistory(
   requestThread: CodexThreadReadRequest,
   threadId: string,
@@ -2306,13 +2312,7 @@ type ParsedCodexNotification =
   | { kind: "thread_started"; threadId: string }
   | { kind: "thread_status_changed"; threadId: string | null; statusType: string | null }
   | { kind: "turn_started"; turnId: string; threadId: string | null }
-  | {
-      kind: "turn_completed";
-      turnId: string | null;
-      status: string;
-      errorMessage: string | null;
-      threadId: string | null;
-    }
+  | ParsedTurnCompletedNotification
   | {
       kind: "plan_updated";
       plan: Array<{ step: string | null; status: string | null }>;
@@ -2392,6 +2392,28 @@ type ParsedCodexNotification =
   | { kind: "context_compacted"; threadId: string; turnId: string | null }
   | { kind: "invalid_payload"; method: string; params: unknown }
   | { kind: "unknown_method"; method: string; params: unknown };
+
+interface ParsedCanonicalTurnCompletedNotification {
+  kind: "turn_completed";
+  source: "canonical";
+  turnId: string | null;
+  status: string;
+  errorMessage: string | null;
+  threadId: string | null;
+}
+
+interface ParsedLegacyAliasTurnCompletedNotification {
+  kind: "turn_completed";
+  source: "legacy_alias";
+  turnId: null;
+  status: string;
+  errorMessage: string | null;
+  threadId: string | null;
+}
+
+type ParsedTurnCompletedNotification =
+  | ParsedCanonicalTurnCompletedNotification
+  | ParsedLegacyAliasTurnCompletedNotification;
 
 type CodexDeltaNotification = Extract<
   ParsedCodexNotification,
@@ -2478,6 +2500,7 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        source: "canonical",
         turnId: params.turn.id,
         status: params.turn.status,
         errorMessage: params.turn.error?.message ?? null,
@@ -2899,6 +2922,7 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        source: "legacy_alias",
         turnId: null,
         status: "interrupted",
         errorMessage: null,
@@ -2920,6 +2944,7 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        source: "legacy_alias",
         turnId: null,
         status: "completed",
         errorMessage: null,
@@ -3179,12 +3204,13 @@ export class CodexAppServerAgentSession implements AgentSession {
   private turnStartedGeneration: number | null = null;
   private activeProviderTurnId: string | null = null;
   private pendingRootTurnStartedIds = new Set<string>();
-  private pendingRootTurnCompletions = new Map<
-    string,
-    Extract<ParsedCodexNotification, { kind: "turn_completed" }>
-  >();
+  private pendingRootTurnCompletions = new Map<string, ParsedCanonicalTurnCompletedNotification>();
   private pendingRootIdle = false;
   private pendingRootIdleReconciliationGeneration: number | null = null;
+  private pendingLegacyRootTerminalHint: {
+    generation: number;
+    threadId: string;
+  } | null = null;
   private cachedRuntimeInfo: AgentRuntimeInfo | null = null;
   private serviceTier: "fast" | null = null;
   private planModeEnabled = false;
@@ -3921,6 +3947,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.pendingRootTurnCompletions.clear();
     this.pendingRootIdle = false;
     this.pendingRootIdleReconciliationGeneration = null;
+    this.pendingLegacyRootTerminalHint = null;
     this.currentTurnId = null;
 
     try {
@@ -3941,6 +3968,18 @@ export class CodexAppServerAgentSession implements AgentSession {
         this.currentTurnId = response.turn.id;
         this.turnStartAcknowledgedGeneration = generation;
         this.replayPendingRootTurnEvents(response.turn.id);
+        const currentThreadId = this.currentThreadId;
+        if (
+          currentThreadId !== null &&
+          this.consumePendingLegacyRootTerminalHint(generation, currentThreadId)
+        ) {
+          this.scheduleStrictRootTurnReconciliation({
+            generation,
+            threadId: currentThreadId,
+            providerTurnId: response.turn.id,
+            reason: "legacy_terminal_alias",
+          });
+        }
       }
     } catch (error) {
       if (this.activeTurnGeneration === generation) {
@@ -3953,6 +3992,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         this.pendingRootTurnCompletions.clear();
         this.pendingRootIdle = false;
         this.pendingRootIdleReconciliationGeneration = null;
+        this.pendingLegacyRootTerminalHint = null;
       }
       throw error;
     }
@@ -4365,6 +4405,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.pendingRootTurnCompletions.clear();
     this.pendingRootIdle = false;
     this.pendingRootIdleReconciliationGeneration = null;
+    this.pendingLegacyRootTerminalHint = null;
     if (this.client) {
       await this.client.dispose();
     }
@@ -5425,9 +5466,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.emitEvent({ type: "turn_started", provider: CODEX_PROVIDER });
   }
 
-  private handleTurnCompletedNotification(
-    parsed: Extract<ParsedCodexNotification, { kind: "turn_completed" }>,
-  ): void {
+  private handleTurnCompletedNotification(parsed: ParsedTurnCompletedNotification): void {
     const subAgentCallId = this.getSubAgentCallIdForThread(parsed.threadId);
     if (subAgentCallId) {
       let status: ToolCallTimelineItem["status"] = "completed";
@@ -5440,6 +5479,10 @@ export class CodexAppServerAgentSession implements AgentSession {
       return;
     }
     if (this.activeTurnGeneration === null) {
+      return;
+    }
+    if (parsed.source === "legacy_alias") {
+      this.handleLegacyRootTurnTerminalHint(parsed);
       return;
     }
     if (this.activeProviderTurnId === null) {
@@ -5455,9 +5498,27 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.completeRootTurn(parsed);
   }
 
-  private completeRootTurn(
-    parsed: Extract<ParsedCodexNotification, { kind: "turn_completed" }>,
+  private handleLegacyRootTurnTerminalHint(
+    parsed: ParsedLegacyAliasTurnCompletedNotification,
   ): void {
+    const generation = this.activeTurnGeneration;
+    const threadId = this.currentThreadId;
+    if (generation === null || !threadId || parsed.threadId !== threadId) {
+      return;
+    }
+    if (this.activeProviderTurnId === null) {
+      this.pendingLegacyRootTerminalHint = { generation, threadId };
+      return;
+    }
+    this.scheduleStrictRootTurnReconciliation({
+      generation,
+      threadId,
+      providerTurnId: this.activeProviderTurnId,
+      reason: "legacy_terminal_alias",
+    });
+  }
+
+  private completeRootTurn(parsed: ParsedTurnCompletedNotification): void {
     if (parsed.status === "failed") {
       this.emitEvent({
         type: "turn_failed",
@@ -5494,6 +5555,19 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.pendingRootIdle = false;
   }
 
+  private consumePendingLegacyRootTerminalHint(generation: number, threadId: string): boolean {
+    const pendingLegacyRootTerminalHint = this.pendingLegacyRootTerminalHint;
+    if (
+      pendingLegacyRootTerminalHint === null ||
+      pendingLegacyRootTerminalHint.generation !== generation ||
+      pendingLegacyRootTerminalHint.threadId !== threadId
+    ) {
+      return false;
+    }
+    this.pendingLegacyRootTerminalHint = null;
+    return true;
+  }
+
   private emitCompletedRootTurn(): void {
     if (this.planModeEnabled && this.latestPlanResult?.text) {
       this.emitSyntheticPlanApprovalRequest(this.latestPlanResult.text);
@@ -5516,6 +5590,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.pendingRootTurnCompletions.clear();
     this.pendingRootIdle = false;
     this.pendingRootIdleReconciliationGeneration = null;
+    this.pendingLegacyRootTerminalHint = null;
     this.pendingSubAgentNotificationsByThreadId.clear();
     this.resetTurnTrackingState();
   }
@@ -5533,13 +5608,32 @@ export class CodexAppServerAgentSession implements AgentSession {
       return;
     }
     this.pendingRootIdleReconciliationGeneration = generation;
-    void this.reconcileAcceptedRootTurnFromIdle({ generation, threadId, providerTurnId });
+    void this.reconcileAcceptedRootTurnFromThreadRead({
+      generation,
+      threadId,
+      providerTurnId,
+      reason: "thread_idle",
+    });
   }
 
-  private async reconcileAcceptedRootTurnFromIdle(params: {
+  private scheduleStrictRootTurnReconciliation(params: {
     generation: number;
     threadId: string;
     providerTurnId: string;
+    reason: "thread_idle" | "legacy_terminal_alias";
+  }): void {
+    if (this.pendingRootIdleReconciliationGeneration === params.generation) {
+      return;
+    }
+    this.pendingRootIdleReconciliationGeneration = params.generation;
+    void this.reconcileAcceptedRootTurnFromThreadRead(params);
+  }
+
+  private async reconcileAcceptedRootTurnFromThreadRead(params: {
+    generation: number;
+    threadId: string;
+    providerTurnId: string;
+    reason: "thread_idle" | "legacy_terminal_alias";
   }): Promise<void> {
     const { generation, threadId, providerTurnId } = params;
     try {
@@ -5552,7 +5646,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       if (response.thread.id !== threadId) {
         return;
       }
-      if (readCodexThreadStatusType(response.thread.status) !== "idle") {
+      if (!isCodexThreadReadTerminalStatus(readCodexThreadStatusType(response.thread.status))) {
         return;
       }
       const terminalTurn = response.thread.turns.find((turn) => turn.id === providerTurnId);
@@ -5571,6 +5665,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       }
       this.completeRootTurn({
         kind: "turn_completed",
+        source: "canonical",
         turnId: providerTurnId,
         status: terminalTurn.status,
         errorMessage: null,
@@ -5583,6 +5678,7 @@ export class CodexAppServerAgentSession implements AgentSession {
           provider: CODEX_PROVIDER,
           sessionId: threadId,
           turnId: providerTurnId,
+          reconciliationReason: params.reason,
           err: error,
         },
         "provider.codex.root_turn_idle_reconciliation_failed_closed",

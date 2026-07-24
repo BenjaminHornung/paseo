@@ -283,6 +283,7 @@ export interface ExplorerFile {
   mimeType?: string;
   size: number;
   modifiedAt: string;
+  revision?: string;
 }
 
 interface ExplorerDirectory {

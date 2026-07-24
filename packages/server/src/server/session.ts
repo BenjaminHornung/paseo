@@ -38,12 +38,16 @@ import {
 } from "./persistence-hooks.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent/agent-loading.js";
 import {
-  AgentRunStartTimeoutError,
   formatSystemNotificationPrompt,
+  ownBackgroundAgentRunStart,
   sendPromptToAgent,
-  waitForAgentRunStartWithTimeout,
   unarchiveAgentState,
+  waitForAgentRunStartWithTimeout,
 } from "./agent/agent-prompt.js";
+import {
+  dispatchPromptWithReplayAdmission,
+  resolveReplayAdmissionForPrompt,
+} from "./agent-dispatch-orchestration.js";
 import {
   resolveCreateAgentTitles,
   resolveFirstAgentPromptTitle,
@@ -74,7 +78,6 @@ import { AgentManager, AgentRunCancellationError } from "./agent/agent-manager.j
 import { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
 import type {
   AgentManagerEvent,
-  ClientMessageAdmission,
   AgentTimelineCursor,
   AgentTimelineFetchDirection,
   AgentTimelineFetchResult,
@@ -141,6 +144,10 @@ import {
 import { wrapSpokenInput } from "./voice-config.js";
 import { isVoicePermissionAllowed } from "./voice-permission-policy.js";
 import { VoiceSession } from "./session/voice/voice-session.js";
+import type {
+  AgentMessageQueueController,
+  EnqueueAgentMessageInput,
+} from "./agent-message-queue.js";
 import { CheckoutSession } from "./session/checkout/checkout-session.js";
 import {
   createWorkspaceGitObserverService,
@@ -415,6 +422,7 @@ export interface SessionOptions {
   worktreesRoot?: string;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
+  agentMessageQueue?: AgentMessageQueueController;
   projectRegistry: ProjectRegistry;
   workspaceRegistry: WorkspaceRegistry;
   filesystem?: SessionFileSystem;
@@ -530,6 +538,24 @@ function sessionRequestId(message: SessionInboundMessage): string | null {
   return null;
 }
 
+const noopAgentMessageQueue: AgentMessageQueueController = {
+  async enqueue(_input: EnqueueAgentMessageInput) {
+    throw new Error("Agent message queue is unavailable");
+  },
+  async list() {
+    return [];
+  },
+  async cancel() {
+    return false;
+  },
+  async dispatchNow() {
+    throw new Error("Agent message queue is unavailable");
+  },
+  async clearAgent() {
+    return;
+  },
+};
+
 interface AgentTimelineProjectionSelection {
   timeline: AgentTimelineFetchResult;
   entries: TimelineProjectionEntry[];
@@ -579,6 +605,7 @@ export class Session {
 
   private agentManager: AgentManager;
   private readonly agentStorage: AgentStorage;
+  private readonly agentMessageQueue: AgentMessageQueueController;
   private readonly projectRegistry: ProjectRegistry;
   private readonly workspaceRegistry: WorkspaceRegistry;
   private readonly filesystem: SessionFileSystem;
@@ -652,6 +679,7 @@ export class Session {
       worktreesRoot,
       agentManager,
       agentStorage,
+      agentMessageQueue,
       projectRegistry,
       workspaceRegistry,
       filesystem,
@@ -717,6 +745,7 @@ export class Session {
     });
     this.agentManager = agentManager;
     this.agentStorage = agentStorage;
+    this.agentMessageQueue = agentMessageQueue ?? noopAgentMessageQueue;
     this.projectRegistry = projectRegistry;
     this.workspaceRegistry = workspaceRegistry;
     this.filesystem = filesystem ?? nodeSessionFileSystem;
@@ -787,7 +816,7 @@ export class Session {
         listLiveAgents: () => this.agentManager.listAgents(),
         resolveAgentIdentifier: (identifier) => this.resolveAgentIdentifier(identifier),
         sendAgentMessage: async (agentId, text) => {
-          await sendPromptToAgent({
+          const dispatchResult = await sendPromptToAgent({
             agentManager: this.agentManager,
             agentStorage: this.agentStorage,
             agentId,
@@ -795,6 +824,15 @@ export class Session {
             unarchive: false,
             logger: this.sessionLogger,
           });
+          if (!dispatchResult.outOfBand && !dispatchResult.skippedReason) {
+            ownBackgroundAgentRunStart({
+              startAcknowledged: dispatchResult.startAcknowledged,
+              logger: this.sessionLogger,
+              context: { agentId, source: "chat_schedule_loop" },
+              timeoutMessage: "Scheduled agent message did not acknowledge start before timeout",
+              failureMessage: "Scheduled agent message failed before start acknowledgement",
+            });
+          }
         },
       },
       chatService,
@@ -1638,6 +1676,7 @@ export class Session {
       this.dispatchAgentRewindMessage(msg) ??
       this.dispatchAgentRelationshipMessage(msg) ??
       this.dispatchAgentTimelineMessage(msg, source) ??
+      this.dispatchAgentMessageQueueMessage(msg) ??
       this.dispatchHubExecutionMessage(msg) ??
       this.dispatchAgentLifecycleMessage(msg) ??
       this.dispatchAgentConfigMessage(msg) ??
@@ -1750,6 +1789,21 @@ export class Session {
       }
       case "agent.fork_context.request":
         return this.handleAgentForkContextRequest(msg);
+      default:
+        return undefined;
+    }
+  }
+
+  private dispatchAgentMessageQueueMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "queue.agent_message.enqueue.request":
+        return this.handleQueueAgentMessageEnqueueRequest(msg);
+      case "queue.agent_message.list.request":
+        return this.handleQueueAgentMessageListRequest(msg);
+      case "queue.agent_message.cancel.request":
+        return this.handleQueueAgentMessageCancelRequest(msg);
+      case "queue.agent_message.dispatch.request":
+        return this.handleQueueAgentMessageDispatchRequest(msg);
       default:
         return undefined;
     }
@@ -2181,12 +2235,14 @@ export class Session {
     // durable snapshot, otherwise an in-flight background write can recreate it.
     await this.agentManager.flush();
 
-    try {
-      await this.agentStorage.remove(agentId);
-      await this.agentManager.deleteAgentState(agentId);
-    } catch (error) {
-      this.sessionLogger.error({ err: error, agentId }, `Failed to fully delete agent ${agentId}`);
-    }
+    // Delete queued work first so a partial hard delete cannot leave messages
+    // that become runnable again after a restart. Each step is idempotent, so a
+    // failed later step can be retried without restoring already-deleted state.
+    await this.agentMessageQueue.clearAgent(agentId, { dropRevision: true });
+    await this.agentManager.deleteAgentState(agentId);
+    // Keep the record until last so a retry can still recover workspaceId after
+    // the live projection and committed timeline have already been removed.
+    await this.agentStorage.remove(agentId);
 
     this.emit({
       type: "agent_deleted",
@@ -2229,6 +2285,8 @@ export class Session {
       },
       agentId,
     );
+
+    await this.agentMessageQueue.clearAgent(agentId);
 
     if (this.agentUpdates.hasSubscription()) {
       const payload = await this.agentUpdates.emitStoredRecord(archivedRecord);
@@ -2791,7 +2849,7 @@ export class Session {
     const prompt = buildAgentPrompt(promptText, images, attachments);
 
     try {
-      await sendPromptToAgent({
+      const dispatchResult = await sendPromptToAgent({
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         agentId,
@@ -2800,6 +2858,9 @@ export class Session {
         runOptions,
         logger: this.sessionLogger,
       });
+      if (!dispatchResult.outOfBand && !dispatchResult.skippedReason) {
+        await waitForAgentRunStartWithTimeout(dispatchResult.startAcknowledged);
+      }
       return { ok: true };
     } catch (error) {
       this.handleAgentRunError(agentId, error, "Failed to send agent message");
@@ -6072,15 +6133,24 @@ export class Session {
       const agentId = resolved.agentId;
 
       const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
-      const replayAdmission = await this.resolveReplayAdmissionForSendAgentMessage({
+      const replayResolution = await resolveReplayAdmissionForPrompt({
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
         agentId,
         prompt,
-        requestId: msg.requestId,
         messageId: msg.messageId,
+        logger: this.sessionLogger,
       });
-      if (!replayAdmission) {
+      if (!replayResolution.admission) {
+        this.emitSendAgentMessageResponse(
+          msg.requestId,
+          agentId,
+          replayResolution.accepted,
+          replayResolution.error,
+        );
         return;
       }
+      const replayAdmission = replayResolution.admission;
 
       this.sessionLogger.trace(
         {
@@ -6090,106 +6160,25 @@ export class Session {
         },
         "agent.session.send_agent_message",
       );
-      let dispatchResult: { outOfBand: boolean };
-      try {
-        dispatchResult = await sendPromptToAgent({
-          agentManager: this.agentManager,
-          agentStorage: this.agentStorage,
-          agentId,
-          prompt,
-          messageId: replayAdmission.messageId,
-          logger: this.sessionLogger,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        try {
-          await this.agentManager.releaseRecordedUserMessageAdmissionForAgent(
-            agentId,
-            replayAdmission,
-            message,
-          );
-        } catch (releaseError) {
-          this.sessionLogger.warn(
-            { err: releaseError, agentId, messageId: replayAdmission.messageId },
-            "Failed to release client message admission after dispatch failure",
-          );
-        }
-        this.handleAgentRunError(agentId, error, "Failed to send agent message");
-        this.emitSendAgentMessageResponse(msg.requestId, agentId, false, message);
-        return;
-      }
-
-      if (dispatchResult.outOfBand) {
-        try {
-          await this.agentManager.commitRecordedUserMessageAdmissionForAgent(
-            agentId,
-            replayAdmission,
-          );
-        } catch (error) {
-          const message =
-            "Provider dispatch succeeded but durable replay commit failed; delivery outcome is unknown";
-          this.sessionLogger.error(
-            { err: error, agentId, messageId: replayAdmission.messageId },
-            "Failed to commit client message admission after out-of-band dispatch",
-          );
-          this.emitSendAgentMessageResponse(msg.requestId, agentId, false, message);
-          return;
-        }
-        this.emitSendAgentMessageResponse(msg.requestId, agentId, true, null);
-        return;
-      }
-
-      try {
-        await waitForAgentRunStartWithTimeout(this.agentManager, agentId);
-      } catch (error) {
-        if (error instanceof AgentRunStartTimeoutError) {
-          const message = "Provider start timed out; delivery outcome is unknown";
-          this.agentManager.settleRecordedUserMessageAdmissionPendingForAgent(
-            agentId,
-            replayAdmission,
-            message,
-          );
-          this.emitSendAgentMessageResponse(msg.requestId, agentId, false, message);
-          return;
-        }
-        try {
-          await this.agentManager.releaseRecordedUserMessageAdmissionForAgent(
-            agentId,
-            replayAdmission,
-            errorToFriendlyMessage(error),
-          );
-        } catch (releaseError) {
-          this.sessionLogger.warn(
-            { err: releaseError, agentId, messageId: replayAdmission.messageId },
-            "Failed to release client message admission after provider start rejection",
-          );
-        }
-        this.emitSendAgentMessageResponse(
-          msg.requestId,
-          agentId,
-          false,
-          errorToFriendlyMessage(error),
-        );
-        return;
-      }
-
-      try {
-        await this.agentManager.commitRecordedUserMessageAdmissionForAgent(
-          agentId,
-          replayAdmission,
-        );
-      } catch (error) {
-        const message =
-          "Provider dispatch succeeded but durable replay commit failed; delivery outcome is unknown";
-        this.sessionLogger.error(
-          { err: error, agentId, messageId: replayAdmission.messageId },
-          "Failed to commit client message admission after confirmed provider start",
-        );
-        this.emitSendAgentMessageResponse(msg.requestId, agentId, false, message);
-        return;
-      }
-
-      this.emitSendAgentMessageResponse(msg.requestId, agentId, true, null);
+      const dispatchResult = await dispatchPromptWithReplayAdmission({
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        agentId,
+        prompt,
+        replayAdmission,
+        logger: this.sessionLogger,
+        onDispatchFailure: (error) => {
+          this.handleAgentRunError(agentId, error, "Failed to send agent message");
+        },
+      });
+      this.emitSendAgentMessageResponse(
+        msg.requestId,
+        agentId,
+        dispatchResult.kind === "started" || dispatchResult.kind === "duplicate",
+        dispatchResult.kind === "started" || dispatchResult.kind === "duplicate"
+          ? null
+          : dispatchResult.error,
+      );
     } catch (error) {
       this.emitSendAgentMessageResponse(
         msg.requestId,
@@ -6212,69 +6201,170 @@ export class Session {
     });
   }
 
-  private async resolveReplayAdmissionForSendAgentMessage(params: {
-    agentId: string;
-    prompt: ReturnType<typeof buildAgentPrompt>;
-    requestId: string;
-    messageId?: string;
-  }): Promise<ClientMessageAdmission | null> {
-    const { agentId, prompt, requestId, messageId } = params;
-    let replayAdmission = await this.agentManager.admitRecordedUserMessage(agentId, prompt, {
-      messageId,
-    });
-    if (replayAdmission.disposition === "legacy_load_required") {
-      await ensureUnarchivedAgentLoaded(
-        agentId,
-        {
-          agentManager: this.agentManager,
-          agentStorage: this.agentStorage,
-          logger: this.sessionLogger,
+  private async handleQueueAgentMessageEnqueueRequest(
+    msg: Extract<SessionInboundMessage, { type: "queue.agent_message.enqueue.request" }>,
+  ): Promise<void> {
+    const resolved = await this.resolveAgentIdentifier(msg.agentId);
+    if (!resolved.ok) {
+      this.emit({
+        type: "queue.agent_message.enqueue.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: msg.agentId,
+          accepted: false,
+          message: null,
+          error: resolved.error,
         },
-        { touchActivity: false },
-      );
-      replayAdmission = await this.agentManager.admitRecordedUserMessage(agentId, prompt, {
-        messageId,
+      });
+      return;
+    }
+
+    try {
+      const message = await this.agentMessageQueue.enqueue({
+        agentId: resolved.agentId,
+        text: msg.text,
+        messageId: msg.messageId,
+        images: msg.images,
+        attachments: msg.attachments,
+        createdByClientId: this.clientId,
+      });
+      this.emit({
+        type: "queue.agent_message.enqueue.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: resolved.agentId,
+          accepted: true,
+          message,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "queue.agent_message.enqueue.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: resolved.agentId,
+          accepted: false,
+          message: null,
+          error: getErrorMessageOr(error, "Failed to queue agent message"),
+        },
       });
     }
-    switch (replayAdmission.disposition) {
-      case "new":
-        return replayAdmission;
-      case "in_flight": {
-        const outcome = await replayAdmission.completion;
-        this.emitSendAgentMessageResponse(
-          requestId,
-          agentId,
-          outcome?.accepted ?? false,
-          outcome?.error ?? "Concurrent client message delivery did not complete",
-        );
-        return null;
+  }
+
+  private async handleQueueAgentMessageListRequest(
+    msg: Extract<SessionInboundMessage, { type: "queue.agent_message.list.request" }>,
+  ): Promise<void> {
+    try {
+      let agentId: string | undefined;
+      if (msg.agentId) {
+        const resolved = await this.resolveAgentIdentifier(msg.agentId);
+        if (!resolved.ok) {
+          this.emit({
+            type: "queue.agent_message.list.response",
+            payload: {
+              requestId: msg.requestId,
+              queues: [],
+              error: resolved.error,
+            },
+          });
+          return;
+        }
+        agentId = resolved.agentId;
       }
-      case "duplicate":
-        this.sessionLogger.info(
-          { agentId, messageId, requestId },
-          "Suppressing duplicate send_agent_message_request replay",
-        );
-        this.emitSendAgentMessageResponse(requestId, agentId, true, null);
-        return null;
-      case "conflict":
-        this.emitSendAgentMessageResponse(
-          requestId,
-          agentId,
-          false,
-          `Client messageId '${replayAdmission.messageId}' was reused with a different payload`,
-        );
-        return null;
-      case "pending":
-      case "capacity":
-      case "legacy_load_required":
-      case "legacy_unverifiable":
-        this.emitSendAgentMessageResponse(
-          requestId,
-          agentId,
-          false,
-          replayAdmission.error ?? "Client message replay admission is unavailable",
-        );
-        return null;
+      const queues = await this.agentMessageQueue.list(agentId);
+      this.emit({
+        type: "queue.agent_message.list.response",
+        payload: {
+          requestId: msg.requestId,
+          queues,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "queue.agent_message.list.response",
+        payload: {
+          requestId: msg.requestId,
+          queues: [],
+          error: getErrorMessageOr(error, "Failed to list queued agent messages"),
+        },
+      });
+    }
+  }
+
+  private async handleQueueAgentMessageCancelRequest(
+    msg: Extract<SessionInboundMessage, { type: "queue.agent_message.cancel.request" }>,
+  ): Promise<void> {
+    const resolved = await this.resolveAgentIdentifier(msg.agentId);
+    if (!resolved.ok) {
+      this.emit({
+        type: "queue.agent_message.cancel.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: msg.agentId,
+          queuedMessageId: msg.queuedMessageId,
+          accepted: false,
+          error: resolved.error,
+        },
+      });
+      return;
+    }
+
+    const removed = await this.agentMessageQueue.cancel(resolved.agentId, msg.queuedMessageId);
+    this.emit({
+      type: "queue.agent_message.cancel.response",
+      payload: {
+        requestId: msg.requestId,
+        agentId: resolved.agentId,
+        queuedMessageId: msg.queuedMessageId,
+        accepted: removed,
+        error: removed ? null : `Queued message not found: ${msg.queuedMessageId}`,
+      },
+    });
+  }
+
+  private async handleQueueAgentMessageDispatchRequest(
+    msg: Extract<SessionInboundMessage, { type: "queue.agent_message.dispatch.request" }>,
+  ): Promise<void> {
+    const resolved = await this.resolveAgentIdentifier(msg.agentId);
+    if (!resolved.ok) {
+      this.emit({
+        type: "queue.agent_message.dispatch.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: msg.agentId,
+          queuedMessageId: msg.queuedMessageId,
+          accepted: false,
+          error: resolved.error,
+        },
+      });
+      return;
+    }
+
+    try {
+      await this.agentMessageQueue.dispatchNow(resolved.agentId, msg.queuedMessageId);
+      this.emit({
+        type: "queue.agent_message.dispatch.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: resolved.agentId,
+          queuedMessageId: msg.queuedMessageId,
+          accepted: true,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "queue.agent_message.dispatch.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: resolved.agentId,
+          queuedMessageId: msg.queuedMessageId,
+          accepted: false,
+          error: getErrorMessageOr(error, "Failed to dispatch queued agent message"),
+        },
+      });
     }
   }
 

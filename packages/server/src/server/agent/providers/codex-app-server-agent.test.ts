@@ -131,6 +131,10 @@ function countCompletedTurns(events: AgentStreamEvent[]): number {
   return events.filter((event) => event.type === "turn_completed").length;
 }
 
+function countCanceledTurns(events: AgentStreamEvent[]): number {
+  return events.filter((event) => event.type === "turn_canceled").length;
+}
+
 function emitCodexUserMessage(
   appServer: FakeCodexAppServer,
   input: { id: string; text: string; threadId?: string },
@@ -1180,6 +1184,297 @@ describe("Codex app-server provider", () => {
 
       appServer.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
       await expect.poll(() => countCompletedTurns(events)).toBe(1);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("reconciles a legacy-only root task_complete exactly once through strict thread read evidence", async () => {
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-1", status: "completed", items: [] }],
+          },
+        };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn("finish through legacy task_complete reconciliation");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      appServer.completeTurnLegacy({ threadId: "thread-1" });
+
+      await expect.poll(() => countCompletedTurns(events)).toBe(1);
+      expect(threadReads).toEqual([{ threadId: "thread-1", includeTurns: true }]);
+
+      appServer.completeTurnLegacy({ threadId: "thread-1" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(countCompletedTurns(events)).toBe(1);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("derives cancellation from strict thread read evidence for legacy turn_aborted", async () => {
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-1", status: "interrupted", items: [] }],
+          },
+        };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn("cancel through legacy turn_aborted reconciliation");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      appServer.abortTurnLegacy({ threadId: "thread-1" });
+
+      await expect.poll(() => countCanceledTurns(events)).toBe(1);
+      expect(events.filter((event) => event.type === "turn_failed")).toHaveLength(0);
+      expect(threadReads).toEqual([{ threadId: "thread-1", includeTurns: true }]);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("buffers a legacy null-turn terminal hint until the provider turn id is bound", async () => {
+    let resolveTurnStart!: (value: unknown) => void;
+    const turnStart = new Promise<unknown>((resolve) => {
+      resolveTurnStart = resolve;
+    });
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "turn/start": () => turnStart,
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-1", status: "completed", items: [] }],
+          },
+        };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      const startPromise = session.startTurn("buffer legacy completion before turn/start response");
+      await appServer.waitForTurnStart();
+      appServer.completeTurnLegacy({ threadId: "thread-1" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(countCompletedTurns(events)).toBe(0);
+
+      resolveTurnStart({ turn: { id: "turn-1", status: "inProgress", items: [] } });
+      await startPromise;
+      await expect.poll(() => countCompletedTurns(events)).toBe(1);
+      expect(threadReads).toEqual([{ threadId: "thread-1", includeTurns: true }]);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("ignores a delayed old legacy null-turn terminal while the newer exact turn is still in progress", async () => {
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-2", status: "inProgress", items: [] }],
+          },
+        };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn("first turn");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      appServer.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+      await expect.poll(() => countCompletedTurns(events)).toBe(1);
+
+      await session.startTurn("second turn");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-2" });
+      appServer.completeTurnLegacy({ threadId: "thread-1" });
+
+      await expect.poll(() => threadReads.length).toBe(1);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(countCompletedTurns(events)).toBe(1);
+
+      appServer.completeTurn({ threadId: "thread-1", turnId: "turn-2" });
+      await expect.poll(() => countCompletedTurns(events)).toBe(2);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test.each([
+    {
+      label: "wrong thread id",
+      handler: () => ({
+        thread: {
+          id: "wrong-thread",
+          status: { type: "idle" },
+          turns: [{ id: "turn-1", status: "completed", items: [] }],
+        },
+      }),
+    },
+    {
+      label: "nonterminal thread status",
+      handler: () => ({
+        thread: {
+          id: "thread-1",
+          status: { type: "inProgress" },
+          turns: [{ id: "turn-1", status: "completed", items: [] }],
+        },
+      }),
+    },
+    {
+      label: "missing terminal turn",
+      handler: () => ({
+        thread: {
+          id: "thread-1",
+          status: { type: "idle" },
+          turns: [{ id: "other-turn", status: "completed", items: [] }],
+        },
+      }),
+    },
+    {
+      label: "malformed thread/read payload",
+      handler: () => ({
+        thread: {
+          id: "thread-1",
+          status: { type: "idle" },
+          turns: "not-an-array",
+        },
+      }),
+    },
+    {
+      label: "thread/read failure",
+      handler: () => {
+        return Promise.reject(new Error("thread/read failed"));
+      },
+    },
+  ])("fails closed for legacy null-turn reconciliation when $label", async ({ handler }) => {
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return handler();
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn(`fail closed when ${typeof handler}`);
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      appServer.completeTurnLegacy({ threadId: "thread-1" });
+
+      await expect.poll(() => threadReads.length).toBe(1);
+      await expect.poll(() => countCompletedTurns(events), { timeout: 100 }).toBe(0);
+      expect(events.filter((event) => event.type === "turn_failed")).toHaveLength(0);
+      expect(events.filter((event) => event.type === "turn_canceled")).toHaveLength(0);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("ignores a legacy alias after canonical completion has already settled the turn", async () => {
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-1", status: "completed", items: [] }],
+          },
+        };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn("canonical then legacy alias");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      appServer.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+      await expect.poll(() => countCompletedTurns(events)).toBe(1);
+
+      appServer.completeTurnLegacy({ threadId: "thread-1" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(countCompletedTurns(events)).toBe(1);
+      expect(threadReads).toEqual([]);
       appServer.assertNoErrors();
     } finally {
       await session.close();

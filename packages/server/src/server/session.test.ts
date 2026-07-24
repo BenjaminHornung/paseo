@@ -54,6 +54,9 @@ import type { CheckDetails, ForgeService } from "../services/forge-service.js";
 import type { GitHubPullRequestStatusFacts } from "../services/github-facts.js";
 
 interface SessionHandlerInternals {
+  agentUpdates: {
+    removeAgent(agentId: string): void;
+  };
   interruptAgentIfRunning(agentId: string): Promise<void>;
   handleSendAgentMessage(
     agentId: string,
@@ -225,7 +228,7 @@ test("send_agent_message_request commits replay admission only after confirmed p
 
   await expect.poll(() => streamAgent.mock.calls.length).toBe(1);
   expect(streamAgent).toHaveBeenCalledWith("agent-1", "ship it", {
-    clientMessageId: "msg-1",
+    messageId: "msg-1",
   });
   expect(commitAdmission).not.toHaveBeenCalled();
 
@@ -562,6 +565,7 @@ interface SessionForTestOptions {
   scopes?: readonly string[];
   agentManager?: { [K in keyof SessionOptions["agentManager"]]?: unknown };
   agentStorage?: { [K in keyof SessionOptions["agentStorage"]]?: unknown };
+  agentMessageQueue?: SessionOptions["agentMessageQueue"];
   github?: Partial<ForgeService & GitHubService>;
   checkoutDiffManager?: { scheduleRefreshForCwd: ReturnType<typeof vi.fn> };
   workspaceGitService?: {
@@ -655,6 +659,7 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
       list: vi.fn().mockResolvedValue([]),
       ...options.agentStorage,
     }),
+    ...(options.agentMessageQueue ? { agentMessageQueue: options.agentMessageQueue } : {}),
     projectRegistry: {
       list: vi.fn().mockResolvedValue([]),
       get: vi.fn(),
@@ -700,6 +705,269 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
   };
   return new Session(sessionOptions);
 }
+
+test("delete_agent_request fails closed on queue persistence failure and retries queue-first", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const durableOrder: string[] = [];
+  const queueMessages = ["queued-1"];
+  let queueRevision: number | undefined = 1;
+  let clearAttempts = 0;
+  let timelineRemoved = false;
+
+  const clearAgent = vi.fn(async (_agentId: string, options?: { dropRevision?: boolean }) => {
+    durableOrder.push("queue");
+    expect(options).toEqual({ dropRevision: true });
+    expect(messages.some((message) => message.type === "agent_deleted")).toBe(false);
+    clearAttempts++;
+    if (clearAttempts === 1) {
+      throw new Error("queue persist failed");
+    }
+    queueMessages.splice(0);
+    queueRevision = undefined;
+  });
+  const remove = vi.fn(async () => {
+    durableOrder.push("record");
+    expect(queueMessages).toEqual([]);
+    expect(queueRevision).toBeUndefined();
+    expect(timelineRemoved).toBe(true);
+    expect(messages.some((message) => message.type === "agent_deleted")).toBe(false);
+  });
+  const deleteAgentState = vi.fn(async () => {
+    durableOrder.push("timeline");
+    expect(messages.some((message) => message.type === "agent_deleted")).toBe(false);
+    timelineRemoved = true;
+  });
+  const session = createSessionForTest({
+    messages,
+    agentMessageQueue: {
+      enqueue: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+      dispatchNow: vi.fn(),
+      clearAgent,
+    },
+    agentManager: {
+      getAgent: vi.fn(() => ({ id: "agent-1", workspaceId: "workspace-1" })),
+      closeAgent: vi.fn(async () => undefined),
+      flush: vi.fn(async () => undefined),
+      deleteAgentState,
+    },
+    agentStorage: {
+      beginDelete: vi.fn(),
+      get: vi.fn().mockResolvedValue({ id: "agent-1", workspaceId: "workspace-1" }),
+      remove,
+    },
+  });
+  const removeProjection = vi.spyOn(asSessionInternals(session).agentUpdates, "removeAgent");
+  const workspaceProjection = vi.spyOn(session, "emitWorkspaceUpdateForWorkspaceId");
+
+  await session.handleMessage({
+    type: "delete_agent_request",
+    agentId: "agent-1",
+    requestId: "delete-first",
+  });
+
+  expect(queueMessages).toEqual(["queued-1"]);
+  expect(queueRevision).toBe(1);
+  expect(messages).toContainEqual({
+    type: "rpc_error",
+    payload: {
+      requestId: "delete-first",
+      requestType: "delete_agent_request",
+      error: "Request failed: queue persist failed",
+      code: "handler_error",
+    },
+  });
+  expect(messages.filter((message) => message.type === "agent_deleted")).toEqual([]);
+  expect(remove).not.toHaveBeenCalled();
+  expect(deleteAgentState).not.toHaveBeenCalled();
+  expect(removeProjection).not.toHaveBeenCalled();
+  expect(workspaceProjection).not.toHaveBeenCalled();
+
+  await session.handleMessage({
+    type: "delete_agent_request",
+    agentId: "agent-1",
+    requestId: "delete-retry",
+  });
+
+  expect(durableOrder).toEqual(["queue", "queue", "timeline", "record"]);
+  expect(queueMessages).toEqual([]);
+  expect(queueRevision).toBeUndefined();
+  expect(messages.filter((message) => message.type === "agent_deleted")).toEqual([
+    {
+      type: "agent_deleted",
+      payload: { agentId: "agent-1", requestId: "delete-retry" },
+    },
+  ]);
+  expect(removeProjection).toHaveBeenCalledOnce();
+  expect(removeProjection).toHaveBeenCalledWith("agent-1");
+  expect(workspaceProjection).toHaveBeenCalledOnce();
+  expect(workspaceProjection).toHaveBeenCalledWith("workspace-1");
+});
+
+test("delete_agent_request retains the record when timeline cleanup fails and retries safely", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const durableOrder: string[] = [];
+  let timelineAttempts = 0;
+  let recordPresent = true;
+  const clearAgent = vi.fn(async () => {
+    durableOrder.push("queue");
+  });
+  const deleteAgentState = vi.fn(async () => {
+    durableOrder.push("timeline");
+    timelineAttempts++;
+    if (timelineAttempts === 1) {
+      throw new Error("timeline delete failed");
+    }
+  });
+  const remove = vi.fn(async () => {
+    durableOrder.push("record");
+    recordPresent = false;
+  });
+  const session = createSessionForTest({
+    messages,
+    agentMessageQueue: {
+      enqueue: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+      dispatchNow: vi.fn(),
+      clearAgent,
+    },
+    agentManager: {
+      getAgent: vi.fn(() => undefined),
+      closeAgent: vi.fn(async () => undefined),
+      flush: vi.fn(async () => undefined),
+      deleteAgentState,
+    },
+    agentStorage: {
+      beginDelete: vi.fn(),
+      get: vi.fn(async () =>
+        recordPresent ? { id: "agent-1", workspaceId: "workspace-1" } : undefined,
+      ),
+      remove,
+    },
+  });
+  const removeProjection = vi.spyOn(asSessionInternals(session).agentUpdates, "removeAgent");
+  const workspaceProjection = vi.spyOn(session, "emitWorkspaceUpdateForWorkspaceId");
+
+  await session.handleMessage({
+    type: "delete_agent_request",
+    agentId: "agent-1",
+    requestId: "delete-first",
+  });
+
+  expect(recordPresent).toBe(true);
+  expect(remove).not.toHaveBeenCalled();
+  expect(messages).toContainEqual({
+    type: "rpc_error",
+    payload: {
+      requestId: "delete-first",
+      requestType: "delete_agent_request",
+      error: "Request failed: timeline delete failed",
+      code: "handler_error",
+    },
+  });
+  expect(messages.some((message) => message.type === "agent_deleted")).toBe(false);
+  expect(removeProjection).not.toHaveBeenCalled();
+  expect(workspaceProjection).not.toHaveBeenCalled();
+
+  await session.handleMessage({
+    type: "delete_agent_request",
+    agentId: "agent-1",
+    requestId: "delete-retry",
+  });
+
+  expect(durableOrder).toEqual(["queue", "timeline", "queue", "timeline", "record"]);
+  expect(messages.filter((message) => message.type === "agent_deleted")).toEqual([
+    {
+      type: "agent_deleted",
+      payload: { agentId: "agent-1", requestId: "delete-retry" },
+    },
+  ]);
+  expect(removeProjection).toHaveBeenCalledOnce();
+  expect(workspaceProjection).toHaveBeenCalledOnce();
+  expect(workspaceProjection).toHaveBeenCalledWith("workspace-1");
+});
+
+test("delete_agent_request repeats idempotent cleanup when record removal fails", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const order: string[] = [];
+  let removeAttempts = 0;
+  let recordPresent = true;
+  const session = createSessionForTest({
+    messages,
+    agentMessageQueue: {
+      enqueue: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+      dispatchNow: vi.fn(),
+      clearAgent: vi.fn(async () => {
+        order.push("queue");
+      }),
+    },
+    agentManager: {
+      getAgent: vi.fn(() => undefined),
+      closeAgent: vi.fn(async () => undefined),
+      flush: vi.fn(async () => undefined),
+      deleteAgentState: vi.fn(async () => {
+        order.push("timeline");
+      }),
+    },
+    agentStorage: {
+      beginDelete: vi.fn(),
+      get: vi.fn(async () =>
+        recordPresent ? { id: "agent-1", workspaceId: "workspace-1" } : undefined,
+      ),
+      remove: vi.fn(async () => {
+        order.push("record");
+        removeAttempts++;
+        if (removeAttempts === 1) {
+          throw new Error("record unlink failed");
+        }
+        recordPresent = false;
+      }),
+    },
+  });
+  const removeProjection = vi.spyOn(asSessionInternals(session).agentUpdates, "removeAgent");
+  const workspaceProjection = vi.spyOn(session, "emitWorkspaceUpdateForWorkspaceId");
+
+  await session.handleMessage({
+    type: "delete_agent_request",
+    agentId: "agent-1",
+    requestId: "delete-first",
+  });
+
+  expect(recordPresent).toBe(true);
+  expect(messages).toContainEqual({
+    type: "rpc_error",
+    payload: {
+      requestId: "delete-first",
+      requestType: "delete_agent_request",
+      error: "Request failed: record unlink failed",
+      code: "handler_error",
+    },
+  });
+  expect(messages.some((message) => message.type === "agent_deleted")).toBe(false);
+  expect(removeProjection).not.toHaveBeenCalled();
+  expect(workspaceProjection).not.toHaveBeenCalled();
+
+  await session.handleMessage({
+    type: "delete_agent_request",
+    agentId: "agent-1",
+    requestId: "delete-retry",
+  });
+
+  expect(order).toEqual(["queue", "timeline", "record", "queue", "timeline", "record"]);
+  expect(messages.filter((message) => message.type === "agent_deleted")).toEqual([
+    {
+      type: "agent_deleted",
+      payload: { agentId: "agent-1", requestId: "delete-retry" },
+    },
+  ]);
+  expect(removeProjection).toHaveBeenCalledOnce();
+  expect(workspaceProjection).toHaveBeenCalledOnce();
+  expect(workspaceProjection).toHaveBeenCalledWith("workspace-1");
+});
 
 describe("session authorization scopes", () => {
   test("rejects an RPC outside an exact grant with the generic RPC error", async () => {

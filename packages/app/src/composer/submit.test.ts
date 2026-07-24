@@ -104,7 +104,7 @@ describe("submitAgentInput", () => {
     expect(clearDraft).toHaveBeenCalledWith("sent");
   });
 
-  it("queues while the agent is running and clears the composer immediately", async () => {
+  it("queues while the agent is running and leaves clearing to queueMessage", async () => {
     const queueMessage = vi.fn();
     const submitMessage = vi.fn();
     const clearDraft = vi.fn();
@@ -134,8 +134,11 @@ describe("submitAgentInput", () => {
       attachments: [{ id: "img-1" }],
     });
     expect(submitMessage).not.toHaveBeenCalled();
-    expect(setUserInput).toHaveBeenCalledWith("");
-    expect(setAttachments).toHaveBeenCalledWith([]);
+    // queueMessage clears the draft synchronously before any network
+    // round-trip; clearing here after the await would wipe text typed while
+    // the queue RPC was in flight.
+    expect(setUserInput).not.toHaveBeenCalled();
+    expect(setAttachments).not.toHaveBeenCalled();
     expect(setSendError).not.toHaveBeenCalled();
     expect(setIsProcessing).not.toHaveBeenCalled();
     expect(clearDraft).not.toHaveBeenCalled();

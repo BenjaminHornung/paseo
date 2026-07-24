@@ -95,6 +95,9 @@ async function connectClient(): Promise<{ client: PaseoClient; ws: FakeWebSocket
     type: "hello",
     clientType: "cli",
     protocolVersion: 1,
+    capabilities: {
+      agent_message_queue_events: true,
+    },
   });
   expect(hello.clientId).toEqual(expect.stringMatching(/^paseo-sdk-/));
   ws.message(

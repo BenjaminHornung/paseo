@@ -506,12 +506,11 @@ export class AgentStorage {
           await fs.unlink(filePath);
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code;
-          if (code && code !== "ENOENT") {
-            this.logger.warn(
-              { err: error, agentId, filePath },
-              "Failed to remove agent record file",
-            );
+          if (code === "ENOENT") {
+            return;
           }
+          this.logger.warn({ err: error, agentId, filePath }, "Failed to remove agent record file");
+          throw error;
         }
       }),
     );
@@ -520,6 +519,7 @@ export class AgentStorage {
     this.removeOwnerIndex(agentId);
     this.pathById.delete(agentId);
     this.pathsById.delete(agentId);
+    this.deleting.delete(agentId);
   }
 
   async applySnapshot(
