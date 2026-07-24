@@ -5,6 +5,7 @@ import {
   parseAssistantFileLink,
   parseFileProtocolUrl,
   parseInlinePathToken,
+  parseToolCallFilePathTarget,
 } from "./parse";
 
 describe("parseInlinePathToken", () => {
@@ -61,6 +62,77 @@ describe("parseInlinePathToken", () => {
   it("rejects range-only :line tokens", () => {
     expect(parseInlinePathToken(":12")).toBeNull();
     expect(parseInlinePathToken(":12-20")).toBeNull();
+  });
+});
+
+describe("parseToolCallFilePathTarget", () => {
+  it("separates line locations from Windows file paths", () => {
+    expect(
+      parseToolCallFilePathTarget(
+        String.raw`C:\Users\test\.config\opencode\plugins\context-mode-guard.ts:7`,
+      ),
+    ).toEqual({
+      raw: String.raw`C:\Users\test\.config\opencode\plugins\context-mode-guard.ts:7`,
+      path: "C:/Users/test/.config/opencode/plugins/context-mode-guard.ts",
+      lineStart: 7,
+      lineEnd: undefined,
+    });
+  });
+
+  it("supports Windows line-column locations", () => {
+    expect(parseToolCallFilePathTarget(String.raw`C:\My Project\src\app.ts:12:4`)).toEqual({
+      raw: String.raw`C:\My Project\src\app.ts:12:4`,
+      path: "C:/My Project/src/app.ts",
+      lineStart: 12,
+      lineEnd: undefined,
+    });
+  });
+
+  it("parses bare filename locations", () => {
+    expect(parseToolCallFilePathTarget("README.md:7")).toEqual({
+      raw: "README.md:7",
+      path: "README.md",
+      lineStart: 7,
+      lineEnd: undefined,
+    });
+    expect(parseToolCallFilePathTarget("app.ts:12:4")).toEqual({
+      raw: "app.ts:12:4",
+      path: "app.ts",
+      lineStart: 12,
+      lineEnd: undefined,
+    });
+    expect(parseToolCallFilePathTarget("package.json:5-8")).toEqual({
+      raw: "package.json:5-8",
+      path: "package.json",
+      lineStart: 5,
+      lineEnd: 8,
+    });
+  });
+
+  it("preserves plain tool-call file paths", () => {
+    expect(parseToolCallFilePathTarget(String.raw`C:\project\src\app.ts`)).toEqual({
+      raw: String.raw`C:\project\src\app.ts`,
+      path: String.raw`C:\project\src\app.ts`,
+    });
+  });
+
+  it("preserves URI scheme values as opaque tool-call paths", () => {
+    expect(parseToolCallFilePathTarget("file:C:/project/src/app.ts:12")).toEqual({
+      raw: "file:C:/project/src/app.ts:12",
+      path: "file:C:/project/src/app.ts:12",
+    });
+    expect(parseToolCallFilePathTarget("mailto:a.ts:7")).toEqual({
+      raw: "mailto:a.ts:7",
+      path: "mailto:a.ts:7",
+    });
+    expect(parseToolCallFilePathTarget("vscode:foo.ts:7")).toEqual({
+      raw: "vscode:foo.ts:7",
+      path: "vscode:foo.ts:7",
+    });
+    expect(parseToolCallFilePathTarget("  urn:example.ts:7  ")).toEqual({
+      raw: "  urn:example.ts:7  ",
+      path: "  urn:example.ts:7  ",
+    });
   });
 });
 

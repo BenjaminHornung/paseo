@@ -3092,7 +3092,7 @@ interface ToolCallProps {
   disableOuterSpacing?: boolean;
   onInlineDetailsHoverChange?: (hovered: boolean) => void;
   onInlineDetailsExpandedChange?: (expanded: boolean) => void;
-  onOpenFilePath?: (filePath: string) => void;
+  onOpenFileTarget?: (target: InlinePathTarget) => void;
   defaultExpanded?: boolean;
   forceInline?: boolean;
   maxDetailHeight?: number;
@@ -3111,7 +3111,7 @@ export const ToolCall = memo(function ToolCall({
   disableOuterSpacing,
   onInlineDetailsHoverChange,
   onInlineDetailsExpandedChange,
-  onOpenFilePath,
+  onOpenFileTarget,
   defaultExpanded,
   forceInline = false,
   maxDetailHeight = 400,
@@ -3150,12 +3150,12 @@ export const ToolCall = memo(function ToolCall({
     [toolName, status, error, effectiveDetail, metadata, cwd],
   );
   const handleOpenFile = useMemo(() => {
-    const openFilePath = presentation.openFilePath;
-    if (!openFilePath || !onOpenFilePath) {
+    const openFileTarget = presentation.openFileTarget;
+    if (!openFileTarget || !onOpenFileTarget) {
       return undefined;
     }
-    return () => onOpenFilePath(openFilePath);
-  }, [presentation.openFilePath, onOpenFilePath]);
+    return () => onOpenFileTarget(openFileTarget);
+  }, [presentation.openFileTarget, onOpenFileTarget]);
 
   const handleToggle = useCallback(() => {
     if (!shouldRenderInline) {
@@ -3267,7 +3267,7 @@ function areToolCallPropsEqual(previous: ToolCallProps, next: ToolCallProps) {
   if (previous.metadata !== next.metadata) return false;
   if (previous.isLastInSequence !== next.isLastInSequence) return false;
   if (previous.disableOuterSpacing !== next.disableOuterSpacing) return false;
-  if (previous.onOpenFilePath !== next.onOpenFilePath) return false;
+  if (previous.onOpenFileTarget !== next.onOpenFileTarget) return false;
   if (previous.defaultExpanded !== next.defaultExpanded) return false;
   if (previous.forceInline !== next.forceInline) return false;
   if (previous.maxDetailHeight !== next.maxDetailHeight) return false;

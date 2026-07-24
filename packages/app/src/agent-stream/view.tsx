@@ -468,8 +468,8 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       },
     );
 
-    const handleToolCallOpenFile = useStableEvent((filePath: string) => {
-      handleInlinePathPress({ raw: filePath, path: filePath }, "main");
+    const handleToolCallOpenFile = useStableEvent((target: InlinePathTarget) => {
+      handleInlinePathPress(target, "main");
     });
 
     const handleForkAssistantTurn: AssistantTurnForkHandler = useStableEvent(
@@ -744,7 +744,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
               cwd={context.cwd}
               metadata={data.metadata}
               isLastInSequence={isLastInSequence}
-              onOpenFilePath={handleToolCallOpenFile}
+              onOpenFileTarget={handleToolCallOpenFile}
               maxDetailHeight={maxDetailHeight}
             />
           );
@@ -760,7 +760,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             result={data.result}
             status={data.status}
             isLastInSequence={isLastInSequence}
-            onOpenFilePath={handleToolCallOpenFile}
+            onOpenFileTarget={handleToolCallOpenFile}
             maxDetailHeight={maxDetailHeight}
           />
         );

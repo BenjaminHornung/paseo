@@ -3,6 +3,7 @@ import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
 import type { ToolCallDisplayInput } from "@/utils/tool-call-display";
 import { buildToolCallDisplayModel } from "@/utils/tool-call-display";
 import { extractToolCallFilePath } from "@/utils/extract-tool-call-file-path";
+import { parseToolCallFilePathTarget, type InlinePathTarget } from "@/assistant-file-links/parse";
 import {
   hasMeaningfulToolCallDetail,
   isPendingToolCallDetail,
@@ -29,7 +30,7 @@ export interface ToolCallPresentation {
   isLoadingDetails: boolean;
   hasDetails: boolean;
   canOpenDetails: boolean;
-  openFilePath: string | null;
+  openFileTarget: InlinePathTarget | null;
   isPlan: boolean;
 }
 
@@ -49,6 +50,7 @@ function displayDetail(detail: ToolCallDetail | undefined): ToolCallDetail {
 export function buildToolCallPresentation(
   input: BuildToolCallPresentationInput,
 ): ToolCallPresentation {
+  const filePath = extractToolCallFilePath(input.detail);
   const detailForDisplay = displayDetail(input.detail);
   const displayModel = buildToolCallDisplayModel({
     name: input.toolName,
@@ -73,7 +75,7 @@ export function buildToolCallPresentation(
     isLoadingDetails,
     hasDetails,
     canOpenDetails: hasDetails || isLoadingDetails,
-    openFilePath: extractToolCallFilePath(input.detail),
+    openFileTarget: filePath ? parseToolCallFilePathTarget(filePath) : null,
     isPlan: input.detail?.type === "plan",
   };
 }
