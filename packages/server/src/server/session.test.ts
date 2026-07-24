@@ -23,7 +23,7 @@ import { DownloadTokenStore } from "./file-download/token-store.js";
 import { StructuredAgentFallbackError } from "./agent/agent-response-loop.js";
 import { AgentRunStartTimeoutError } from "./agent/agent-prompt.js";
 import type { StoredAgentRecord } from "./agent/agent-storage.js";
-import type { AgentManagerEvent } from "./agent/agent-manager.js";
+import type { AgentManagerEvent, ManagedAgent } from "./agent/agent-manager.js";
 import type { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
 import { createPersistedProjectRecord } from "./workspace-registry.js";
 import type { SessionOptions } from "./session.js";
@@ -52,6 +52,117 @@ import {
 } from "../services/github-service.js";
 import type { CheckDetails, ForgeService } from "../services/forge-service.js";
 import type { GitHubPullRequestStatusFacts } from "../services/github-facts.js";
+
+vi.mock("@isaacs/ttlcache", () => {
+  class TestTTLCache<K, V> {
+    private readonly storage = new Map<K, V>();
+
+    clear(): void {
+      this.storage.clear();
+    }
+
+    cancelTimer(): void {}
+
+    delete(key: K): boolean {
+      return this.storage.delete(key);
+    }
+
+    get(key: K): V | undefined {
+      return this.storage.get(key);
+    }
+
+    has(key: K): boolean {
+      return this.storage.has(key);
+    }
+
+    set(key: K, value: V): this {
+      this.storage.set(key, value);
+      return this;
+    }
+  }
+
+  return { TTLCache: TestTTLCache };
+});
+
+const providerClientStubs = vi.hoisted(() => ({
+  create(provider: string) {
+    return class ProviderClientStub {
+      readonly capabilities = {
+        supportsStreaming: true,
+        supportsSessionPersistence: true,
+        supportsDynamicModes: true,
+        supportsMcpServers: true,
+        supportsReasoningStream: true,
+        supportsToolInvocations: true,
+      };
+      readonly provider = provider;
+
+      async createSession(): Promise<never> {
+        throw new Error("not implemented");
+      }
+
+      async resumeSession(): Promise<never> {
+        throw new Error("not implemented");
+      }
+
+      async fetchCatalog() {
+        return { models: [], modes: [] };
+      }
+
+      async isAvailable(): Promise<boolean> {
+        return true;
+      }
+    };
+  },
+}));
+
+vi.mock("./agent/providers/claude/agent.js", () => ({
+  ClaudeAgentClient: providerClientStubs.create("claude"),
+}));
+
+vi.mock("./agent/providers/codex-app-server-agent.js", () => ({
+  CodexAppServerAgentClient: providerClientStubs.create("codex"),
+}));
+
+vi.mock("./agent/providers/copilot-acp-agent.js", () => ({
+  CopilotACPAgentClient: providerClientStubs.create("copilot"),
+}));
+
+vi.mock("./agent/providers/cursor-acp-agent.js", () => ({
+  CursorACPAgentClient: providerClientStubs.create("cursor"),
+}));
+
+vi.mock("./agent/providers/generic-acp-agent.js", () => ({
+  GenericACPAgentClient: providerClientStubs.create("acp"),
+}));
+
+vi.mock("./agent/providers/kiro-acp-agent.js", () => ({
+  KiroACPAgentClient: providerClientStubs.create("kiro"),
+}));
+
+vi.mock("./agent/providers/opencode-agent.js", () => ({
+  OpenCodeAgentClient: providerClientStubs.create("opencode"),
+}));
+
+vi.mock("./agent/providers/omp/agent.js", () => ({
+  OmpAgentClient: providerClientStubs.create("omp"),
+}));
+
+vi.mock("./agent/providers/pi/agent.js", () => ({
+  PiRpcAgentClient: providerClientStubs.create("pi"),
+}));
+
+vi.mock("./agent/providers/trae-acp-agent.js", () => ({
+  TraeACPAgentClient: providerClientStubs.create("trae"),
+}));
+
+vi.mock("./agent/providers/mock-load-test-agent.js", () => ({
+  MockLoadTestAgentClient: providerClientStubs.create("mock"),
+}));
+
+vi.mock("./agent/providers/mock-slow-provider.js", () => ({
+  MockSlowProviderClient: providerClientStubs.create("mock-slow"),
+}));
 
 interface SessionHandlerInternals {
   agentUpdates: {
@@ -103,6 +214,8 @@ function createBinaryMessageHandler(
     binaryMessages.push(frame);
   };
 }
+
+async function* emptyAgentStream(): AsyncGenerator<never> {}
 
 test("interruptAgentIfRunning rejects when graceful cancellation is refused", async () => {
   const agentId = "11111111-1111-4111-8111-111111111111";
@@ -967,6 +1080,105 @@ test("delete_agent_request repeats idempotent cleanup when record removal fails"
   expect(removeProjection).toHaveBeenCalledOnce();
   expect(workspaceProjection).toHaveBeenCalledOnce();
   expect(workspaceProjection).toHaveBeenCalledWith("workspace-1");
+});
+
+describe("agent create failure outcome", () => {
+  test("marks a failure before agent registration as definitively uncreated", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const cwd = process.cwd();
+    const providerSnapshot = createProviderSnapshotManagerStub();
+    providerSnapshot.resolveCreateConfig.mockRejectedValue(new Error("mode rejected"));
+    const session = createSessionForTest({
+      messages,
+      providerSnapshotManager: providerSnapshot.manager,
+      workspaceRegistry: {
+        get: vi.fn(async () => ({ workspaceId: "workspace-1", cwd, archivedAt: null })),
+      },
+    });
+
+    await session.handleMessage({
+      type: "create_agent_request",
+      requestId: "create-before-registration",
+      config: { provider: "codex", cwd, modeId: "invalid" },
+      workspaceId: "workspace-1",
+      attachments: [],
+      labels: {},
+    });
+
+    expect(messages).toContainEqual({
+      type: "status",
+      payload: {
+        status: "agent_create_failed",
+        requestId: "create-before-registration",
+        error: "mode rejected",
+        errorCode: "unknown",
+        agentCreated: false,
+      },
+    });
+  });
+
+  test("leaves an initial-prompt failure unmarked after agent registration", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const cwd = process.cwd();
+    const snapshot = {
+      id: "agent-created-before-prompt-failure",
+      provider: "codex",
+      cwd,
+      runtimeInfo: null,
+    } as ManagedAgent;
+    const createAgent = vi.fn(
+      async (
+        _config: unknown,
+        _agentId: string | undefined,
+        options: { onRegistered?: (agentId: string) => void },
+      ) => {
+        options.onRegistered?.(snapshot.id);
+        return snapshot;
+      },
+    );
+    const session = createSessionForTest({
+      messages,
+      workspaceRegistry: {
+        get: vi.fn(async () => ({ workspaceId: "workspace-1", cwd, archivedAt: null })),
+      },
+      agentManager: {
+        createAgent,
+        getAgent: vi.fn(() => snapshot),
+        tryRunOutOfBand: vi.fn(() => false),
+        hasInFlightRun: vi.fn(() => false),
+        streamAgent: vi.fn(emptyAgentStream),
+        waitForAgentRunStart: vi.fn(async () => {
+          throw new Error("initial prompt failed to start");
+        }),
+      },
+    });
+
+    await session.handleMessage({
+      type: "create_agent_request",
+      requestId: "create-after-registration",
+      config: { provider: "codex", cwd },
+      workspaceId: "workspace-1",
+      initialPrompt: "start me",
+      attachments: [],
+      labels: {},
+    });
+
+    const failure = messages.find(
+      (message) =>
+        message.type === "status" &&
+        message.payload.status === "agent_create_failed" &&
+        message.payload.requestId === "create-after-registration",
+    );
+    expect(failure).toEqual({
+      type: "status",
+      payload: {
+        status: "agent_create_failed",
+        requestId: "create-after-registration",
+        error: "initial prompt failed to start",
+        errorCode: "unknown",
+      },
+    });
+  });
 });
 
 describe("session authorization scopes", () => {

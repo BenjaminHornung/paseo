@@ -243,6 +243,8 @@ export interface CreateAgentOptions {
   // undefined is an explicit decision: the agent never appears in the sidebar.
   workspaceId: string | undefined;
   owner?: AgentOwner;
+  /** Called synchronously once the agent is installed in the live registry. */
+  onRegistered?: (agentId: string) => void;
 }
 
 export interface AgentManagerOptions {
@@ -1415,6 +1417,7 @@ export class AgentManager {
       initialTitle: options.initialTitle,
       workspaceId: options.workspaceId,
       owner: options.owner,
+      onRegistered: options.onRegistered,
     });
   }
 
@@ -3077,6 +3080,7 @@ export class AgentManager {
       publishWhenReady?: boolean;
       workspaceId?: string;
       owner?: AgentOwner;
+      onRegistered?: (agentId: string) => void;
     },
   ): Promise<ManagedAgent> {
     let registered = false;
@@ -3111,6 +3115,7 @@ export class AgentManager {
       this.assertAcceptingAgentRegistrations();
       this.agents.set(resolvedAgentId, managed);
       registered = true;
+      options?.onRegistered?.(resolvedAgentId);
       // Initialize previousStatus to track transitions
       this.previousStatuses.set(resolvedAgentId, managed.lifecycle);
       await this.refreshRuntimeInfo(managed, { emit: false });

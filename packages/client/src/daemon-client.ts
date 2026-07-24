@@ -152,6 +152,18 @@ export interface Logger {
   error(obj: object, msg?: string): void;
 }
 
+/** The daemon explicitly certified that createAgent failed before registration. */
+export class AgentCreateRejectedError extends Error {
+  readonly code = "AGENT_CREATE_REJECTED" as const;
+  readonly requestId: string;
+
+  constructor(message: string, requestId: string) {
+    super(message);
+    this.name = "AgentCreateRejectedError";
+    this.requestId = requestId;
+  }
+}
+
 const consoleLogger: Logger = {
   debug: () => {},
   info: (obj, msg) => console.log(msg, obj),
@@ -2349,12 +2361,26 @@ export class DaemonClient {
         }
         const failed = AgentCreateFailedStatusPayloadSchema.safeParse(msg.payload);
         if (failed.success && failed.data.requestId === requestId) {
-          return failed.data;
+          // Preserve the optional marker even when this client is paired with
+          // an older installed protocol package whose schema strips new fields.
+          const marksAgentUncreated =
+            typeof msg.payload === "object" &&
+            msg.payload !== null &&
+            "agentCreated" in msg.payload &&
+            msg.payload.agentCreated === false;
+          return marksAgentUncreated
+            ? { ...failed.data, agentCreated: false as const }
+            : failed.data;
         }
         return null;
       },
     });
     if (status.status === "agent_create_failed") {
+      if ("agentCreated" in status && status.agentCreated === false) {
+        throw new AgentCreateRejectedError(status.error, requestId);
+      }
+      // Legacy daemons and post-registration failures cannot prove whether an
+      // agent exists. Keep this untyped so callers treat the outcome as ambiguous.
       throw new Error(status.error);
     }
 

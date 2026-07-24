@@ -2905,6 +2905,9 @@ export const AgentCreateFailedStatusPayloadSchema = z.object({
   requestId: z.string(),
   error: z.string(),
   errorCode: z.string().optional(),
+  // Optional for compatibility with older daemons. Only false is meaningful:
+  // it certifies that agent registration never occurred.
+  agentCreated: z.literal(false).optional(),
 });
 
 export const AgentResumedStatusPayloadSchema = z

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import {
+  AgentCreateFailedStatusPayloadSchema,
   AgentTimelineItemPayloadSchema,
   FileExplorerRequestSchema,
   PaseoWorktreeArchiveRequestSchema,
@@ -9,6 +10,38 @@ import {
   SessionInboundMessageSchema,
   SessionOutboundMessageSchema,
 } from "./messages.js";
+
+describe("agent create failure compatibility", () => {
+  test("accepts legacy unmarked failures as an ambiguous outcome", () => {
+    expect(
+      AgentCreateFailedStatusPayloadSchema.parse({
+        status: "agent_create_failed",
+        requestId: "create-legacy",
+        error: "legacy daemon failure",
+      }),
+    ).toEqual({
+      status: "agent_create_failed",
+      requestId: "create-legacy",
+      error: "legacy daemon failure",
+    });
+  });
+
+  test("accepts an explicit marker when the daemon knows no agent was registered", () => {
+    expect(
+      AgentCreateFailedStatusPayloadSchema.parse({
+        status: "agent_create_failed",
+        requestId: "create-rejected",
+        error: "mode rejected",
+        agentCreated: false,
+      }),
+    ).toEqual({
+      status: "agent_create_failed",
+      requestId: "create-rejected",
+      error: "mode rejected",
+      agentCreated: false,
+    });
+  });
+});
 
 function workspaceDescriptor(overrides: Record<string, unknown> = {}) {
   return {
