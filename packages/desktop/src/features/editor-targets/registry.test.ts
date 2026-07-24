@@ -155,6 +155,34 @@ describe("editor target registry", () => {
     ]);
   });
 
+  it("opens a Windows file at its line through VS Code", async () => {
+    const runtime = new FakeEditorTargets("win32", {
+      LOCALAPPDATA: "C:/Users/me/AppData/Local",
+    });
+    const installedCommand = "C:/Users/me/AppData/Local/Programs/Microsoft VS Code/bin/code.cmd";
+    runtime.installCommand(installedCommand, installedCommand);
+    runtime.addPath("C:/repo");
+    runtime.addPath("C:/repo/src/app.ts");
+
+    await openEditorTarget(
+      {
+        editorId: "vscode",
+        workspacePath: "C:/repo",
+        filePath: "C:/repo/src/app.ts",
+        line: 37,
+      },
+      runtime,
+      [vscodeTarget],
+    );
+
+    expect(runtime.launches).toEqual([
+      {
+        command: installedCommand,
+        args: ["C:/repo", "--goto", "C:/repo/src/app.ts:37"],
+      },
+    ]);
+  });
+
   it("lets each target choose its own command and arguments", async () => {
     const runtime = new FakeEditorTargets();
     runtime.installCommand("zeditor");
