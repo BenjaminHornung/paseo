@@ -127,7 +127,7 @@ function sleepUnlessAborted(delayMs: number, signal: AbortSignal): Promise<void>
   if (signal.aborted) {
     return Promise.resolve();
   }
-  let timer: NodeJS.Timeout | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   return Promise.race([
     new Promise<void>((resolve) => {
@@ -1307,7 +1307,7 @@ function createSdkOpenCodeClient(options: { baseUrl: string; directory: string }
   return createOpencodeClient(options satisfies OpencodeClientConfig & { directory: string });
 }
 
-function buildOpenCodeServerScope(cwd: string): OpenCodeServerScope {
+function buildOpenCodeServerScope(cwd?: string): OpenCodeServerScope {
   return { cwd };
 }
 
@@ -1379,7 +1379,6 @@ export class OpenCodeAgentClient implements AgentClient {
       deps.serverManager ??
       OpenCodeServerManager.getInstance(this.logger, runtimeSettings, {
         managedProcesses: deps.managedProcesses,
-        resolveHomeDir: deps.resolveHomeDir,
       });
     this.createOpenCodeClient = deps.createClient ?? createSdkOpenCodeClient;
     this.resolveHomeDir = deps.resolveHomeDir ?? resolveOpenCodeHomeDir;
@@ -1496,7 +1495,9 @@ export class OpenCodeAgentClient implements AgentClient {
   }
 
   async fetchCatalog(options: FetchCatalogOptions): Promise<ProviderCatalog> {
-    const serverScope = buildOpenCodeServerScope(options.cwd);
+    const serverScope = buildOpenCodeServerScope(
+      options.scope === "workspace" ? options.cwd : undefined,
+    );
     const acquisition = options.force
       ? await this.serverManager.acquireNew(serverScope)
       : await this.serverManager.acquireCurrent(serverScope);
@@ -3082,7 +3083,7 @@ class OpenCodeAgentSession implements AgentSession {
   private childHydrationCompleted = false;
   private readonly unrelatedSessionIds = new Set<string>();
   private selectedModelContextWindowMaxTokens: number | undefined;
-  private releaseServer: (() => Promise<void>) | null;
+  private releaseServer: (() => void) | null;
   private eventStreamAbortController: AbortController | null = null;
   private eventStreamReady: Deferred<void> | null = null;
   private eventStreamTask: Promise<void> | null = null;
@@ -3109,7 +3110,7 @@ class OpenCodeAgentSession implements AgentSession {
     sessionId: string,
     logger: Logger,
     modelContextWindowsByModelKey: ReadonlyMap<string, number> = new Map(),
-    releaseServer?: () => Promise<void>,
+    releaseServer?: () => void,
     persistSession = true,
     private readonly agentId?: string,
     private readonly serverUrl?: string,

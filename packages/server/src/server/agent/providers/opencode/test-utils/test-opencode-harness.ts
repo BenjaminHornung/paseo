@@ -177,6 +177,16 @@ export class TestOpenCodeClient {
       global: {
         event: async (options: unknown) => {
           this.calls.globalEvent.push(options);
+          const signal = (options as { signal?: AbortSignal } | undefined)?.signal;
+          if (signal) {
+            if (signal.aborted) {
+              this.queuedEventStream.end();
+            } else {
+              signal.addEventListener("abort", () => this.queuedEventStream.end(), {
+                once: true,
+              });
+            }
+          }
           return { stream: this.eventStream };
         },
       },
@@ -279,9 +289,11 @@ export function createEventStream(events: unknown[]): AsyncGenerator<unknown> {
 function createQueuedEventStream(): {
   stream: AsyncIterable<unknown>;
   emit: (event: unknown) => void;
+  end: () => void;
 } {
   const queue: unknown[] = [];
   const waiters: Array<(result: IteratorResult<unknown>) => void> = [];
+  let ended = false;
 
   return {
     stream: {
@@ -290,6 +302,9 @@ function createQueuedEventStream(): {
           const event = queue.shift();
           if (event !== undefined) {
             return Promise.resolve({ done: false, value: event });
+          }
+          if (ended) {
+            return Promise.resolve({ done: true, value: undefined });
           }
           return new Promise<IteratorResult<unknown>>((resolve) => {
             waiters.push(resolve);
@@ -304,6 +319,15 @@ function createQueuedEventStream(): {
         return;
       }
       queue.push(event);
+    },
+    end: () => {
+      ended = true;
+      while (waiters.length > 0) {
+        const waiter = waiters.shift();
+        if (waiter) {
+          waiter({ done: true, value: undefined });
+        }
+      }
     },
   };
 }
