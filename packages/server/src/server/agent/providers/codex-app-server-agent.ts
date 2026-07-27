@@ -1070,6 +1070,22 @@ export function normalizeCodexQuestionPrompts(raw: unknown): CodexQuestionPrompt
   return questions;
 }
 
+function formatCodexSkillWarningMessage(warnings: string[]): string {
+  const normalized = warnings
+    .map((warning) => warning.trim())
+    .filter((warning) => warning.length > 0);
+  if (normalized.length === 0) {
+    return "";
+  }
+  const count = normalized.length;
+  const noun = count === 1 ? "skill" : "skills";
+  const fileNoun = count === 1 ? "file" : "files";
+  return [
+    `Skipped loading ${count} ${noun} due to invalid SKILL.md ${fileNoun}.`,
+    ...normalized,
+  ].join("\n");
+}
+
 export function formatCodexQuestionPrompts(questions: CodexQuestionPrompt[]): string {
   return questions
     .map((question) => {
@@ -3287,6 +3303,8 @@ export class CodexAppServerAgentSession implements AgentSession {
   } | null = null;
   private cachedSkills: Array<{ name: string; description: string; path: string }> = [];
 
+  private latestSkillWarningMessage: string | null = null;
+
   constructor(
     config: AgentSessionConfig,
     private readonly resumeHandle: { sessionId: string; metadata?: Record<string, unknown> } | null,
@@ -3425,10 +3443,10 @@ export class CodexAppServerAgentSession implements AgentSession {
       );
       const entries = Array.isArray(response?.data) ? response.data : [];
       const skillsByName = new Map<string, { name: string; description: string; path: string }>();
+      const skillWarnings: string[] = [];
       for (const entry of entries) {
         const entryRecord = toObjectRecord(entry);
-        const list = Array.isArray(entryRecord?.skills) ? entryRecord.skills : [];
-        for (const skill of list) {
+        for (const skill of Array.isArray(entryRecord?.skills) ? entryRecord.skills : []) {
           const skillRecord = toObjectRecord(skill);
           if (typeof skillRecord?.name !== "string" || typeof skillRecord?.path !== "string")
             continue;
@@ -3440,8 +3458,10 @@ export class CodexAppServerAgentSession implements AgentSession {
             });
           }
         }
+        skillWarnings.push(...CodexAppServerAgentSession.collectSkillErrors(entryRecord));
       }
       this.cachedSkills = Array.from(skillsByName.values());
+      this.publishSkillWarnings(skillWarnings);
     } catch (error) {
       this.logger.trace(
         {
@@ -3454,7 +3474,56 @@ export class CodexAppServerAgentSession implements AgentSession {
         "provider.codex.metadata.skills_failed",
       );
       this.cachedSkills = [];
+      this.publishSkillWarnings([]);
     }
+  }
+
+  private static collectSkillErrors(
+    entryRecord: Record<string, unknown> | null | undefined,
+  ): string[] {
+    const errors = Array.isArray(entryRecord?.errors) ? entryRecord.errors : [];
+    const warnings: string[] = [];
+    for (const error of errors) {
+      if (!error || typeof error !== "object") {
+        continue;
+      }
+      const record = error as { path?: unknown; message?: unknown };
+      const message = nonEmptyString(
+        typeof record.message === "string" ? record.message : undefined,
+      );
+      if (!message) {
+        continue;
+      }
+      const skillPath = nonEmptyString(typeof record.path === "string" ? record.path : undefined);
+      warnings.push(skillPath ? `${skillPath}: ${message}` : message);
+    }
+    return warnings;
+  }
+
+  private publishSkillWarnings(warnings: string[]): void {
+    if (warnings.length === 0) {
+      this.latestSkillWarningMessage = null;
+      return;
+    }
+
+    const message = formatCodexSkillWarningMessage(warnings);
+    if (!message || message === this.latestSkillWarningMessage) {
+      return;
+    }
+
+    this.latestSkillWarningMessage = message;
+    const item: AgentTimelineItem = {
+      type: "error",
+      message,
+    };
+
+    if (this.connected) {
+      this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item });
+      return;
+    }
+
+    this.persistedHistory.push({ item });
+    this.historyPending = true;
   }
 
   private findCollaborationMode(target: "code" | "plan"): {
@@ -3633,7 +3702,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         this.rememberCodexUserMessageTurn(entry.item.messageId);
       }
     }
-    this.persistedHistory = timeline;
+    this.persistedHistory = [...this.persistedHistory, ...timeline];
     this.historyPending = timeline.length > 0;
   }
 
