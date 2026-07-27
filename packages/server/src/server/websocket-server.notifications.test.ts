@@ -14,6 +14,8 @@ import { createProviderSnapshotManagerStub } from "./test-utils/session-stubs.js
 import type { PushNotificationSender, PushPayload } from "./push/notifications.js";
 import type { WorkspaceAutoName } from "./workspace-auto-name.js";
 
+const WORKSPACE_ID = "workspace-1";
+
 const wsModuleMock = vi.hoisted(() => {
   class MockWebSocketServer {
     readonly handlers = new Map<string, (...args: unknown[]) => void>();
@@ -87,7 +89,7 @@ function createServer(agentManagerOverrides?: Record<string, unknown>) {
     subscribe: vi.fn(() => () => {}),
     setAgentAttentionCallback: vi.fn(),
     addAgentArchivedCallback: vi.fn(() => () => {}),
-    getAgent: vi.fn(() => null),
+    getAgent: vi.fn(() => ({ workspaceId: WORKSPACE_ID, pendingPermissions: new Map() })),
     getLastAssistantMessage: vi.fn(async () => null),
     getMetricsSnapshot: vi.fn(() => ({
       total: 0,
@@ -226,6 +228,7 @@ describe("VoiceAssistantWebSocketServer notification payloads", () => {
       getAgent: vi.fn(() => ({
         config: { title: null },
         cwd: "/tmp/worktree",
+        workspaceId: WORKSPACE_ID,
         pendingPermissions: new Map(),
       })),
       getLastAssistantMessage,
@@ -243,6 +246,7 @@ describe("VoiceAssistantWebSocketServer notification payloads", () => {
         body: "Done. Updated README.md and link.",
         data: {
           serverId: "srv-test",
+          workspaceId: WORKSPACE_ID,
           agentId: "agent-1",
           reason: "finished",
         },
@@ -257,6 +261,7 @@ describe("VoiceAssistantWebSocketServer notification payloads", () => {
       getAgent: vi.fn(() => ({
         config: { title: null },
         cwd: "/tmp/worktree",
+        workspaceId: WORKSPACE_ID,
         labels: {},
         pendingPermissions: new Map(),
       })),

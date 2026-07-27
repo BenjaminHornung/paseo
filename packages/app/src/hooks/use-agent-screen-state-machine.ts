@@ -41,6 +41,7 @@ export type AgentScreenMissingState =
 
 export interface AgentScreenMachineInput {
   agent: AgentScreenAgent | null;
+  isArchived: boolean;
   missingAgentState: AgentScreenMissingState;
   isConnected: boolean;
   isArchivingCurrentAgent: boolean;
@@ -64,6 +65,7 @@ function shouldBlockInitialAuthoritativeReadyState(
   canRecoverVisibleHistory: boolean,
 ): boolean {
   return (
+    !input.isArchived &&
     !hasOptimisticCreateContinuity(input) &&
     !input.hasHydratedHistoryBefore &&
     !canRecoverVisibleHistory &&
@@ -168,6 +170,9 @@ function resolveAgentScreenSync(args: {
   hadInitialSyncFailure: boolean;
 }): AgentScreenReadySyncState {
   const { input, hadInitialSyncFailure } = args;
+  if (input.isArchived) {
+    return { status: "idle" };
+  }
   if (!input.isConnected) {
     return { status: "reconnecting" };
   }

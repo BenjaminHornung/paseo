@@ -92,10 +92,20 @@ export interface ChatHistoryContextAttachment {
 
 export const NEW_WORKSPACE_PICKER_ATTACHMENT_OWNER = "new-workspace-picker";
 
+export type WorkspaceFileSelection =
+  | { kind: "whole_file" }
+  | { kind: "line_range"; startLine: number; endLine: number };
+
+export interface WorkspaceFileComposerAttachment {
+  kind: "workspace_file";
+  path: string;
+  selection: WorkspaceFileSelection;
+}
+
 export type UserComposerAttachment =
   | { kind: "image"; metadata: AttachmentMetadata }
   | { kind: "file"; attachment: UploadedFileAttachment }
-  | { kind: "agent_attachment"; attachment: AgentAttachment }
+  | WorkspaceFileComposerAttachment
   | { kind: "forge_issue"; item: ForgeSearchItem }
   | { kind: "forge_change_request"; item: ForgeSearchItem }
   // COMPAT(githubAttachmentKinds): added in v0.1.106, remove after 2026-12-28 once daemon floor >= v0.1.106
@@ -104,7 +114,12 @@ export type UserComposerAttachment =
       kind: "github_pr";
       item: ForgeSearchItem;
       owner?: typeof NEW_WORKSPACE_PICKER_ATTACHMENT_OWNER;
-    };
+    }
+  // COMPAT(agentMessageQueue): durable queue mirrors agent attachments as a
+  // lossless wrapper kind so queued non-image attachments survive reconnect and
+  // restart. Upstream's specific kinds require composer-only fields (reviewDraftKey,
+  // ForgeSearchItem conversion) that the queue payload does not carry.
+  | { kind: "agent_attachment"; attachment: AgentAttachment };
 
 export type WorkspaceComposerAttachment =
   | {
