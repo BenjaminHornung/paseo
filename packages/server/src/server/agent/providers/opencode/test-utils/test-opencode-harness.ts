@@ -313,6 +313,9 @@ function createQueuedEventStream(): {
       }),
     },
     emit: (event: unknown) => {
+      if (ended) {
+        return;
+      }
       const waiter = waiters.shift();
       if (waiter) {
         waiter({ done: false, value: event });
