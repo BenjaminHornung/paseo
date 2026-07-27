@@ -191,15 +191,40 @@ describe("OMP CLI runtime", () => {
     const commands: Record<string, unknown>[] = [];
     replyToCommands(child, (command) => {
       commands.push(command);
-      return undefined;
+      return command.type === "get_subagents"
+        ? { subagents: [{ id: "child-1", agent: "audit", status: "running" }] }
+        : undefined;
     });
     const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
 
     await session.setSubagentSubscription("events");
+    await expect(session.getSubagents(1_000)).resolves.toEqual([
+      { id: "child-1", agent: "audit", status: "running" },
+    ]);
 
     expect(commands.map(withoutRequestId)).toEqual([
       { type: "set_subagent_subscription", level: "events" },
+      { type: "get_subagents" },
     ]);
+  });
+
+  test("times out legacy get_subagents responses without request IDs", async () => {
+    const child = createOmpChild();
+    child.stdin.on("data", () => {
+      child.stdout.write(
+        `${JSON.stringify({
+          type: "response",
+          command: "get_subagents",
+          success: false,
+          error: "Unknown command: get_subagents",
+        })}\n`,
+      );
+    });
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+
+    await expect(session.getSubagents(50)).rejects.toThrow(
+      "OMP RPC request timed out for get_subagents",
+    );
   });
 
   test("accepts the empty prompt acknowledgement emitted by OMP 17", async () => {

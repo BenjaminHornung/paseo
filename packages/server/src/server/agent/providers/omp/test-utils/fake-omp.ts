@@ -15,25 +15,14 @@ import type {
   OmpRuntimeEvent,
   OmpSessionState,
   OmpSessionStats,
+  OmpSubagentSnapshot,
   OmpThinkingLevel,
 } from "../rpc-types.js";
 import { buildOmpLaunch } from "../runtime.js";
 
 type FakeOmpSubagentSubscriptionLevel = "off" | "progress" | "events";
-type FakeOmpSubagentStatus = "pending" | "running" | "completed" | "failed" | "aborted";
 
-export interface FakeOmpSubagentSnapshot {
-  id: string;
-  index: number;
-  agent: string;
-  description?: string;
-  status: FakeOmpSubagentStatus;
-  task?: string;
-  assignment?: string;
-  sessionFile?: string;
-  parentToolCallId?: string;
-  lastUpdate?: number;
-}
+export type FakeOmpSubagentSnapshot = OmpSubagentSnapshot;
 
 export interface FakeOmpSubagentMessagesSelector {
   subagentId?: string;
@@ -101,6 +90,7 @@ export class FakeOmpSession implements OmpRuntimeSession {
   readonly compactRequests: Array<{ customInstructions?: string }> = [];
   readonly setAutoCompactionRequests: boolean[] = [];
   readonly subagentSubscriptionRequests: FakeOmpSubagentSubscriptionLevel[] = [];
+  readonly getSubagentsRequestTimeouts: Array<number | undefined> = [];
   readonly subagentMessageRequests: FakeOmpSubagentMessagesSelector[] = [];
   readonly setModelRequests: Array<{ provider: string; modelId: string }> = [];
   readonly setThinkingLevelRequests: OmpThinkingLevel[] = [];
@@ -112,6 +102,7 @@ export class FakeOmpSession implements OmpRuntimeSession {
   readonly hostToolUpdates: OmpRpcHostToolUpdate[] = [];
   getStateRequestCount = 0;
   abortRequested = false;
+  abortRequestCount = 0;
   readonly canceledExtensionUiRequests: string[] = [];
   readonly extensionUiResponses: Array<{
     id: string;
@@ -127,6 +118,7 @@ export class FakeOmpSession implements OmpRuntimeSession {
   commands: OmpRpcSlashCommand[] = [];
   subagents: FakeOmpSubagentSnapshot[] = [];
   readonly subagentSubscriptionErrors = new Map<FakeOmpSubagentSubscriptionLevel, Error>();
+  getSubagentsError: Error | null = null;
   compactError: Error | null = null;
   emitCompactEnd = true;
   getStateError: Error | null = null;
@@ -141,6 +133,7 @@ export class FakeOmpSession implements OmpRuntimeSession {
   private readonly subscribers = new Set<(event: OmpRuntimeEvent) => void>();
   private readonly stateReports: OmpSessionState[] = [];
   private readonly stateRequestWaiters: Array<{ count: number; resolve: () => void }> = [];
+  private readonly getSubagentsRequestWaiters: Array<{ count: number; resolve: () => void }> = [];
   private readonly hostToolResultWaiters: Array<(result: OmpRpcHostToolResult) => void> = [];
   private readonly promptWaiters: Array<() => void> = [];
   private readonly subscriptionWaiters: Array<{ count: number; resolve: () => void }> = [];
@@ -148,6 +141,16 @@ export class FakeOmpSession implements OmpRuntimeSession {
   private nextHeldPrompt: { promise: Promise<void>; reject: (error: Error) => void } | null = null;
   private activeHeldPrompt: { promise: Promise<void>; reject: (error: Error) => void } | null =
     null;
+  private nextHeldGetSubagents: {
+    promise: Promise<OmpSubagentSnapshot[]>;
+    resolve: (snapshots: OmpSubagentSnapshot[]) => void;
+  } | null = null;
+  private activeHeldGetSubagents: {
+    promise: Promise<OmpSubagentSnapshot[]>;
+    resolve: (snapshots: OmpSubagentSnapshot[]) => void;
+  } | null = null;
+  private nextHeldAbort: { promise: Promise<void>; resolve: () => void } | null = null;
+  private activeHeldAbort: { promise: Promise<void>; resolve: () => void } | null = null;
 
   constructor(launch: OmpRuntimeLaunch) {
     this.state = {
@@ -239,6 +242,38 @@ export class FakeOmpSession implements OmpRuntimeSession {
 
   async abort(): Promise<void> {
     this.abortRequested = true;
+    this.abortRequestCount += 1;
+    const held = this.nextHeldAbort;
+    if (held) {
+      this.nextHeldAbort = null;
+      this.activeHeldAbort = held;
+      try {
+        await held.promise;
+      } finally {
+        if (this.activeHeldAbort === held) {
+          this.activeHeldAbort = null;
+        }
+      }
+    }
+  }
+
+  holdNextAbort(): void {
+    if (this.nextHeldAbort || this.activeHeldAbort) {
+      throw new Error("FakeOmp already has a held abort request");
+    }
+    let resolve!: () => void;
+    const promise = new Promise<void>((resolvePromise) => {
+      resolve = resolvePromise;
+    });
+    this.nextHeldAbort = { promise, resolve };
+  }
+
+  resolveHeldAbort(): void {
+    const held = this.activeHeldAbort ?? this.nextHeldAbort;
+    if (!held) {
+      throw new Error("FakeOmp has no held abort request");
+    }
+    held.resolve();
   }
 
   async getState(): Promise<OmpSessionState> {
@@ -352,8 +387,52 @@ export class FakeOmpSession implements OmpRuntimeSession {
     return new Promise((resolve) => this.hostToolResultWaiters.push(resolve));
   }
 
-  async getSubagents(): Promise<FakeOmpSubagentSnapshot[]> {
+  async getSubagents(timeoutMs?: number): Promise<OmpSubagentSnapshot[]> {
+    this.getSubagentsRequestTimeouts.push(timeoutMs);
+    for (const waiter of this.getSubagentsRequestWaiters.splice(0)) {
+      if (this.getSubagentsRequestTimeouts.length >= waiter.count) waiter.resolve();
+      else this.getSubagentsRequestWaiters.push(waiter);
+    }
+    const held = this.nextHeldGetSubagents;
+    if (held) {
+      this.nextHeldGetSubagents = null;
+      this.activeHeldGetSubagents = held;
+      try {
+        return await held.promise;
+      } finally {
+        if (this.activeHeldGetSubagents === held) {
+          this.activeHeldGetSubagents = null;
+        }
+      }
+    }
+    if (this.getSubagentsError) {
+      throw this.getSubagentsError;
+    }
     return this.subagents;
+  }
+
+  waitForGetSubagentsRequests(count: number): Promise<void> {
+    if (this.getSubagentsRequestTimeouts.length >= count) return Promise.resolve();
+    return new Promise((resolve) => this.getSubagentsRequestWaiters.push({ count, resolve }));
+  }
+
+  holdNextGetSubagents(): void {
+    if (this.nextHeldGetSubagents || this.activeHeldGetSubagents) {
+      throw new Error("FakeOmp already has a held get_subagents request");
+    }
+    let resolve!: (snapshots: OmpSubagentSnapshot[]) => void;
+    const promise = new Promise<OmpSubagentSnapshot[]>((resolvePromise) => {
+      resolve = resolvePromise;
+    });
+    this.nextHeldGetSubagents = { promise, resolve };
+  }
+
+  resolveHeldGetSubagents(snapshots: OmpSubagentSnapshot[] = this.subagents): void {
+    const held = this.activeHeldGetSubagents ?? this.nextHeldGetSubagents;
+    if (!held) {
+      throw new Error("FakeOmp has no held get_subagents request");
+    }
+    held.resolve(snapshots);
   }
 
   async getSubagentMessages(

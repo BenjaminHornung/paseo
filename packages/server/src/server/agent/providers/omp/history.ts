@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import type { AgentProvider, AgentStreamEvent } from "../../agent-sdk-types.js";
 import { normalizeProviderReplayTimestamp } from "../../provider-history-timestamps.js";
@@ -63,6 +63,9 @@ export async function* streamOmpHistory(input: {
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      for (const transcript of await discoverOrphanSubagentTranscripts(input.sessionFile)) {
+        yield* replaySubagentTranscript(transcript, input.provider, visitedSessionFiles);
+      }
       return;
     }
     throw error;
@@ -103,6 +106,7 @@ async function* replaySubagentTranscript(
     },
   );
   const resolvedModel = extractOmpSubagentModel(childEntries);
+  const terminalStatus = transcript.status ?? orphanSubagentStatus(childEntries);
   const firstTimestamp = normalizeProviderReplayTimestamp(childEntries[0]?.timestamp);
   yield subagentUpsert(transcript, provider, "running", firstTimestamp, resolvedModel);
   for await (const event of streamOmpHistory({
@@ -126,13 +130,13 @@ async function* replaySubagentTranscript(
     }
   }
   const lastTimestamp = normalizeProviderReplayTimestamp(childEntries.at(-1)?.timestamp);
-  yield subagentUpsert(transcript, provider, transcript.status, lastTimestamp, resolvedModel);
+  yield subagentUpsert(transcript, provider, terminalStatus, lastTimestamp, resolvedModel);
 }
 
 function subagentUpsert(
   transcript: OmpSubagentTranscript,
   provider: AgentProvider,
-  status: OmpSubagentTranscript["status"] | "running",
+  status: OmpSubagentTerminalStatus | "running",
   timestamp: string | null,
   resolvedModel: string | null,
 ): AgentStreamEvent {
@@ -150,12 +154,14 @@ function subagentUpsert(
   };
 }
 
+type OmpSubagentTerminalStatus = "completed" | "failed" | "canceled";
+
 interface OmpSubagentTranscript {
   id: string;
   title: string;
   toolCallId: string;
   sessionFile: string;
-  status: "completed" | "failed" | "canceled";
+  status?: OmpSubagentTerminalStatus;
 }
 
 function readSubagentTranscripts(
@@ -288,6 +294,48 @@ function taskResultText(message: Extract<OmpAgentMessage, { role: "toolResult" }
 function stripExtension(filePath: string): string {
   const extension = extname(filePath);
   return extension ? filePath.slice(0, -extension.length) : filePath;
+}
+
+async function discoverOrphanSubagentTranscripts(
+  parentSessionFile: string,
+): Promise<OmpSubagentTranscript[]> {
+  const artifactsDir = stripExtension(parentSessionFile);
+  let names: string[];
+  try {
+    names = await readdir(artifactsDir);
+  } catch {
+    return [];
+  }
+  return names
+    .filter((name) => name.endsWith(".jsonl") && !name.startsWith("."))
+    .map((name) => {
+      const id = basename(name, ".jsonl");
+      return {
+        id,
+        title: id,
+        toolCallId: "",
+        sessionFile: join(artifactsDir, name),
+      };
+    });
+}
+
+function orphanSubagentStatus(
+  entries: readonly OmpSessionEntry[],
+): "completed" | "failed" | "canceled" {
+  const assistant = entries.findLast((entry) => entry.message?.role === "assistant")?.message;
+  if (!assistant) {
+    return "failed";
+  }
+  if (
+    assistant.stopReason === "error" ||
+    (typeof assistant.errorMessage === "string" && assistant.errorMessage.trim().length > 0)
+  ) {
+    return "failed";
+  }
+  if (assistant.stopReason === "aborted") {
+    return "canceled";
+  }
+  return "completed";
 }
 
 export async function readActiveOmpEntryChain(

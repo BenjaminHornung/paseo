@@ -9,6 +9,7 @@ import type {
   OmpRuntimeEvent,
   OmpSessionState,
   OmpSessionStats,
+  OmpSubagentSnapshot,
   OmpSubagentSubscriptionLevel,
   OmpThinkingLevel,
 } from "./rpc-types.js";
@@ -58,6 +59,7 @@ export interface OmpRuntimeSession {
   getSessionStats(): Promise<OmpSessionStats>;
   getCommands(): Promise<OmpRpcSlashCommand[]>;
   setSubagentSubscription(level: OmpSubagentSubscriptionLevel): Promise<void>;
+  getSubagents(timeoutMs?: number): Promise<OmpSubagentSnapshot[]>;
   setHostTools(tools: OmpRpcHostToolDefinition[]): Promise<string[]>;
   sendHostToolResult(result: OmpRpcHostToolResult): void;
   sendHostToolUpdate(update: OmpRpcHostToolUpdate): void;

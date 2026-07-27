@@ -245,6 +245,272 @@ describe("OMP agent client and session", () => {
     await expect(completion).resolves.toMatchObject({ finalText: "first done" });
   });
 
+  test("stays active while an observed OMP task child is running", async () => {
+    const scheduler = new ManualIdleScheduler();
+    const omp = new OmpHarness({ providerIdleScheduler: scheduler });
+    await omp.start();
+
+    await omp.requireStartTurn("audit the repository");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.acceptPrompt("audit the repository", "user-audit");
+    runtime.streamAssistantText("delegating");
+    runtime.emit({
+      type: "subagent_lifecycle",
+      payload: {
+        id: "ApiBudgetAudit",
+        agent: "audit",
+        status: "started",
+        parentToolCallId: "task-1",
+        index: 0,
+      },
+    });
+    runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
+    runtime.finishTurn();
+
+    await scheduler.waitForWaits(1);
+    expect(omp.completedTurnCount()).toBe(0);
+
+    runtime.emit({
+      type: "subagent_lifecycle",
+      payload: {
+        id: "ApiBudgetAudit",
+        agent: "audit",
+        status: "completed",
+        parentToolCallId: "task-1",
+        index: 0,
+      },
+    });
+    scheduler.retry();
+    await omp.waitForProviderStateChecks(2);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(omp.completedTurnCount()).toBe(1);
+  });
+
+  test("reconciles OMP task snapshots without redundant upserts", async () => {
+    const scheduler = new ManualIdleScheduler();
+    const omp = new OmpHarness({ providerIdleScheduler: scheduler });
+    await omp.start();
+
+    await omp.requireStartTurn("fan out");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.acceptPrompt("fan out", "user-fanout");
+    runtime.streamAssistantText("delegating");
+    runtime.subagents = [{ id: "PipelineAudit", agent: "audit", status: "running" }];
+    runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
+    runtime.finishTurn();
+
+    await scheduler.waitForWaits(1);
+    expect(omp.completedTurnCount()).toBe(0);
+    expect(omp.subagentUpserts()).toEqual([{ id: "PipelineAudit", status: "running" }]);
+
+    scheduler.retry();
+    await scheduler.waitForWaits(2);
+    expect(omp.subagentUpserts()).toEqual([{ id: "PipelineAudit", status: "running" }]);
+
+    runtime.subagents = [{ id: "PipelineAudit", agent: "audit", status: "completed" }];
+    scheduler.retry();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(omp.completedTurnCount()).toBe(1);
+    expect(omp.subagentUpserts()).toEqual([
+      { id: "PipelineAudit", status: "running" },
+      { id: "PipelineAudit", status: "completed" },
+    ]);
+  });
+
+  test("does not let an interrupted idle probe complete a newer turn", async () => {
+    const scheduler = new ManualIdleScheduler();
+    const omp = new OmpHarness({ providerIdleScheduler: scheduler });
+    await omp.start();
+    await omp.requireStartTurn("first");
+    const runtime = omp.runtime();
+    runtime.holdNextGetSubagents();
+    runtime.beginTurn();
+    runtime.acceptPrompt("first", "user-first");
+    runtime.streamAssistantText("first done", "assistant-first");
+    runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
+    runtime.finishTurn();
+    await runtime.waitForGetSubagentsRequests(1);
+
+    await omp.interrupt();
+    expect(omp.canceledTurnCount()).toBe(1);
+
+    await omp.requireStartTurn("second");
+    runtime.beginTurn();
+    runtime.acceptPrompt("second", "user-second");
+    runtime.streamAssistantText("second done", "assistant-second");
+    runtime.resolveHeldGetSubagents();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(omp.completedTurnCount()).toBe(0);
+
+    runtime.finishTurn();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(omp.completedTurnCount()).toBe(1);
+  });
+
+  test("does not complete an interrupted autonomous turn after its idle probe resolves", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    const runtime = omp.runtime();
+    runtime.holdNextGetSubagents();
+    runtime.beginTurn();
+    runtime.streamAssistantText("autonomous done");
+    runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
+    runtime.finishTurn();
+    await runtime.waitForGetSubagentsRequests(1);
+
+    await omp.interrupt();
+    runtime.resolveHeldGetSubagents();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(omp.canceledTurnCount()).toBe(1);
+    expect(omp.completedTurnCount()).toBe(0);
+  });
+
+  test("ignores buffered turn events and rejects starts while abort is pending", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.streamAssistantText("autonomous work");
+    runtime.holdNextAbort();
+
+    const interruption = omp.interrupt();
+    expect(runtime.abortRequested).toBe(true);
+    await expect(omp.startTurn("too early")).rejects.toThrow("An OMP turn is already active");
+    runtime.beginTurn();
+    runtime.streamAssistantText("late buffered output");
+    runtime.finishTurn();
+
+    runtime.resolveHeldAbort();
+    await interruption;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(omp.canceledTurnCount()).toBe(1);
+    expect(omp.completedTurnCount()).toBe(0);
+  });
+
+  test("coalesces concurrent interrupts until their shared abort settles", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    await omp.requireStartTurn("first");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.acceptPrompt("first", "user-first");
+    runtime.streamAssistantText("working", "assistant-first");
+    runtime.holdNextAbort();
+
+    const firstInterrupt = omp.interrupt();
+    const secondInterrupt = omp.interrupt();
+    expect(runtime.abortRequestCount).toBe(1);
+    await expect(omp.startTurn("too early")).rejects.toThrow("An OMP turn is already active");
+
+    runtime.resolveHeldAbort();
+    await Promise.all([firstInterrupt, secondInterrupt]);
+    expect(omp.canceledTurnCount()).toBe(1);
+
+    await omp.requireStartTurn("second");
+    runtime.beginTurn();
+    runtime.acceptPrompt("second", "user-second");
+    runtime.streamAssistantText("second done", "assistant-second");
+    runtime.finishTurn();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(omp.completedTurnCount()).toBe(1);
+    expect(runtime.abortRequestCount).toBe(1);
+  });
+
+  test("does not complete a closed turn after an idle probe resolves", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    await omp.requireStartTurn("close during probe");
+    const runtime = omp.runtime();
+    runtime.holdNextGetSubagents();
+    runtime.beginTurn();
+    runtime.acceptPrompt("close during probe");
+    runtime.streamAssistantText("done");
+    runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
+    runtime.finishTurn();
+    await runtime.waitForGetSubagentsRequests(1);
+
+    await omp.close();
+    runtime.resolveHeldGetSubagents();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(omp.completedTurnCount()).toBe(0);
+  });
+
+  test("coalesces duplicate agent_end idle probes for one turn", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    await omp.requireStartTurn("duplicate end");
+    const runtime = omp.runtime();
+    runtime.holdNextGetSubagents();
+    runtime.beginTurn();
+    runtime.acceptPrompt("duplicate end");
+    runtime.streamAssistantText("done");
+    runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
+    runtime.finishTurn();
+    await runtime.waitForGetSubagentsRequests(1);
+
+    runtime.emit({ type: "agent_end", messages: runtime.messages });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(runtime.getSubagentsRequestTimeouts).toEqual([1_000]);
+
+    runtime.resolveHeldGetSubagents();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(omp.completedTurnCount()).toBe(1);
+  });
+
+  test.each(["OMP RPC request timed out for get_subagents", "Unknown command: get_subagents"])(
+    "falls back after one blocked unsupported get_subagents probe: %s",
+    async (message) => {
+      const scheduler = new ManualIdleScheduler();
+      const omp = new OmpHarness({ providerIdleScheduler: scheduler });
+      await omp.start();
+      const runtime = omp.runtime();
+      runtime.getSubagentsError = new Error(message);
+
+      const { completion } = await omp.startPromptUntilProviderIdle("first", "done", {
+        isStreaming: false,
+        isCompacting: false,
+      });
+
+      await scheduler.waitForWaits(1);
+      expect(omp.completedTurnCount()).toBe(0);
+      expect(runtime.getSubagentsRequestTimeouts).toEqual([1_000]);
+
+      scheduler.retry();
+      await expect(completion).resolves.toMatchObject({ finalText: "done" });
+      expect(runtime.getSubagentsRequestTimeouts).toEqual([1_000]);
+    },
+  );
+
+  test.each(["temporary RPC failure", "get_subagents timed out waiting for child manager"])(
+    "fails closed and retries a transient get_subagents error: %s",
+    async (message) => {
+      const scheduler = new ManualIdleScheduler();
+      const omp = new OmpHarness({ providerIdleScheduler: scheduler });
+      await omp.start();
+      const runtime = omp.runtime();
+      runtime.getSubagentsError = new Error(message);
+
+      const { completion } = await omp.startPromptUntilProviderIdle("first", "done", {
+        isStreaming: false,
+        isCompacting: false,
+      });
+
+      await scheduler.waitForWaits(1);
+      expect(omp.completedTurnCount()).toBe(0);
+
+      runtime.getSubagentsError = null;
+      scheduler.retry();
+      await expect(completion).resolves.toMatchObject({ finalText: "done" });
+      expect(runtime.getSubagentsRequestTimeouts).toEqual([1_000, 1_000]);
+    },
+  );
+
   test("stays active when OMP state checks fail", async () => {
     const scheduler = new ManualIdleScheduler();
     const omp = new OmpHarness({ providerIdleScheduler: scheduler });
@@ -537,11 +803,16 @@ describe("OMP agent client and session", () => {
         id: "child-1",
         agent: "worker",
         index: 0,
+        task: "slow work",
         progress: { id: "child-1", status: "running" },
         parentToolCallId: "tool-1",
       },
     });
     expect(omp.runningToolCallIds()).toEqual([]);
+    expect(omp.subagentUpserts()).toEqual([
+      { id: "child-1", status: "running" },
+      { id: "child-1", status: "canceled" },
+    ]);
   });
 
   test("a resumed session does not re-emit replayed events as live timeline items", async () => {
