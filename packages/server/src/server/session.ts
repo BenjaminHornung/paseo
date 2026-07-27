@@ -4575,6 +4575,7 @@ export class Session {
         : {}),
       workspaceGitService: this.workspaceGitService,
       workspaceProvisioning: this.workspaceProvisioning,
+      workspaceRegistry: this.workspaceRegistry,
     });
     void Promise.all([
       this.gitMutation.notifyGitMutation(input.cwd, "create-worktree"),

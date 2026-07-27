@@ -1000,6 +1000,7 @@ export async function createPaseoDaemon(
               : {}),
             workspaceGitService,
             workspaceProvisioning,
+            ...(workspaceRegistry ? { workspaceRegistry } : {}),
           });
         },
         warmWorkspaceGitData: async (workspace) => {

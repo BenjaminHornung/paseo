@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import { getRealpathAwareRelativePath } from "../utils/path.js";
-import type { PersistedWorkspaceRecord } from "./workspace-registry.js";
+import type { PersistedWorkspaceRecord, WorkspaceRegistry } from "./workspace-registry.js";
 import type { WorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
 import {
   createWorktreeCore,
@@ -58,13 +58,24 @@ export interface AttemptFirstAgentBranchAutoNameResult {
 export interface CreatePaseoWorktreeDeps extends CreateWorktreeCoreDeps {
   workspaceGitService: WorkspaceGitService;
   workspaceProvisioning: Pick<WorkspaceProvisioningService, "createWorkspaceForWorktree">;
+  workspaceRegistry?: Pick<WorkspaceRegistry, "list">;
 }
 
 export async function createPaseoWorktree(
   input: CreatePaseoWorktreeInput,
   deps: CreatePaseoWorktreeDeps,
 ): Promise<CreatePaseoWorktreeResult> {
-  const workspaceCwdPlan = await planWorkspaceCwdForWorktree(input.cwd, deps.workspaceGitService);
+  const effectiveCwd = deps.workspaceRegistry
+    ? await resolveEffectiveWorktreeInputCwd({
+        inputCwd: input.cwd,
+        projectId: input.projectId,
+        workspaceRegistry: deps.workspaceRegistry,
+      })
+    : input.cwd;
+  const workspaceCwdPlan = await planWorkspaceCwdForWorktree(
+    effectiveCwd,
+    deps.workspaceGitService,
+  );
   const createdWorktree = await createWorktreeCore(input, deps);
   try {
     maybeMarkFirstAgentBranchAutoNameEligible({ createdWorktree });
@@ -140,6 +151,37 @@ async function planWorkspaceCwdForWorktree(
     throw new Error(`Workspace cwd is outside its source worktree: ${normalizedInputCwd}`);
   }
   return { inputCwd: normalizedInputCwd, relativeWorkspaceCwd };
+}
+
+async function resolveEffectiveWorktreeInputCwd(options: {
+  inputCwd: string;
+  projectId?: string;
+  workspaceRegistry: Pick<WorkspaceRegistry, "list">;
+}): Promise<string> {
+  if (!options.projectId) {
+    return options.inputCwd;
+  }
+  const sourceWorkspace = await findSourceWorkspaceForWorktree({
+    projectId: options.projectId,
+    workspaceRegistry: options.workspaceRegistry,
+  });
+  return sourceWorkspace?.cwd ?? options.inputCwd;
+}
+
+async function findSourceWorkspaceForWorktree(options: {
+  projectId: string;
+  workspaceRegistry: Pick<WorkspaceRegistry, "list">;
+}): Promise<PersistedWorkspaceRecord | null> {
+  const workspaces = await options.workspaceRegistry.list();
+  const active = workspaces.filter((ws) => !ws.archivedAt && ws.kind !== "worktree");
+  const candidates = active.filter((ws) => ws.projectId === options.projectId);
+  if (candidates.length === 0) {
+    return null;
+  }
+  if (candidates.length === 1) {
+    return candidates[0];
+  }
+  return candidates.reduce((a, b) => (a.updatedAt > b.updatedAt ? a : b));
 }
 
 export async function attemptFirstAgentBranchAutoName(options: {

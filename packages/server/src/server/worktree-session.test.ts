@@ -375,6 +375,7 @@ function createPaseoWorktreeForTest(options: {
         : {}),
       workspaceGitService,
       workspaceProvisioning,
+      workspaceRegistry,
     });
   };
 }
