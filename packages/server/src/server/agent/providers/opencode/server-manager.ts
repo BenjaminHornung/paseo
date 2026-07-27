@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import net from "node:net";
-import os from "node:os";
 import type { Logger } from "pino";
 
 import { findExecutable } from "../../../../executable-resolution/executable-resolution.js";
@@ -12,6 +12,7 @@ import {
   resolveProviderCommandPrefix,
   type ProviderRuntimeSettings,
 } from "../../provider-launch-config.js";
+import { resolveOpenCodeHomeDir } from "./paths.js";
 
 const OPENCODE_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 5_000;
 const OPENCODE_SERVER_FORCE_SHUTDOWN_TIMEOUT_MS = 1_000;
@@ -66,6 +67,7 @@ export interface OpenCodeServerManagerOptions {
   terminateProcess?: ProcessTerminator;
   portAllocator?: OpenCodePortAllocator;
   resolveCommandPrefix?: OpenCodeCommandPrefixResolver;
+  resolveHomeDir?: () => string;
   spawnServerProcess?: OpenCodeServerProcessSpawner;
 }
 
@@ -77,6 +79,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   private startPromises = new Map<string, Promise<OpenCodeServerGeneration>>();
   private newServerPromises = new Map<string, Promise<OpenCodeServerGeneration>>();
   private dedicatedStartPromises = new Set<Promise<OpenCodeServerGeneration>>();
+  private terminationPromises = new Map<OpenCodeServerGeneration, Promise<void>>();
   private readonly logger: Logger;
   private readonly runtimeSettings?: ProviderRuntimeSettings;
   private readonly runtimeSettingsKey: string;
@@ -84,6 +87,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   private readonly terminateProcess: ProcessTerminator;
   private readonly portAllocator: OpenCodePortAllocator;
   private readonly resolveCommandPrefix: OpenCodeCommandPrefixResolver;
+  private readonly resolveHomeDir: () => string;
   private readonly spawnServerProcess: OpenCodeServerProcessSpawner;
   private shutdownPromise: Promise<void> | null = null;
   private shutdownEpoch = 0;
@@ -98,6 +102,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     this.resolveCommandPrefix =
       options.resolveCommandPrefix ??
       (() => resolveProviderCommandPrefix(this.runtimeSettings?.command, resolveOpenCodeBinary));
+    this.resolveHomeDir = options.resolveHomeDir ?? resolveOpenCodeHomeDir;
     this.spawnServerProcess = options.spawnServerProcess ?? spawnProcess;
   }
 
@@ -244,7 +249,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   }
 
   private async getNewServer(scope?: OpenCodeServerScope): Promise<OpenCodeServerGeneration> {
-    const cwd = resolveOpenCodeServerCwd(scope?.cwd);
+    const cwd = this.resolveServerCwd(scope?.cwd);
     const existingPromise = this.newServerPromises.get(cwd);
     if (existingPromise) {
       const server = await existingPromise;
@@ -254,7 +259,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
 
     const promise = Promise.resolve().then(async () => {
       await this.rotateCurrentServer(cwd);
-      const server = await this.startServer(undefined, scope);
+      const server = await this.startServer(undefined, scope, cwd);
       if (!server.retired) {
         this.currentServers.set(cwd, server);
       }
@@ -285,7 +290,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   }
 
   private async getCurrentServer(scope?: OpenCodeServerScope): Promise<OpenCodeServerGeneration> {
-    const cwd = resolveOpenCodeServerCwd(scope?.cwd);
+    const cwd = this.resolveServerCwd(scope?.cwd);
 
     const newServerPromise = this.newServerPromises.get(cwd);
     if (newServerPromise) {
@@ -310,7 +315,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       this.currentServers.delete(cwd);
     }
 
-    const promise = this.startServer(undefined, scope).then((server) => {
+    const promise = this.startServer(undefined, scope, cwd).then((server) => {
       if (!server.retired) {
         this.currentServers.set(cwd, server);
       }
@@ -347,12 +352,16 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   private async startServer(
     launchEnv?: Record<string, string>,
     scope?: OpenCodeServerScope,
+    resolvedCwd?: string,
   ): Promise<OpenCodeServerGeneration> {
     const port = await this.portAllocator();
     const url = `http://127.0.0.1:${port}`;
     const launchPrefix = await this.resolveCommandPrefix();
     const serverArgs = [...launchPrefix.args, "serve", "--port", String(port)];
-    const serverCwd = resolveOpenCodeServerCwd(scope?.cwd);
+    const serverCwd = resolvedCwd ?? this.resolveServerCwd(scope?.cwd);
+    if (!scope?.cwd) {
+      mkdirSync(serverCwd, { recursive: true });
+    }
 
     const serverProcess = this.spawnServerProcess(launchPrefix.command, serverArgs, {
       cwd: serverCwd,
@@ -509,12 +518,14 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     for (const server of servers) {
       server.retired = true;
     }
-    await Promise.all(Array.from(servers).map((server) => this.killServer(server)));
+    const shutdownTerminations = Array.from(servers, (server) => this.killServer(server));
+    await Promise.all([...shutdownTerminations, ...this.terminationPromises.values()]);
     this.currentServers.clear();
     this.retiredServers.clear();
     this.startPromises.clear();
     this.newServerPromises.clear();
     this.dedicatedStartPromises.clear();
+    this.terminationPromises.clear();
   }
 
   private async collectStartingServers(): Promise<OpenCodeServerGeneration[]> {
@@ -541,7 +552,21 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     }
   }
 
-  private async killServer(server: OpenCodeServerGeneration): Promise<void> {
+  private killServer(server: OpenCodeServerGeneration): Promise<void> {
+    const existing = this.terminationPromises.get(server);
+    if (existing) {
+      return existing;
+    }
+    const termination = this.performKillServer(server).finally(() => {
+      if (this.terminationPromises.get(server) === termination) {
+        this.terminationPromises.delete(server);
+      }
+    });
+    this.terminationPromises.set(server, termination);
+    return termination;
+  }
+
+  private async performKillServer(server: OpenCodeServerGeneration): Promise<void> {
     if (
       (server.process.exitCode !== null && server.process.exitCode !== undefined) ||
       (server.process.signalCode !== null && server.process.signalCode !== undefined)
@@ -571,6 +596,10 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     } else {
       this.removeManagedServerRecord(server);
     }
+  }
+
+  private resolveServerCwd(cwd?: string): string {
+    return cwd && cwd.length > 0 ? cwd : this.resolveHomeDir();
   }
 
   private async recordManagedServerProcess(options: {
@@ -665,8 +694,4 @@ function findAvailablePort(): Promise<number> {
     });
     server.on("error", reject);
   });
-}
-
-function resolveOpenCodeServerCwd(cwd?: string): string {
-  return cwd && cwd.length > 0 ? cwd : os.homedir();
 }

@@ -1,6 +1,8 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../test-utils/test-logger.js";
@@ -106,6 +108,23 @@ describe("OpenCodeServerManager generations", () => {
     expect(runtime.terminatedPorts).toEqual([]);
   });
 
+  test("does not create a missing scoped cwd", async () => {
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), "paseo-opencode-server-manager-"));
+    const missingCwd = path.join(tempDir, "missing-workspace");
+    const { manager, runtime } = createTestManager([4223]);
+
+    try {
+      const acquisition = await manager.acquireCurrent({ cwd: missingCwd });
+
+      expect(runtime.launches).toEqual([{ port: 4223, cwd: missingCwd }]);
+      expect(existsSync(missingCwd)).toBe(false);
+      acquisition.release();
+    } finally {
+      await manager.shutdown();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test("concurrent new-server acquisitions share one fresh generation", async () => {
     const { manager, runtime } = createTestManager([4251, 4252, 4253]);
 
@@ -181,6 +200,56 @@ describe("OpenCodeServerManager generations", () => {
     await manager.shutdown();
 
     expect(runtime.terminatedPorts).toEqual([4451]);
+  });
+
+  test("shutdown waits for a retired server termination started by release", async () => {
+    const { manager, runtime } = createTestManager([4461, 4462], { deferTermination: true });
+
+    const oldAcquisition = await manager.acquireCurrent();
+    const currentAcquisition = await manager.acquireNew();
+    currentAcquisition.release();
+    oldAcquisition.release();
+    await runtime.settle();
+    expect(runtime.pendingTerminationPorts).toEqual([4461]);
+
+    let shutdownFinished = false;
+    const shutdown = manager.shutdown().then(() => {
+      shutdownFinished = true;
+      return undefined;
+    });
+    await runtime.settle();
+    expect(runtime.pendingTerminationPorts).toEqual([4461, 4462]);
+
+    runtime.releaseTermination(4462);
+    await runtime.settle();
+    expect(shutdownFinished).toBe(false);
+
+    runtime.releaseTermination(4461);
+    await shutdown;
+
+    expect(shutdownFinished).toBe(true);
+    expect(runtime.terminatedPorts).toEqual([4462, 4461]);
+    expect(await runtime.managedProcesses.list()).toEqual([]);
+  });
+
+  test("shutdown coalesces termination started by a concurrent retired release", async () => {
+    const { manager, runtime } = createTestManager([4463, 4464], { deferTermination: true });
+
+    const oldAcquisition = await manager.acquireCurrent();
+    const currentAcquisition = await manager.acquireNew();
+    currentAcquisition.release();
+
+    const shutdown = manager.shutdown();
+    oldAcquisition.release();
+    await runtime.settle();
+
+    expect(runtime.pendingTerminationPorts).toEqual([4463, 4464]);
+    runtime.releaseTermination(4464);
+    runtime.releaseTermination(4463);
+    await shutdown;
+
+    expect(runtime.terminationAttempts).toEqual([4463, 4464]);
+    expect(runtime.terminatedPorts).toEqual([4464, 4463]);
   });
 
   test("startup timeout kills the spawned server and removes its managed-process record", async () => {
@@ -359,29 +428,39 @@ describe("OpenCodeServerManager managed process ledger", () => {
   });
 
   test("records helper server starts and removes the record on process exit", async () => {
-    const { manager, runtime } = createTestManager([4601]);
-    const homeCwd = os.homedir();
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), "paseo-opencode-server-manager-"));
+    const homeCwd = path.join(tempDir, "opencode-home");
+    const resolveHomeDir = vi.fn(() => homeCwd);
+    const { manager, runtime } = createTestManager([4601], {
+      resolveHomeDir,
+    });
 
-    await manager.acquireCurrent();
+    try {
+      await manager.acquireCurrent();
 
-    expect(runtime.launches).toEqual([{ port: 4601, cwd: homeCwd }]);
-    expect(await runtime.managedProcesses.list()).toEqual([
-      {
-        id: "managed-process-1",
-        owner: { provider: "opencode", kind: "helper-server" },
-        pid: 14601,
-        command: "opencode",
-        args: ["serve", "--port", "4601"],
-        metadata: { port: 4601, cwd: homeCwd },
-        identity: { commandLine: null, startedAt: null },
-        createdAt: "test-created-at",
-      },
-    ]);
+      expect(runtime.launches).toEqual([{ port: 4601, cwd: homeCwd }]);
+      expect(resolveHomeDir).toHaveBeenCalledTimes(1);
+      expect(existsSync(homeCwd)).toBe(true);
+      expect(await runtime.managedProcesses.list()).toEqual([
+        {
+          id: "managed-process-1",
+          owner: { provider: "opencode", kind: "helper-server" },
+          pid: 14601,
+          command: "opencode",
+          args: ["serve", "--port", "4601"],
+          metadata: { port: 4601, cwd: homeCwd },
+          identity: { commandLine: null, startedAt: null },
+          createdAt: "test-created-at",
+        },
+      ]);
 
-    runtime.processForPort(4601).exitNormally();
-    await runtime.settle();
+      runtime.processForPort(4601).exitNormally();
+      await runtime.settle();
 
-    expect(await runtime.managedProcesses.list()).toEqual([]);
+      expect(await runtime.managedProcesses.list()).toEqual([]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   test("removes helper server records on shutdown", async () => {
@@ -398,7 +477,12 @@ describe("OpenCodeServerManager managed process ledger", () => {
 
 function createTestManager(
   ports: number[],
-  options: { autoAnnounce?: boolean; deferFirstPort?: boolean } = {},
+  options: {
+    autoAnnounce?: boolean;
+    deferFirstPort?: boolean;
+    deferTermination?: boolean;
+    resolveHomeDir?: () => string;
+  } = {},
 ): {
   manager: OpenCodeServerManager;
   runtime: FakeOpenCodeServerRuntime;
@@ -406,6 +490,7 @@ function createTestManager(
   const runtime = new FakeOpenCodeServerRuntime(ports, {
     autoAnnounce: options.autoAnnounce ?? true,
     deferFirstPort: options.deferFirstPort ?? false,
+    deferTermination: options.deferTermination ?? false,
   });
   return {
     manager: new OpenCodeServerManager({
@@ -413,6 +498,7 @@ function createTestManager(
       managedProcesses: runtime.managedProcesses,
       portAllocator: runtime.allocatePort,
       resolveCommandPrefix: runtime.resolveCommandPrefix,
+      resolveHomeDir: options.resolveHomeDir ?? (() => os.homedir()),
       spawnServerProcess: runtime.spawnServerProcess,
       terminateProcess: runtime.terminateProcess,
     }),
@@ -422,23 +508,34 @@ function createTestManager(
 
 class FakeOpenCodeServerRuntime {
   readonly managedProcesses = new FakeManagedProcesses();
+  readonly terminationAttempts: number[] = [];
   readonly terminatedPorts: number[] = [];
   readonly launches: Array<{ port: number; cwd: string | undefined }> = [];
   private readonly ports: number[];
   private readonly autoAnnounce: boolean;
+  private readonly deferTermination: boolean;
   private deferNextPort: boolean;
   private readonly pendingPortResolvers: Array<() => void> = [];
+  private readonly pendingTerminationResolvers = new Map<number, () => void>();
   private readonly processesByChild = new Map<ChildProcess, FakeOpenCodeProcess>();
   private readonly processesByPort = new Map<number, FakeOpenCodeProcess>();
 
-  constructor(ports: number[], options: { autoAnnounce: boolean; deferFirstPort: boolean }) {
+  constructor(
+    ports: number[],
+    options: { autoAnnounce: boolean; deferFirstPort: boolean; deferTermination: boolean },
+  ) {
     this.ports = [...ports];
     this.autoAnnounce = options.autoAnnounce;
     this.deferNextPort = options.deferFirstPort;
+    this.deferTermination = options.deferTermination;
   }
 
   get launchedPorts(): number[] {
     return Array.from(this.processesByPort.keys());
+  }
+
+  get pendingTerminationPorts(): number[] {
+    return Array.from(this.pendingTerminationResolvers.keys());
   }
 
   readonly allocatePort: OpenCodePortAllocator = async () => {
@@ -460,6 +557,15 @@ class FakeOpenCodeServerRuntime {
     if (!resolve) {
       throw new Error("No deferred port allocation pending");
     }
+    resolve();
+  }
+
+  releaseTermination(port: number): void {
+    const resolve = this.pendingTerminationResolvers.get(port);
+    if (!resolve) {
+      throw new Error(`No deferred termination pending for port ${port}`);
+    }
+    this.pendingTerminationResolvers.delete(port);
     resolve();
   }
 
@@ -485,6 +591,16 @@ class FakeOpenCodeServerRuntime {
 
   readonly terminateProcess: ProcessTerminator = async (target: TreeKillTarget) => {
     const process = this.processForChild(target as ChildProcess);
+    this.terminationAttempts.push(process.port);
+    if (this.deferTermination) {
+      await new Promise<void>((resolve, reject) => {
+        if (this.pendingTerminationResolvers.has(process.port)) {
+          reject(new Error(`Termination already pending for port ${process.port}`));
+          return;
+        }
+        this.pendingTerminationResolvers.set(process.port, resolve);
+      });
+    }
     this.terminatedPorts.push(process.port);
     process.exitBySignal("SIGTERM");
     return "terminated";

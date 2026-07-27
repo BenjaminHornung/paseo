@@ -1379,6 +1379,7 @@ export class OpenCodeAgentClient implements AgentClient {
       deps.serverManager ??
       OpenCodeServerManager.getInstance(this.logger, runtimeSettings, {
         managedProcesses: deps.managedProcesses,
+        resolveHomeDir: deps.resolveHomeDir,
       });
     this.createOpenCodeClient = deps.createClient ?? createSdkOpenCodeClient;
     this.resolveHomeDir = deps.resolveHomeDir ?? resolveOpenCodeHomeDir;
