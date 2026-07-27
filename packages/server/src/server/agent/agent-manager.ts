@@ -3722,15 +3722,19 @@ export class AgentManager {
         if (!displayItem) {
           continue;
         }
+        // Mirror forceHydrateTimelineFromLegacyProviderHistory: broadcast the
+        // projected item, not the raw stream event, so live clients during
+        // legacy-history priming see the same stripped text as a later fetch.
+        const projectedEvent = displayItem === event.item ? event : { ...event, item: displayItem };
         const row = this.recordTimeline(
           agent.id,
           displayItem,
           event.timestamp ? { timestamp: event.timestamp } : undefined,
         );
         if (deferredBroadcast) {
-          timelineEvents.push({ event, row });
+          timelineEvents.push({ event: projectedEvent, row });
         } else if (broadcast) {
-          this.dispatchStream(agent.id, event, {
+          this.dispatchStream(agent.id, projectedEvent, {
             seq: row.seq,
             epoch: this.timelineStore.getEpoch(agent.id),
             timestamp: row.timestamp,

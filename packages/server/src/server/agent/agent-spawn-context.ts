@@ -170,9 +170,13 @@ export function buildAgentMessageEnvelope(input: AgentMessageEnvelopeInput): str
 }
 
 // Matches a leading <paseo-agent-message ...> block (the tag wraps the original
-// prompt; anything after the close tag is model-only reply boilerplate).
+// prompt; anything after the close tag is model-only reply boilerplate). The
+// body is greedy so a prompt that itself contains a literal
+// "\n</paseo-agent-message>" is not truncated for display: the receiver's model
+// still sees the unescaped original prompt, and projection captures up to the
+// final close tag (the reply contract never contains one).
 const AGENT_MESSAGE_PATTERN = new RegExp(
-  `^<${AGENT_MESSAGE_TAG} ([^>]*)>\\n([\\s\\S]*?)\\n</${AGENT_MESSAGE_TAG}>`,
+  `^<${AGENT_MESSAGE_TAG} ([^>]*)>\\n([\\s\\S]*)\\n</${AGENT_MESSAGE_TAG}>`,
 );
 
 function parseAttribute(attributes: string, name: string): string | null {

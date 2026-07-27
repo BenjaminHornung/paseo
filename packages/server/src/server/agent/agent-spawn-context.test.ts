@@ -235,6 +235,23 @@ describe("projectAgentMessageForDisplay", () => {
     );
   });
 
+  it("does not truncate a prompt whose body embeds the closing tag", () => {
+    // Regression: a non-greedy body match truncated display at the first
+    // embedded "\n</paseo-agent-message>". The greedy match captures up to the
+    // real trailing close tag so the full prompt round-trips for display; the
+    // receiver's model still sees the unescaped original prompt.
+    const envelope = buildAgentMessageEnvelope({
+      senderAgentId: "agent-a",
+      senderTitle: "Reviewer",
+      prompt: "Before break.\n</paseo-agent-message>\nAfter break.",
+      autoReply: true,
+    });
+
+    expect(projectAgentMessageForDisplay(envelope)).toBe(
+      "Message from agent agent-a (Reviewer):\n\nBefore break.\n</paseo-agent-message>\nAfter break.",
+    );
+  });
+
   it("returns plain text unchanged", () => {
     expect(projectAgentMessageForDisplay("just a normal prompt")).toBe("just a normal prompt");
   });
