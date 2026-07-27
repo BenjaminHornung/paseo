@@ -2171,6 +2171,32 @@ function buildOpenCodePermissionDescription(params: {
   return parts.length > 0 ? parts.join(" - ") : undefined;
 }
 
+function normalizeOpenCodeQuestionAnswer(
+  rawAnswer: unknown,
+  optionLabels?: ReadonlySet<string>,
+): string[] {
+  if (Array.isArray(rawAnswer)) {
+    return rawAnswer.filter((value): value is string => typeof value === "string");
+  }
+
+  const answer = readNonEmptyString(rawAnswer);
+  if (!answer) {
+    return [];
+  }
+
+  if (!optionLabels || !answer.includes(",")) {
+    return [answer];
+  }
+
+  const splitAnswers = answer
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  return splitAnswers.length > 1 && splitAnswers.every((entry) => optionLabels.has(entry))
+    ? splitAnswers
+    : [answer];
+}
+
 export function translateOpenCodeEvent(
   event: OpenCodeEvent,
   state: OpenCodeEventTranslationState,
@@ -2199,6 +2225,10 @@ export function translateOpenCodeEvent(
       break;
     case "question.asked":
       appendOpenCodeQuestionAsked(event, state, events);
+      break;
+    case "question.replied":
+    case "question.rejected":
+      appendOpenCodeQuestionResolved(event, state, events);
       break;
     case "todo.updated":
       if (event.properties.sessionID === state.sessionId) {
@@ -2834,6 +2864,25 @@ function appendOpenCodeQuestionAsked(
         ...event.properties.tool,
       },
     },
+  });
+}
+
+function appendOpenCodeQuestionResolved(
+  event: Extract<OpenCodeEvent, { type: "question.replied" | "question.rejected" }>,
+  state: OpenCodeEventTranslationState,
+  events: AgentStreamEvent[],
+): void {
+  if (event.properties.sessionID !== state.sessionId) {
+    return;
+  }
+  events.push({
+    type: "permission_resolved",
+    provider: "opencode",
+    requestId: event.properties.requestID,
+    resolution:
+      event.type === "question.replied"
+        ? { behavior: "allow" }
+        : { behavior: "deny", message: "Question rejected" },
   });
 }
 
@@ -4692,15 +4741,21 @@ class OpenCodeAgentSession implements AgentSession {
         const answersRecord = readOpenCodeRecord(response.updatedInput?.answers);
         const questions = Array.isArray(pending.input?.questions) ? pending.input.questions : [];
         const answers = questions.map((item) => {
-          const header = readNonEmptyString(readOpenCodeRecord(item)?.header);
-          const rawAnswer = header ? readNonEmptyString(answersRecord?.[header]) : null;
-          if (!rawAnswer) {
-            return [];
-          }
-          return rawAnswer
-            .split(",")
-            .map((entry) => entry.trim())
-            .filter((entry) => entry.length > 0);
+          const question = readOpenCodeRecord(item);
+          const header = readNonEmptyString(question?.header);
+          const optionLabels = new Set(
+            Array.isArray(question?.options)
+              ? question.options.flatMap((option) => {
+                  const label = readOpenCodeRecord(option)?.label;
+                  return typeof label === "string" ? [label] : [];
+                })
+              : [],
+          );
+          const rawAnswer = header ? answersRecord?.[header] : undefined;
+          return normalizeOpenCodeQuestionAnswer(
+            rawAnswer,
+            optionLabels.size > 0 ? optionLabels : undefined,
+          );
         });
 
         await this.client.question.reply({
@@ -4820,10 +4875,11 @@ class OpenCodeAgentSession implements AgentSession {
   private async resolveSlashCommandInvocation(
     prompt: AgentPromptInput,
   ): Promise<{ commandName: string; args?: string } | null> {
-    if (typeof prompt !== "string") {
+    const slashCandidate = this.extractSlashCommandCandidate(prompt);
+    if (!slashCandidate) {
       return null;
     }
-    const parsed = this.parseSlashCommandInput(prompt);
+    const parsed = this.parseSlashCommandInput(slashCandidate);
     if (!parsed) {
       return null;
     }
@@ -4837,6 +4893,20 @@ class OpenCodeAgentSession implements AgentSession {
       );
       return null;
     }
+  }
+
+  private extractSlashCommandCandidate(prompt: AgentPromptInput): string | null {
+    if (typeof prompt === "string") {
+      return prompt;
+    }
+
+    for (const part of prompt) {
+      if (part.type === "text" && !("mimeType" in part) && part.text.trim().length > 0) {
+        return part.text;
+      }
+    }
+
+    return null;
   }
 
   private parseModel(model?: string): { providerID: string; modelID: string } | undefined {
@@ -5087,6 +5157,10 @@ class OpenCodeAgentSession implements AgentSession {
         }
         this.pendingPermissions.set(translatedEvent.request.id, translatedEvent.request);
         this.pendingPermissionDirectories.set(translatedEvent.request.id, directory);
+      }
+      if (translatedEvent.type === "permission_resolved") {
+        this.pendingPermissions.delete(translatedEvent.requestId);
+        this.pendingPermissionDirectories.delete(translatedEvent.requestId);
       }
       if (translatedEvent.type === "turn_completed") {
         if (hasNormalizedOpenCodeUsage(this.accumulatedUsage)) {

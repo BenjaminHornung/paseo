@@ -50,7 +50,25 @@ describe("question form card core", () => {
     expect(areQuestionsAnswered(questions, {}, { 0: "freeform" })).toBe(false);
     expect(areQuestionsAnswered(questions, { 0: new Set([1]) }, {})).toBe(true);
     expect(buildQuestionFormAnswers(questions, { 0: new Set([1]) }, {})).toEqual({
-      Response: "B",
+      Response: ["B"],
+    });
+  });
+
+  test("preserves option labels with commas as structured answers", () => {
+    const questions = parseQuestionFormQuestions({
+      questions: [
+        {
+          question: "Pick frameworks",
+          header: "Frameworks",
+          options: [{ label: "JavaScript, React" }, { label: "TypeScript" }],
+          multiSelect: true,
+        },
+      ],
+    });
+
+    if (!questions) throw new Error("questions did not parse");
+    expect(buildQuestionFormAnswers(questions, { 0: new Set([0, 1]) }, {})).toEqual({
+      Frameworks: ["JavaScript, React", "TypeScript"],
     });
   });
 

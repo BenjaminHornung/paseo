@@ -332,7 +332,7 @@ describe("OpenCode auto_accept feature", () => {
 
     await session.respondToPermission("question-1", {
       behavior: "allow",
-      updatedInput: { answers: { Decision: "Proceed" } },
+      updatedInput: { answers: { Decision: ["Proceed"] } },
     });
 
     expect(openCodeClient.calls.questionReply).toHaveLength(1);
@@ -343,6 +343,76 @@ describe("OpenCode auto_accept feature", () => {
     });
     expect(openCodeClient.calls.permissionReply).toEqual([]);
     expect(session.getPendingPermissions()).toEqual([]);
+
+    await session.close();
+  });
+
+  test("preserves structured option answers exactly", async () => {
+    const { openCodeClient, runtime } = mockOpenCodeClient({
+      events: [
+        questionEvent({
+          multiple: true,
+          options: [
+            { label: " JavaScript, React ", description: "Use React" },
+            { label: "", description: "Use an empty label" },
+            { label: "TypeScript", description: "Use TypeScript" },
+          ],
+        }),
+        idleEvent(),
+      ],
+    });
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp/project" });
+
+    await session.run("Ask a question");
+    await session.respondToPermission("question-1", {
+      behavior: "allow",
+      updatedInput: { answers: { Decision: [" JavaScript, React ", "", "TypeScript"] } },
+    });
+
+    expect(openCodeClient.calls.questionReply).toEqual([
+      {
+        requestID: "question-1",
+        directory: "/tmp/project",
+        answers: [[" JavaScript, React ", "", "TypeScript"]],
+      },
+    ]);
+
+    await session.close();
+  });
+
+  test("splits legacy comma-delimited answers only when every value is an option", async () => {
+    const { openCodeClient, runtime } = mockOpenCodeClient({
+      events: [
+        questionEvent({
+          multiple: true,
+          options: [{ label: "TypeScript" }, { label: "Python" }],
+        }),
+        idleEvent(),
+      ],
+    });
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp/project" });
+
+    await session.run("Ask a question");
+    await session.respondToPermission("question-1", {
+      behavior: "allow",
+      updatedInput: { answers: { Decision: "TypeScript, Python" } },
+    });
+
+    expect(openCodeClient.calls.questionReply).toEqual([
+      {
+        requestID: "question-1",
+        directory: "/tmp/project",
+        answers: [["TypeScript", "Python"]],
+      },
+    ]);
 
     await session.close();
   });
@@ -386,16 +456,58 @@ describe("OpenCode auto_accept feature", () => {
 
     await session.respondToPermission("question-1", {
       behavior: "allow",
-      updatedInput: { answers: { Decision: "Use another answer" } },
+      updatedInput: { answers: { Decision: "Use TypeScript, then Python" } },
     });
 
     expect(openCodeClient.calls.questionReply).toEqual([
       {
         requestID: "question-1",
         directory: "/tmp/project",
-        answers: [["Use another answer"]],
+        answers: [["Use TypeScript, then Python"]],
       },
     ]);
+
+    await session.close();
+  });
+
+  test.each([
+    ["question.replied", { behavior: "allow" }],
+    ["question.rejected", { behavior: "deny", message: "Question rejected" }],
+  ] as const)("clears pending questions when OpenCode emits %s", async (type, resolution) => {
+    const { openCodeClient, runtime } = mockOpenCodeClient({
+      events: [
+        questionEvent(),
+        {
+          type,
+          properties: {
+            sessionID: "session-1",
+            requestID: "question-1",
+          },
+        },
+        idleEvent(),
+      ],
+    });
+    const receivedEvents: AgentStreamEvent[] = [];
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp/project" });
+    session.subscribe((event) => receivedEvents.push(event));
+
+    await session.run("Ask a question");
+
+    expect(receivedEvents).toContainEqual(
+      expect.objectContaining({
+        type: "permission_resolved",
+        provider: "opencode",
+        requestId: "question-1",
+        resolution,
+      }),
+    );
+    expect(session.getPendingPermissions()).toEqual([]);
+    expect(openCodeClient.calls.questionReply).toEqual([]);
+    expect(openCodeClient.calls.questionReject).toEqual([]);
 
     await session.close();
   });

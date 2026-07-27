@@ -74,6 +74,71 @@ describe("OpenCodeAgentSession slash command timeout handling", () => {
     expect(openCodeClient.calls.sessionCommand).toEqual([]);
   });
 
+  test("executes a slash command from the user text in a rich prompt", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const openCodeClient = createOpenCodeClientWithConnectedProvider();
+    openCodeClient.commandListResponse = {
+      data: [{ name: "help", description: "Show help", hints: [] }],
+    };
+    runtime.enqueueClient(openCodeClient);
+
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp" });
+
+    await session.run([
+      {
+        type: "text",
+        text: "Earlier conversation",
+        mimeType: "text/plain",
+        contextKind: "chat_history",
+      },
+      { type: "text", text: "/help deployment options" },
+      { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+    ]);
+
+    expect(openCodeClient.calls.sessionCommand).toEqual([
+      {
+        sessionID: "session-1",
+        directory: "/tmp",
+        command: "help",
+        arguments: "deployment options",
+      },
+    ]);
+    expect(openCodeClient.calls.sessionPromptAsync).toEqual([]);
+  });
+
+  test("keeps normal rich prompts on the prompt endpoint", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const openCodeClient = createOpenCodeClientWithConnectedProvider();
+    openCodeClient.commandListResponse = {
+      data: [{ name: "help", description: "Show help", hints: [] }],
+    };
+    runtime.enqueueClient(openCodeClient);
+
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp" });
+
+    await session.run([
+      {
+        type: "text",
+        text: "/help from earlier",
+        mimeType: "text/plain",
+        contextKind: "chat_history",
+      },
+      { type: "text", text: "Explain this image" },
+      { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+    ]);
+
+    expect(openCodeClient.calls.sessionCommand).toEqual([]);
+    expect(openCodeClient.calls.sessionPromptAsync).toHaveLength(1);
+  });
+
   test("waits for SSE completion when slash commands hit a header timeout", async () => {
     const idleEventGate = createDeferred<void>();
     const runtime = new TestOpenCodeHarness();

@@ -443,6 +443,57 @@ describe("translateOpenCodeEvent", () => {
     ]);
   });
 
+  it("translates question.replied into an allowed question resolution", () => {
+    const state = createState();
+
+    const result = translateOpenCodeEvent(
+      {
+        id: "event-question-replied-1",
+        type: "question.replied",
+        properties: {
+          sessionID: "session-1",
+          requestID: "question-1",
+          answers: [["Proceed"]],
+        },
+      },
+      state,
+    );
+
+    expect(result).toEqual([
+      {
+        type: "permission_resolved",
+        provider: "opencode",
+        requestId: "question-1",
+        resolution: { behavior: "allow" },
+      },
+    ]);
+  });
+
+  it("translates question.rejected into a denied question resolution", () => {
+    const state = createState();
+
+    const result = translateOpenCodeEvent(
+      {
+        id: "event-question-rejected-1",
+        type: "question.rejected",
+        properties: {
+          sessionID: "session-1",
+          requestID: "question-1",
+        },
+      },
+      state,
+    );
+
+    expect(result).toEqual([
+      {
+        type: "permission_resolved",
+        provider: "opencode",
+        requestId: "question-1",
+        resolution: { behavior: "deny", message: "Question rejected" },
+      },
+    ]);
+  });
+
   it("forwards permission requests from linked OpenCode subagent sessions", () => {
     const state = createState();
 

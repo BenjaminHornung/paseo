@@ -105,8 +105,8 @@ export function buildQuestionFormAnswers(
   questions: QuestionFormQuestion[],
   selections: QuestionSelections,
   otherTexts: QuestionOtherTexts,
-): Record<string, string> {
-  const answers: Record<string, string> = {};
+): Record<string, string | string[]> {
+  const answers: Record<string, string | string[]> = {};
   for (let i = 0; i < questions.length; i++) {
     const q = questions[i];
     const selected = selections[i];
@@ -125,7 +125,7 @@ export function buildQuestionFormAnswers(
 
     if (selected && selected.size > 0) {
       const labels = Array.from(selected).map((idx) => q.options[idx].label);
-      answers[q.header] = labels.join(", ");
+      answers[q.header] = labels;
     }
   }
   return answers;
