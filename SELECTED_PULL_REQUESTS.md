@@ -64,7 +64,7 @@ priority unless the required upstream revalidation changes a dependency.
 |    30 | [#2245](https://github.com/getpaseo/paseo/pull/2245) keep OMP parents active for running children                                                             | P1       | Corrected manual port — **done (commit 704390861)**                                          |
 |    31 | [#2136](https://github.com/getpaseo/paseo/pull/2136) multi-agent context                                                                                      | P1       | Rebase both commits + 2 hardening fixes — **done (commits f34a5e004, 33ba6d8c1, 5c922e0c6)** |
 |    32 | [#1783](https://github.com/getpaseo/paseo/pull/1783) task progress                                                                                            | P1       | Manual protocol/UI port                                                                      |
-|    33 | [#781](https://github.com/getpaseo/paseo/pull/781) active-turn steering                                                                                       | P1       | Rebase design onto current contracts                                                         |
+|    33 | [#781](https://github.com/getpaseo/paseo/pull/781) active-turn steering                                                                                       | P1       | Rebase design onto current contracts — **done (commit 7961a1011)**                           |
 |    34 | Provider-native `/`, `@`, and `$` autocomplete                                                                                                                | P1       | New upstream-ready implementation                                                            |
 |    35 | Open trusted absolute file links in multi-project roots                                                                                                       | P1       | New upstream regression fix after #1214                                                      |
 |    36 | [#1987](https://github.com/getpaseo/paseo/pull/1987) Windows file links                                                                                       | P2       | Cherry-pick or small forward-port                                                            |
@@ -550,6 +550,35 @@ and range suffixes.
 **Reviewed head:** `d1278aa8564c3006b398137c855dff5388f628c5` (draft)
 
 **Drift:** Three commits; 23 conflict sections against the frozen baseline.
+
+**Port notes:** Forward-ported onto the integration branch's existing central
+send path instead of a literal cherry-pick. The upstream PR collapses
+`AgentRunController` to `getAgent | startAgentRun` and moves dispatch into an
+`AgentManager.startAgentRun` method, but this branch evolved its own
+module-level `startAgentRun` (returns `StartAgentRunResult` with
+`startAcknowledged` run-start ownership); the two centralizations collide, so
+per the queue contract ("Rebase the capability on the current centralized send
+path") steering was added into the existing dispatch (`trySteerActiveTurn`
+helper) rather than adopting the PR's structural refactor. Adaptations:
+(1) Codex reuses the existing `currentTurnId` (set from both `turn/start`
+response and the `turn/started` notification, cleared on start error +
+finalizeRootTurn) as the `expectedTurnId` for `turn/steer`, instead of the
+PR's redundant `activeAppServerTurnId` field; (2) the PR's
+`session-context.tsx` hunk was skipped because this branch moved the
+optimistic-user-message send path into the composer; (3) the PR's
+"turn/start returns no turn.id" Codex test was skipped because
+`TurnStartResponseSchema` strictly requires `turn.id`. A focused technical
+review then prompted three MAJOR fixes: a `activeForegroundTurnId` guard so a
+pending-but-not-started run falls through to replace (no provider turn to
+steer yet); an `assumeRunning` hook on `setupFinishNotification` (passed by
+the #2136 `send_agent_prompt` path when steered) that resolves the
+finish-before-subscribe race for a steered turn that has no running
+transition to observe; and a Claude `emitSubmittedUserMessage` call in
+`steerTurn` so the steering prompt is an authoritative, replayable timeline
+item. `SendPromptToAgentResult.steered` exposes the dispatch shape to
+callers. `startAgentRun`'s steering decision and iterator pump were extracted
+into `trySteerActiveTurn` / `drainAgentRunIterator` to stay within the lint
+complexity budget.
 
 **Why selected:** Steering an active long-running turn is especially valuable from mobile. Current
 `main` exposes native steering only as OMP commands; the normal send path still replaces an active
