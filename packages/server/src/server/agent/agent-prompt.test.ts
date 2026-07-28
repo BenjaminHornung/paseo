@@ -15,6 +15,7 @@ import {
   isSystemInjectedEnvelope,
   sendPromptToAgent,
   setupFinishNotification,
+  startAgentRun,
   waitForAgentRunStartWithTimeout,
 } from "./agent-prompt.js";
 import type {
@@ -95,6 +96,7 @@ interface FinishNotificationScenarioOptions {
   childParentAgentId?: string | null;
   requireParentOwnership?: boolean;
   parentPromptError?: Error;
+  assumeRunning?: boolean;
   logger?: Logger;
 }
 
@@ -175,6 +177,7 @@ function createFinishNotificationScenario(
         childAgentId: "child-agent",
         callerAgentId: "caller-agent",
         requireParentOwnership: options?.requireParentOwnership,
+        assumeRunning: options?.assumeRunning,
         logger: options?.logger ?? createTestLogger(),
       });
     },
@@ -690,6 +693,21 @@ test("finish notifications log a rejected parent prompt without an unhandled rej
   ).toBe(true);
 });
 
+test("assumeRunning treats an already-idle steered child as finished (finish-before-subscribe race)", async () => {
+  // A steered follow-up injects into a running turn without starting a new run.
+  // If that steered turn finishes before setupFinishNotification subscribes, the
+  // only visible lifecycle is "idle" with no prior "running" event in this
+  // subscription. assumeRunning must treat that idle as a real finish.
+  const scenario = createFinishNotificationScenario({ assumeRunning: true });
+
+  scenario.startWatchingChild();
+  // Do NOT call finishChild — the child is already idle (steer race). The
+  // assumeRunning flag should fire the "finished" notification anyway.
+  await vi.waitFor(() => {
+    expect(scenario.wasParentPrompted()).toBe(true);
+  });
+});
+
 test("real-manager finish notifications start and complete the caller run without leaking subscriptions", async () => {
   const harness = await createRealFinishNotificationHarness({ callerMode: "success" });
   const baselineSubscriptions = harness.manager.subscriptionCount();
@@ -915,4 +933,102 @@ it("does not notify archived callers", async () => {
 
   expect(streamAgentSpy).not.toHaveBeenCalled();
   expect(replaceAgentRunSpy).not.toHaveBeenCalled();
+});
+
+test("startAgentRun steers when the provider supports steering and a run is in flight", async () => {
+  const steerAgentTurnSpy = vi.fn(async () => {});
+  const replaceAgentRunSpy = vi.fn(async () => (async function* noop() {})());
+  const streamAgentSpy = vi.fn(() => (async function* noop() {})());
+  const agentManager: AgentManager = Object.create(AgentManager.prototype);
+  const snapshot = {
+    id: "agent-1",
+    provider: "claude",
+    capabilities: { ...TEST_CAPABILITIES, supportsSteering: true },
+    lifecycle: "running",
+    activeForegroundTurnId: "turn-1",
+  } as unknown as ManagedAgent;
+  Reflect.set(agentManager, "getAgent", () => snapshot);
+  Reflect.set(agentManager, "tryRunOutOfBand", () => false);
+  Reflect.set(agentManager, "hasInFlightRun", () => true);
+  Reflect.set(agentManager, "steerAgentTurn", steerAgentTurnSpy);
+  Reflect.set(agentManager, "replaceAgentRun", replaceAgentRunSpy);
+  Reflect.set(agentManager, "streamAgent", streamAgentSpy);
+  Reflect.set(agentManager, "waitForAgentRunStart", async () => {});
+
+  const result = await startAgentRun(agentManager, "agent-1", "steer this", createTestLogger(), {
+    replaceRunning: true,
+  });
+
+  expect(result.outOfBand).toBe(false);
+  expect(result.steered).toBe(true);
+  expect(steerAgentTurnSpy).toHaveBeenCalledWith("agent-1", "steer this", undefined);
+  expect(replaceAgentRunSpy).not.toHaveBeenCalled();
+  expect(streamAgentSpy).not.toHaveBeenCalled();
+});
+
+test("startAgentRun replaces an in-flight run when the provider does not support steering", async () => {
+  const steerAgentTurnSpy = vi.fn(async () => {});
+  const replaceAgentRunSpy = vi.fn(async () => (async function* noop() {})());
+  const streamAgentSpy = vi.fn(() => (async function* noop() {})());
+  const agentManager: AgentManager = Object.create(AgentManager.prototype);
+  const snapshot = {
+    id: "agent-1",
+    provider: "opencode",
+    capabilities: { ...TEST_CAPABILITIES, supportsSteering: false },
+    lifecycle: "running",
+    activeForegroundTurnId: "turn-1",
+  } as unknown as ManagedAgent;
+  Reflect.set(agentManager, "getAgent", () => snapshot);
+  Reflect.set(agentManager, "tryRunOutOfBand", () => false);
+  Reflect.set(agentManager, "hasInFlightRun", () => true);
+  Reflect.set(agentManager, "steerAgentTurn", steerAgentTurnSpy);
+  Reflect.set(agentManager, "replaceAgentRun", replaceAgentRunSpy);
+  Reflect.set(agentManager, "streamAgent", streamAgentSpy);
+  Reflect.set(agentManager, "waitForAgentRunStart", async () => {});
+
+  const result = await startAgentRun(agentManager, "agent-1", "replace this", createTestLogger(), {
+    replaceRunning: true,
+  });
+
+  expect(result.outOfBand).toBe(false);
+  expect(result.steered).toBeUndefined();
+  expect(steerAgentTurnSpy).not.toHaveBeenCalled();
+  expect(replaceAgentRunSpy).toHaveBeenCalledWith("agent-1", "replace this", undefined);
+});
+
+test("startAgentRun replaces (does not steer) a pending run that has no active foreground turn yet", async () => {
+  // A run can be tracked as in-flight before session.startTurn() completes and
+  // sets activeForegroundTurnId (a pending run). There is no provider turn to
+  // steer against yet, so steering must fall through to replace.
+  const steerAgentTurnSpy = vi.fn(async () => {});
+  const replaceAgentRunSpy = vi.fn(async () => (async function* noop() {})());
+  const streamAgentSpy = vi.fn(() => (async function* noop() {})());
+  const agentManager: AgentManager = Object.create(AgentManager.prototype);
+  const snapshot = {
+    id: "agent-1",
+    provider: "claude",
+    capabilities: { ...TEST_CAPABILITIES, supportsSteering: true },
+    lifecycle: "running",
+    activeForegroundTurnId: null,
+  } as unknown as ManagedAgent;
+  Reflect.set(agentManager, "getAgent", () => snapshot);
+  Reflect.set(agentManager, "tryRunOutOfBand", () => false);
+  Reflect.set(agentManager, "hasInFlightRun", () => true);
+  Reflect.set(agentManager, "steerAgentTurn", steerAgentTurnSpy);
+  Reflect.set(agentManager, "replaceAgentRun", replaceAgentRunSpy);
+  Reflect.set(agentManager, "streamAgent", streamAgentSpy);
+  Reflect.set(agentManager, "waitForAgentRunStart", async () => {});
+
+  const result = await startAgentRun(
+    agentManager,
+    "agent-1",
+    "follow up while pending",
+    createTestLogger(),
+    { replaceRunning: true },
+  );
+
+  expect(result.outOfBand).toBe(false);
+  expect(result.steered).toBeUndefined();
+  expect(steerAgentTurnSpy).not.toHaveBeenCalled();
+  expect(replaceAgentRunSpy).toHaveBeenCalledWith("agent-1", "follow up while pending", undefined);
 });

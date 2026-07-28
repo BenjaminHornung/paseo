@@ -283,6 +283,7 @@ const CLAUDE_CAPABILITIES: AgentCapabilityFlags = {
   supportsRewindConversation: true,
   supportsRewindFiles: true,
   supportsRewindBoth: true,
+  supportsSteering: true,
 };
 
 const DEFAULT_MODES: AgentMode[] = [
@@ -2188,6 +2189,27 @@ class ClaudeAgentSession implements AgentSession {
     }
 
     return { turnId };
+  }
+
+  async steerTurn(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<void> {
+    if (this.closed) {
+      throw new Error("Claude session is closed");
+    }
+    const sdkMessage = this.toSdkUserMessage(prompt);
+    sdkMessage.priority = "next";
+
+    await this.ensureQuery();
+    if (!this.input) {
+      throw new Error("Claude session input stream not initialized");
+    }
+    this.input.push(sdkMessage);
+    // Emit an authoritative user-message timeline item so other clients,
+    // reconnect/replay, and client-message reconciliation see the steering
+    // prompt — the active foreground turn owns the stream.
+    const turnId = this.activeForegroundTurnId;
+    if (turnId) {
+      this.emitSubmittedUserMessage(sdkMessage, turnId, options?.clientMessageId);
+    }
   }
 
   subscribe(callback: (event: AgentStreamEvent) => void): () => void {

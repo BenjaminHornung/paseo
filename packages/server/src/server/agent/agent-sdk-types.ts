@@ -179,6 +179,7 @@ export interface AgentCapabilityFlags {
   supportsRewindConversation?: boolean;
   supportsRewindFiles?: boolean;
   supportsRewindBoth?: boolean;
+  supportsSteering?: boolean;
 }
 
 export interface AgentPersistenceHandle {
@@ -630,6 +631,14 @@ export interface AgentSession {
   readonly features?: AgentFeature[];
   run(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<AgentRunResult>;
   startTurn(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<{ turnId: string }>;
+  /**
+   * Inject a follow-up prompt into an already-running turn instead of starting a
+   * new run. Only providers that declare `supportsSteering` implement this;
+   * unsupported providers fall back to the replace behavior in the central send
+   * path. Optional because old provider implementations predate the capability.
+   * @see AgentCapabilityFlags.supportsSteering
+   */
+  steerTurn?(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<void>;
   subscribe(callback: (event: AgentStreamEvent) => void): () => void;
   streamHistory(): AsyncGenerator<AgentStreamEvent>;
   getRuntimeInfo(): Promise<AgentRuntimeInfo>;

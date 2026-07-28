@@ -19,6 +19,7 @@ import {
   buildOptimisticUserMessage,
   generateMessageId,
   type StreamItem,
+  type UserMessageDeliveryHint,
   type UserMessageItem,
 } from "@/types/stream";
 import type { PickedImageAttachmentInput } from "@/hooks/image-attachment-picker";
@@ -283,6 +284,7 @@ export interface DispatchComposerAgentMessageInput {
     images: AttachmentMetadata[],
   ) => Promise<Array<{ data: string; mimeType: string }> | undefined>;
   stream: AgentStreamWriter;
+  deliveryHint?: UserMessageDeliveryHint;
 }
 
 export async function dispatchComposerAgentMessage(
@@ -298,6 +300,7 @@ export async function dispatchComposerAgentMessage(
     timestamp: new Date(),
     images: wirePayload.images,
     attachments: wirePayload.attachments,
+    deliveryHint: input.deliveryHint,
   });
   const rollbackOptimisticMessage = appendUserMessageToStream(
     input.agentId,

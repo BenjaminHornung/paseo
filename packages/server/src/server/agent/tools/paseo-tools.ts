@@ -1922,6 +1922,10 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           agentStorage,
           childAgentId: agentId,
           callerAgentId,
+          // A steered dispatch injects into a running turn without starting a
+          // new run, so the child was already running — resolve the
+          // finish-before-subscribe race by assuming that running state.
+          assumeRunning: dispatchResult.steered === true,
           logger: childLogger,
         });
       }

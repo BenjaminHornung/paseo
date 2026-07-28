@@ -16,6 +16,7 @@ export type AgentRunController = Pick<
   | "hasInFlightRun"
   | "replaceAgentRun"
   | "streamAgent"
+  | "steerAgentTurn"
   | "waitForAgentRunStart"
 >;
 
@@ -26,12 +27,52 @@ export interface StartAgentRunOptions {
 
 export interface StartAgentRunResult {
   outOfBand: boolean;
+  /**
+   * Set when the prompt was injected into an already-running provider turn
+   * (steering) instead of starting a new run. Callers must NOT wait for a new
+   * run start when this is true — the existing running turn owns the stream.
+   */
+  steered?: boolean;
   startAcknowledged: AgentRunStartAcknowledgement;
 }
 
 export interface AgentRunStartAcknowledgement {
   promise: Promise<void>;
   abort: (reason?: unknown) => void;
+}
+
+/**
+ * Try to steer an already-running turn instead of replacing it. Returns the
+ * steered dispatch result when steering applies, or null when the caller should
+ * fall through to the replace/stream path. Steering applies only when the
+ * provider declares supportsSteering AND an active foreground turn exists — a
+ * pending run with no provider turn has nothing to steer against.
+ */
+async function trySteerActiveTurn(
+  agentManager: AgentRunController,
+  agentId: string,
+  prompt: AgentPromptInput,
+  snapshot: ManagedAgent | null,
+  runOptions: AgentRunOptions | undefined,
+  logger: Logger,
+): Promise<StartAgentRunResult | null> {
+  if (!snapshot?.capabilities?.supportsSteering || !snapshot.activeForegroundTurnId) {
+    return null;
+  }
+  await agentManager.steerAgentTurn(agentId, prompt, runOptions);
+  logger.trace(
+    {
+      agentId,
+      provider: snapshot.provider,
+      turnId: snapshot.activeForegroundTurnId,
+    },
+    "agent.session.steer.steered",
+  );
+  return {
+    outOfBand: false,
+    steered: true,
+    startAcknowledged: createResolvedStartAcknowledgement(),
+  };
 }
 
 export async function startAgentRun(
@@ -42,12 +83,15 @@ export async function startAgentRun(
   options?: StartAgentRunOptions,
 ): Promise<StartAgentRunResult> {
   const snapshot = agentManager.getAgent(agentId);
+  const provider = snapshot?.provider;
+  const providerSessionId = snapshot?.persistence?.sessionId ?? undefined;
+  const turnId = snapshot?.activeForegroundTurnId ?? undefined;
   logger.trace(
     {
       agentId,
-      provider: snapshot?.provider,
-      providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
-      turnId: snapshot?.activeForegroundTurnId ?? undefined,
+      provider,
+      providerSessionId,
+      turnId,
       promptType: typeof prompt === "string" ? "string" : "structured",
       hasRunOptions: Boolean(options?.runOptions),
       replaceRunning: Boolean(options?.replaceRunning),
@@ -65,14 +109,26 @@ export async function startAgentRun(
   }
   const shouldReplace = Boolean(options?.replaceRunning && agentManager.hasInFlightRun(agentId));
   const runOptions = options?.runOptions;
+  // Steering: when a follow-up is requested while a turn is in flight AND the
+  // provider declares supportsSteering AND an active foreground turn exists
+  // (i.e. the run has started, not merely pending), inject the prompt into the
+  // running turn instead of replacing it. A pending-but-not-yet-started run has
+  // no provider turn id to steer against, so it must fall through to replace.
+  // Unsupported providers also fall through, preserving the existing behavior.
+  const steered = shouldReplace
+    ? await trySteerActiveTurn(agentManager, agentId, prompt, snapshot, runOptions, logger)
+    : null;
+  if (steered) {
+    return steered;
+  }
   const iterator = shouldReplace
     ? await agentManager.replaceAgentRun(agentId, prompt, runOptions)
     : agentManager.streamAgent(agentId, prompt, runOptions);
   logger.trace(
     {
       agentId,
-      provider: snapshot?.provider,
-      providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
+      provider,
+      providerSessionId,
       shouldReplace,
     },
     "agent.session.start_stream.iterator_returned",
@@ -86,6 +142,22 @@ export async function startAgentRun(
       }
     },
   } satisfies AgentRunStartAcknowledgement;
+  drainAgentRunIterator(iterator, agentId, snapshot, logger);
+  return { outOfBand: false, startAcknowledged };
+}
+
+/**
+ * Consume the agent run iterator in the background so the run proceeds even
+ * though startAgentRun returns immediately. Events are broadcast via the
+ * AgentManager subscribers; this pump only drains the stream and logs the
+ * outcome. Kept out of startAgentRun to bound its cyclomatic complexity.
+ */
+function drainAgentRunIterator(
+  iterator: AsyncIterable<unknown>,
+  agentId: string,
+  snapshot: ManagedAgent | null,
+  logger: Logger,
+): void {
   void (async () => {
     try {
       for await (const _ of iterator) {
@@ -112,7 +184,6 @@ export async function startAgentRun(
       logger.error({ err: error, agentId }, "Agent stream failed");
     }
   })();
-  return { outOfBand: false, startAcknowledged };
 }
 
 /**
@@ -193,6 +264,13 @@ export interface SendPromptToAgentParams {
 
 export interface SendPromptToAgentResult {
   outOfBand: boolean;
+  /**
+   * Set when the prompt was injected into an already-running provider turn
+   * (steering) instead of starting a new run. Callers that set up finish
+   * notifications or wait for completion must account for the fact that no new
+   * run was started — the existing running turn owns the stream and completion.
+   */
+  steered?: boolean;
   startAcknowledged: AgentRunStartAcknowledgement;
   skippedReason?: "archived";
 }
@@ -390,6 +468,14 @@ export interface SetupFinishNotificationParams {
   childAgentId: string;
   callerAgentId: string;
   requireParentOwnership?: boolean;
+  /**
+   * Asserts the child was already running when the dispatch that triggers this
+   * notification happened (e.g. a steered follow-up). This resolves the race
+   * where a steered turn finishes before this subscription is established: an
+   * immediate "idle" is a real finish (not a not-yet-started run), so it is
+   * treated as finished instead of being ignored.
+   */
+  assumeRunning?: boolean;
   logger: Logger;
 }
 
@@ -523,5 +609,10 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
     hasSeenRunning = true;
   } else if (childSnapshot.lifecycle === "error") {
     notifySafely("errored");
+  } else if (childSnapshot.lifecycle === "idle" && params.assumeRunning) {
+    // The child was running at dispatch time (e.g. a steered follow-up) and has
+    // since become idle before our subscription was established — treat that as
+    // a real finish rather than a not-yet-started run.
+    notifySafely("finished");
   }
 }

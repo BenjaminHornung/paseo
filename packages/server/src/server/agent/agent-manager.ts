@@ -2594,6 +2594,28 @@ export class AgentManager {
     }
   }
 
+  /**
+   * Inject a follow-up prompt into an already-running provider turn instead of
+   * replacing it. Only providers that declare `supportsSteering` implement
+   * `AgentSession.steerTurn`; the central send path only routes here when an
+   * in-flight run exists and the capability is set, so unsupported providers
+   * keep the existing replace behavior. The running turn continues to own the
+   * stream — no new run is started and no run-start acknowledgement is owed.
+   */
+  async steerAgentTurn(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+  ): Promise<void> {
+    const agent = this.requireSessionAgent(agentId);
+    this.assertAgentCwdRunnable(agent);
+    if (!agent.session.steerTurn) {
+      throw new Error(`Provider ${agent.provider} does not support steering an active turn`);
+    }
+    this.touchUpdatedAt(agent);
+    await agent.session.steerTurn(prompt, options);
+  }
+
   async waitForAgentRunStart(agentId: string, options?: WaitForAgentStartOptions): Promise<void> {
     const snapshot = this.getAgent(agentId);
     if (!snapshot) {

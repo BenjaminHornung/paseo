@@ -71,6 +71,7 @@ type CodexTestSession = AgentSession & {
   turnStartAcknowledgedGeneration: number | null;
   turnStartedGeneration: number | null;
   activeProviderTurnId: string | null;
+  currentTurnId: string | null;
   client: CodexClientLike | null;
 };
 
@@ -111,6 +112,7 @@ function createSession(
   session.turnStartAcknowledgedGeneration = 1;
   session.turnStartedGeneration = 1;
   session.activeProviderTurnId = "test-turn";
+  session.currentTurnId = "test-turn";
   return session;
 }
 
@@ -463,6 +465,71 @@ describe("Codex app-server provider", () => {
         approvalsReviewer: "auto_review",
       }),
     );
+  });
+
+  test("advertises steering support for app-server sessions", () => {
+    const session = createSession();
+
+    expect(session.capabilities.supportsSteering).toBe(true);
+  });
+
+  test("steers against the app-server turn id returned by turn/start", async () => {
+    const session = createSession();
+    const request = vi.fn(async (method: string) => {
+      if (method === "thread/loaded/list") {
+        return { data: ["test-thread"] };
+      }
+      if (method === "turn/start") {
+        return { turn: { id: "app-server-turn-from-start" } };
+      }
+      if (method === "turn/steer") {
+        return { turnId: "app-server-turn-from-start" };
+      }
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    session.activeForegroundTurnId = null;
+    session.client = { request } as CodexClientLike;
+
+    const started = await session.startTurn!("Start the turn");
+    expect(started.turnId).not.toBe("app-server-turn-from-start");
+
+    await session.steerTurn!("Steer the active turn");
+
+    expect(request).toHaveBeenCalledWith(
+      "turn/steer",
+      expect.objectContaining({
+        expectedTurnId: "app-server-turn-from-start",
+      }),
+    );
+  });
+
+  test("sends turn/steer with thread id, built input, and active foreground turn id", async () => {
+    const session = createSession();
+    const request = vi.fn(async (method: string) => {
+      if (method === "turn/steer") {
+        return {};
+      }
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    session.client = { request } as CodexClientLike;
+    session.currentThreadId = "thread-for-steer";
+    session.activeForegroundTurnId = "paseo-foreground-turn-for-steer";
+    session.currentTurnId = "app-server-turn-for-steer";
+
+    await session.steerTurn!("Use this guidance next.");
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith("turn/steer", {
+      threadId: "thread-for-steer",
+      expectedTurnId: "app-server-turn-for-steer",
+      input: [
+        {
+          type: "text",
+          text: "Use this guidance next.",
+          text_elements: [],
+        },
+      ],
+    });
   });
 
   test("passes ephemeral: true to thread/start when constructed as ephemeral", async () => {

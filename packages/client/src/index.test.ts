@@ -156,6 +156,7 @@ function createAgent(input: Partial<PaseoAgent> = {}): PaseoAgent {
       supportsRewindBoth: false,
       supportsRewindConversation: false,
       supportsRewindFiles: false,
+      supportsSteering: false,
       supportsToolInvocations: true,
     },
     currentModeId: null,
