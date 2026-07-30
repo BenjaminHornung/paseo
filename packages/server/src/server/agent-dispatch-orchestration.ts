@@ -37,15 +37,11 @@ export async function resolveReplayAdmissionForPrompt(params: {
     messageId,
   });
   if (replayAdmission.disposition === "legacy_load_required") {
-    await ensureAgentLoaded(
-      agentId,
-      {
-        agentManager,
-        agentStorage,
-        logger,
-      },
-      { touchActivity: false },
-    );
+    await ensureAgentLoaded(agentId, {
+      agentManager,
+      agentStorage,
+      logger,
+    });
     replayAdmission = await agentManager.admitRecordedUserMessage(agentId, prompt, {
       messageId,
     });

@@ -27,7 +27,7 @@ export type AgentLoaderManager = Pick<
   | "hydrateTimelineFromProvider"
   | "resumeAgentFromPersistence"
 > &
-  Partial<Pick<AgentManager, "touchAgentActivity" | "waitForAgentClose">>;
+  Partial<Pick<AgentManager, "waitForAgentClose">>;
 
 export interface EnsureAgentLoadedDeps {
   agentManager: AgentLoaderManager;
@@ -39,23 +39,18 @@ export interface EnsureAgentLoadedDeps {
   allowMissingCwd?: boolean;
 }
 
-export interface EnsureAgentLoadedOptions {
-  touchActivity?: boolean;
-}
-
 export async function ensureUnarchivedAgentLoaded(
   agentId: string,
   deps: EnsureAgentLoadedDeps & {
     agentManager: AgentLoaderManager & Pick<AgentManager, "closeAgent">;
   },
-  options?: EnsureAgentLoadedOptions,
 ): Promise<ManagedAgent> {
   const record = await deps.agentStorage.get(agentId);
   if (record?.archivedAt) {
     throw new Error(`Agent is archived: ${agentId}`);
   }
 
-  const agent = await ensureAgentLoaded(agentId, deps, options);
+  const agent = await ensureAgentLoaded(agentId, deps);
   const latestRecord = await deps.agentStorage.get(agentId);
   if (latestRecord?.archivedAt) {
     await deps.agentManager.closeAgent(agentId).catch((error: unknown) => {
@@ -70,7 +65,6 @@ export async function ensureUnarchivedAgentLoaded(
 export async function ensureAgentLoaded(
   agentId: string,
   deps: EnsureAgentLoadedDeps,
-  options?: EnsureAgentLoadedOptions,
 ): Promise<ManagedAgent> {
   await deps.agentManager.waitForAgentClose?.(agentId);
 
@@ -80,10 +74,7 @@ export async function ensureAgentLoaded(
     return inflight.promise;
   }
 
-  const existing =
-    options?.touchActivity === false
-      ? deps.agentManager.getAgent(agentId)
-      : (deps.agentManager.touchAgentActivity?.(agentId) ?? deps.agentManager.getAgent(agentId));
+  const existing = deps.agentManager.getAgent(agentId);
   if (existing) {
     return existing;
   }

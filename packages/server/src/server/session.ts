@@ -414,6 +414,7 @@ export interface SessionOptions {
   onMessage: (msg: SessionOutboundMessage) => void;
   onMessageToSource?: (source: object, msg: SessionOutboundMessage) => void;
   onBinaryMessage?: (frame: Uint8Array) => void;
+  onBinaryMessageToSource?: (source: object, frame: Uint8Array) => Promise<void>;
   getTransportBufferedAmount?: () => number | null;
   onLifecycleIntent?: (intent: SessionLifecycleIntent) => void;
   onWorkspaceRecovered?: (workspace: PersistedWorkspaceRecord) => Promise<void>;
@@ -596,6 +597,9 @@ export class Session {
     | ((source: object, msg: SessionOutboundMessage) => void)
     | null;
   private readonly onBinaryMessage: ((frame: Uint8Array) => void) | null;
+  private readonly onBinaryMessageToSource:
+    | ((source: object, frame: Uint8Array) => Promise<void>)
+    | null;
   private readonly getTransportBufferedAmount: () => number | null;
   private readonly onLifecycleIntent: ((intent: SessionLifecycleIntent) => void) | null;
   private readonly onWorkspaceRecovered:
@@ -666,6 +670,7 @@ export class Session {
   private readonly workspaceScripts: WorkspaceScriptsService;
   private readonly createAgentLifecycleDispatch: CreateAgentLifecycleDispatch;
 
+  // eslint-disable-next-line complexity
   constructor(options: SessionOptions) {
     const {
       clientId,
@@ -675,6 +680,7 @@ export class Session {
       onMessage,
       onMessageToSource,
       onBinaryMessage,
+      onBinaryMessageToSource,
       getTransportBufferedAmount,
       onLifecycleIntent,
       onWorkspaceRecovered,
@@ -728,6 +734,7 @@ export class Session {
     this.onMessage = onMessage;
     this.onMessageToSource = onMessageToSource ?? null;
     this.onBinaryMessage = onBinaryMessage ?? null;
+    this.onBinaryMessageToSource = onBinaryMessageToSource ?? null;
     this.getTransportBufferedAmount = getTransportBufferedAmount ?? (() => 0);
     this.onLifecycleIntent = onLifecycleIntent ?? null;
     this.onWorkspaceRecovered = onWorkspaceRecovered ?? null;
@@ -741,8 +748,8 @@ export class Session {
     });
     this.workspaceFilesSession = new WorkspaceFilesSession({
       host: {
-        emit: (msg) => this.emit(msg),
-        emitBinary: (frame) => this.emitBinary(frame),
+        emit: (msg, source) => this.emitForSource(msg, source),
+        emitBinary: (frame, source) => this.emitBinaryForFileTransfer(frame, source),
         hasBinaryChannel: () => this.onBinaryMessage !== null,
       },
       downloadTokenStore,
@@ -764,6 +771,7 @@ export class Session {
     });
     this.workspaceAutoName = workspaceAutoName;
     this.workspaceProvisioning = createWorkspaceProvisioningService({
+      serverId,
       workspaceRegistry: this.workspaceRegistry,
       projectRegistry: this.projectRegistry,
       workspaceGitService: this.workspaceGitService,
@@ -1827,7 +1835,7 @@ export class Session {
       this.dispatchCheckoutMessage(msg) ??
       this.dispatchWorkspaceRecoveryMessage(msg) ??
       this.dispatchWorkspaceAndProjectMessage(msg) ??
-      this.dispatchWorkspaceFileMessage(msg) ??
+      this.dispatchWorkspaceFileMessage(msg, source) ??
       this.dispatchProviderMessage(msg) ??
       this.dispatchTerminalMessage(msg) ??
       this.dispatchChatScheduleLoopMessage(msg) ??
@@ -2122,6 +2130,8 @@ export class Session {
     switch (msg.type) {
       case "fetch_workspaces_request":
         return this.handleFetchWorkspacesRequest(msg);
+      case "project.list.request":
+        return this.handleProjectListRequest(msg.requestId);
       case "paseo_worktree_list_request":
         return this.handlePaseoWorktreeListRequest(msg);
       case "paseo_worktree_archive_request":
@@ -2162,10 +2172,13 @@ export class Session {
     }
   }
 
-  private dispatchWorkspaceFileMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+  private dispatchWorkspaceFileMessage(
+    msg: SessionInboundMessage,
+    source?: object,
+  ): Promise<void> | undefined {
     switch (msg.type) {
       case "file_explorer_request":
-        return this.workspaceFilesSession.handleFileExplorerRequest(msg);
+        return this.workspaceFilesSession.handleFileExplorerRequest(msg, source);
       case "fs.file.subscribe.request":
         return this.workspaceFilesSession.handleFileSubscribeRequest(msg);
       case "fs.file.unsubscribe.request":
@@ -2681,7 +2694,7 @@ export class Session {
       // resolved name lands in the UI immediately.
       const workspaces = await this.workspaceRegistry.list();
       const affectedWorkspaceIds = workspaces
-        .filter((workspace) => workspace.projectId === projectId)
+        .filter((workspace) => workspace.projectId === existing.projectId)
         .map((workspace) => workspace.workspaceId);
       if (affectedWorkspaceIds.length > 0) {
         await this.emitWorkspaceUpdatesForWorkspaceIds(affectedWorkspaceIds);
@@ -2720,8 +2733,10 @@ export class Session {
     this.sessionLogger.info({ projectId, requestId }, "session: project.remove.request");
 
     try {
+      const project = await this.projectRegistry.get(projectId);
+      const resolvedProjectId = project?.projectId ?? projectId;
       const projectWorkspaces = (await this.workspaceRegistry.list()).filter(
-        (workspace) => workspace.projectId === projectId,
+        (workspace) => workspace.projectId === resolvedProjectId,
       );
       const activeWorkspaceIds = projectWorkspaces
         .filter((workspace) => !workspace.archivedAt)
@@ -2749,7 +2764,7 @@ export class Session {
           removedWorkspaceIds.push(workspaceId);
         }
 
-        await this.projectRegistry.remove(projectId);
+        await this.projectRegistry.remove(resolvedProjectId);
       } finally {
         if (activeWorkspaceIds.length > 0) {
           this.clearWorkspaceArchiving(activeWorkspaceIds);
@@ -4518,6 +4533,7 @@ export class Session {
   ): WorkspaceProjectDescriptorPayload {
     return {
       projectId: project.projectId,
+      ...(project.projectKey ? { projectKey: project.projectKey } : {}),
       projectDisplayName: resolveProjectDisplayName(project),
       projectCustomName: project.customName ?? null,
       projectRootPath: project.rootPath,
@@ -4988,6 +5004,29 @@ export class Session {
           requestType: request.type,
           error: message,
           code,
+        },
+      });
+    }
+  }
+
+  private async handleProjectListRequest(requestId: string): Promise<void> {
+    try {
+      const projects = (await this.projectRegistry.list())
+        .filter((project) => !project.archivedAt)
+        .map((project) => this.buildProjectDescriptor(project));
+      this.emit({
+        type: "project.list.response",
+        payload: { requestId, projects },
+      });
+    } catch (error) {
+      this.sessionLogger.error({ err: error }, "Failed to handle project.list.request");
+      this.emit({
+        type: "rpc_error",
+        payload: {
+          requestId,
+          requestType: "project.list.request",
+          error: error instanceof Error ? error.message : "Failed to list projects",
+          code: "project_list_failed",
         },
       });
     }
@@ -6752,6 +6791,22 @@ export class Session {
     } catch (error) {
       this.sessionLogger.error({ err: error }, "Failed to emit binary frame");
     }
+  }
+
+  private async emitBinaryForFileTransfer(frame: Uint8Array, source?: object): Promise<void> {
+    if (source && this.onBinaryMessageToSource) {
+      await this.onBinaryMessageToSource(source, frame);
+      return;
+    }
+    this.emitBinary(frame);
+  }
+
+  private emitForSource(msg: SessionOutboundMessage, source?: object): void {
+    if (source && this.onMessageToSource) {
+      this.onMessageToSource(source, msg);
+      return;
+    }
+    this.emit(msg);
   }
 
   /**
