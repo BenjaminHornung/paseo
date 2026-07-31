@@ -1,11 +1,47 @@
 import { describe, expect, test } from "vitest";
+import { z } from "zod";
 import {
+  AgentCreateFailedStatusPayloadSchema,
+  AgentTimelineItemPayloadSchema,
   FileExplorerRequestSchema,
   PaseoWorktreeArchiveRequestSchema,
   parseServerInfoStatusPayload,
+  QueuedAgentMessageQueuePayloadSchema,
   SessionInboundMessageSchema,
   SessionOutboundMessageSchema,
 } from "./messages.js";
+
+describe("agent create failure compatibility", () => {
+  test("accepts legacy unmarked failures as an ambiguous outcome", () => {
+    expect(
+      AgentCreateFailedStatusPayloadSchema.parse({
+        status: "agent_create_failed",
+        requestId: "create-legacy",
+        error: "legacy daemon failure",
+      }),
+    ).toEqual({
+      status: "agent_create_failed",
+      requestId: "create-legacy",
+      error: "legacy daemon failure",
+    });
+  });
+
+  test("accepts an explicit marker when the daemon knows no agent was registered", () => {
+    expect(
+      AgentCreateFailedStatusPayloadSchema.parse({
+        status: "agent_create_failed",
+        requestId: "create-rejected",
+        error: "mode rejected",
+        agentCreated: false,
+      }),
+    ).toEqual({
+      status: "agent_create_failed",
+      requestId: "create-rejected",
+      error: "mode rejected",
+      agentCreated: false,
+    });
+  });
+});
 
 function workspaceDescriptor(overrides: Record<string, unknown> = {}) {
   return {
@@ -307,6 +343,101 @@ describe("agent detach RPC", () => {
       throw new Error("Expected server info payload to parse");
     }
     expect(parsed.features?.importSessionWorkspaceTarget).toBe(true);
+  });
+});
+
+describe("queued agent message compatibility", () => {
+  test("timeline user messages preserve optional clientMessageId", () => {
+    const parsed = AgentTimelineItemPayloadSchema.parse({
+      type: "user_message",
+      text: "hello",
+      messageId: "server-message-1",
+      clientMessageId: "client-message-1",
+    });
+
+    expect(parsed).toEqual({
+      type: "user_message",
+      text: "hello",
+      messageId: "server-message-1",
+      clientMessageId: "client-message-1",
+    });
+    expect(AgentTimelineItemPayloadSchema.parse(JSON.parse(JSON.stringify(parsed)))).toEqual(
+      parsed,
+    );
+  });
+
+  test("new client schema preserves missing revision for old daemon queue payloads", () => {
+    const parsedQueue = QueuedAgentMessageQueuePayloadSchema.parse({
+      agentId: "agent-1",
+      messages: [],
+    });
+
+    expect(parsedQueue.revision).toBeUndefined();
+
+    const parsedMessage = SessionOutboundMessageSchema.parse({
+      type: "queue.agent_message.updated",
+      payload: {
+        agentId: "agent-1",
+        messages: [],
+      },
+    });
+
+    expect(parsedMessage.type).toBe("queue.agent_message.updated");
+    if (parsedMessage.type !== "queue.agent_message.updated") {
+      throw new Error("Expected queue.agent_message.updated");
+    }
+    expect(parsedMessage.payload.revision).toBeUndefined();
+  });
+
+  test("old queue payload schema strips new daemon revision field", () => {
+    const LegacyQueuedAgentMessageQueuePayloadSchema = z.object({
+      agentId: z.string(),
+      messages: z.array(z.unknown()),
+    });
+
+    const parsed = LegacyQueuedAgentMessageQueuePayloadSchema.parse({
+      agentId: "agent-1",
+      revision: 4,
+      messages: [],
+    });
+
+    expect(parsed).toEqual({
+      agentId: "agent-1",
+      messages: [],
+    });
+  });
+
+  test("file explorer file schema preserves optional revision through parse and roundtrip", () => {
+    const parsedMessage = SessionOutboundMessageSchema.parse({
+      type: "file_explorer_response",
+      payload: {
+        cwd: "/repo",
+        path: "src/file.ts",
+        mode: "file",
+        directory: null,
+        file: {
+          path: "src/file.ts",
+          kind: "text",
+          encoding: "utf-8",
+          content: "export const x = 1;",
+          mimeType: "text/plain",
+          size: 19,
+          modifiedAt: "2026-07-23T10:00:00.000Z",
+          revision: "rev-123",
+        },
+        error: null,
+        requestId: "file-1",
+      },
+    });
+
+    expect(parsedMessage.type).toBe("file_explorer_response");
+    if (parsedMessage.type !== "file_explorer_response") {
+      throw new Error("Expected file_explorer_response");
+    }
+    expect(parsedMessage.payload.file?.revision).toBe("rev-123");
+    expect(SessionOutboundMessageSchema.parse(JSON.parse(JSON.stringify(parsedMessage)))).toEqual(
+      parsedMessage,
+    );
   });
 });
 

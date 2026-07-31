@@ -84,6 +84,8 @@ import type {
   DaemonGetPairingOfferResponse,
   DiagnosticsResponse,
   AgentRewindResponseMessage,
+  QueueAgentMessageResponseMessage,
+  QueueAgentMessageListResponseMessage,
   ListTerminalsResponse,
   CreateTerminalResponse,
   SubscribeTerminalResponse,
@@ -148,6 +150,18 @@ export interface Logger {
   info(obj: object, msg?: string): void;
   warn(obj: object, msg?: string): void;
   error(obj: object, msg?: string): void;
+}
+
+/** The daemon explicitly certified that createAgent failed before registration. */
+export class AgentCreateRejectedError extends Error {
+  readonly code = "AGENT_CREATE_REJECTED" as const;
+  readonly requestId: string;
+
+  constructor(message: string, requestId: string) {
+    super(message);
+    this.name = "AgentCreateRejectedError";
+    this.requestId = requestId;
+  }
 }
 
 const consoleLogger: Logger = {
@@ -331,6 +345,8 @@ export interface AgentAttentionRequiredNotification {
   shouldNotify: boolean;
   notification?: AgentAttentionNotificationPayload;
 }
+
+export type QueueAgentMessageOptions = SendMessageOptions;
 
 type AgentConfigOverrides = Partial<Omit<AgentSessionConfig, "provider" | "cwd">>;
 
@@ -678,6 +694,10 @@ export type FetchWorkspacesOptions = Omit<FetchWorkspacesRequest, "type" | "requ
 };
 export type FetchWorkspacesEntry = FetchWorkspacesPayload["entries"][number];
 export type FetchWorkspacesPageInfo = FetchWorkspacesPayload["pageInfo"];
+export type ProjectListPayload = Extract<
+  SessionOutboundMessage,
+  { type: "project.list.response" }
+>["payload"];
 export interface CreateChatRoomOptions {
   name: string;
   purpose?: string | null;
@@ -982,6 +1002,11 @@ function decodeBase64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
+function getLegacyExplorerFileRevision(file: LegacyFileExplorerFilePayload): string | undefined {
+  const candidate = (file as { revision?: unknown }).revision;
+  return typeof candidate === "string" ? candidate : undefined;
+}
+
 function legacyExplorerFileToBytes(file: LegacyFileExplorerFilePayload): FileReadResult {
   let bytes: Uint8Array;
   if (file.encoding === "base64" && file.content) {
@@ -999,7 +1024,7 @@ function legacyExplorerFileToBytes(file: LegacyFileExplorerFilePayload): FileRea
     path: file.path,
     kind: file.kind,
     modifiedAt: file.modifiedAt,
-    revision: file.revision,
+    revision: getLegacyExplorerFileRevision(file),
   };
 }
 
@@ -2092,6 +2117,24 @@ export class DaemonClient {
     });
   }
 
+  async listProjects(requestId?: string): Promise<ProjectListPayload> {
+    const resolvedRequestId = this.createRequestId(requestId);
+    const message = SessionInboundMessageSchema.parse({
+      type: "project.list.request",
+      requestId: resolvedRequestId,
+    });
+    return this.sendRequest({
+      requestId: resolvedRequestId,
+      message,
+      options: { skipQueue: true },
+      select: (msg) => {
+        if (msg.type !== "project.list.response") return null;
+        if (msg.payload.requestId !== resolvedRequestId) return null;
+        return msg.payload;
+      },
+    });
+  }
+
   async openProject(cwd: string, requestId?: string): Promise<OpenProjectPayload> {
     return this.sendCorrelatedSessionRequest({
       requestId,
@@ -2381,12 +2424,26 @@ export class DaemonClient {
         }
         const failed = AgentCreateFailedStatusPayloadSchema.safeParse(msg.payload);
         if (failed.success && failed.data.requestId === requestId) {
-          return failed.data;
+          // Preserve the optional marker even when this client is paired with
+          // an older installed protocol package whose schema strips new fields.
+          const marksAgentUncreated =
+            typeof msg.payload === "object" &&
+            msg.payload !== null &&
+            "agentCreated" in msg.payload &&
+            msg.payload.agentCreated === false;
+          return marksAgentUncreated
+            ? { ...failed.data, agentCreated: false as const }
+            : failed.data;
         }
         return null;
       },
     });
     if (status.status === "agent_create_failed") {
+      if ("agentCreated" in status && status.agentCreated === false) {
+        throw new AgentCreateRejectedError(status.error, requestId);
+      }
+      // Legacy daemons and post-registration failures cannot prove whether an
+      // agent exists. Keep this untyped so callers treat the outcome as ambiguous.
       throw new Error(status.error);
     }
 
@@ -2892,6 +2949,76 @@ export class DaemonClient {
 
   async sendMessage(agentId: string, text: string, options?: SendMessageOptions): Promise<void> {
     await this.sendAgentMessage(agentId, text, options);
+  }
+
+  async queueAgentMessage(
+    agentId: string,
+    text: string,
+    options?: QueueAgentMessageOptions,
+  ): Promise<QueueAgentMessageResponseMessage["payload"]["message"]> {
+    const messageId = options?.messageId ?? crypto.randomUUID();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"queue.agent_message.enqueue.response">({
+        message: {
+          type: "queue.agent_message.enqueue.request",
+          agentId,
+          text,
+          messageId,
+          ...(options?.images ? { images: options.images } : {}),
+          ...(options?.attachments ? { attachments: options.attachments } : {}),
+        },
+      });
+    if (!payload.accepted) {
+      throw new Error(payload.error ?? "queueAgentMessage rejected");
+    }
+    return payload.message;
+  }
+
+  async listQueuedAgentMessages(
+    agentId?: string,
+  ): Promise<QueueAgentMessageListResponseMessage["payload"]["queues"]> {
+    if (agentId !== undefined && agentId.trim().length === 0) {
+      throw new Error("agentId must not be blank");
+    }
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"queue.agent_message.list.response">({
+        message: {
+          type: "queue.agent_message.list.request",
+          ...(agentId !== undefined ? { agentId } : {}),
+        },
+      });
+    if (payload.error !== null) {
+      throw new Error(payload.error.trim() || "listQueuedAgentMessages rejected");
+    }
+    return payload.queues;
+  }
+
+  async cancelQueuedAgentMessage(agentId: string, queuedMessageId: string): Promise<void> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"queue.agent_message.cancel.response">({
+        message: {
+          type: "queue.agent_message.cancel.request",
+          agentId,
+          queuedMessageId,
+        },
+      });
+    if (!payload.accepted) {
+      throw new Error(payload.error ?? "cancelQueuedAgentMessage rejected");
+    }
+  }
+
+  async dispatchQueuedAgentMessage(agentId: string, queuedMessageId: string): Promise<void> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"queue.agent_message.dispatch.response">({
+        message: {
+          type: "queue.agent_message.dispatch.request",
+          agentId,
+          queuedMessageId,
+        },
+      });
+    if (!payload.accepted) {
+      throw new Error(payload.error ?? "dispatchQueuedAgentMessage rejected");
+    }
   }
 
   async rewindAgent(
@@ -3490,6 +3617,7 @@ export class DaemonClient {
         cwd: payload.cwd,
         files: payload.files,
         error: payload.error,
+        diffTooLarge: payload.diffTooLarge,
         requestId: payload.requestId,
       };
     } finally {
@@ -5257,6 +5385,7 @@ export class DaemonClient {
             [CLIENT_CAPS.terminalReflowableSnapshot]: true,
             [CLIENT_CAPS.providerSubagents]: true,
             [CLIENT_CAPS.projectUpdates]: true,
+            [CLIENT_CAPS.agentMessageQueueEvents]: true,
             ...this.config.capabilities,
           },
           ...(this.config.appVersion ? { appVersion: this.config.appVersion } : {}),

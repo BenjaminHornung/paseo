@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import type { AgentPromptInput, AgentRunOptions } from "./agent-sdk-types.js";
 import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
+import { assertAgentCwdExists } from "./agent-cwd.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 
@@ -10,12 +11,68 @@ export type AgentUnarchiveController = Pick<AgentManager, "notifyAgentState" | "
 
 export type AgentRunController = Pick<
   AgentManager,
-  "getAgent" | "tryRunOutOfBand" | "hasInFlightRun" | "replaceAgentRun" | "streamAgent"
+  | "getAgent"
+  | "tryRunOutOfBand"
+  | "hasInFlightRun"
+  | "replaceAgentRun"
+  | "streamAgent"
+  | "steerAgentTurn"
+  | "waitForAgentRunStart"
 >;
 
 export interface StartAgentRunOptions {
   replaceRunning?: boolean;
   runOptions?: AgentRunOptions;
+}
+
+export interface StartAgentRunResult {
+  outOfBand: boolean;
+  /**
+   * Set when the prompt was injected into an already-running provider turn
+   * (steering) instead of starting a new run. Callers must NOT wait for a new
+   * run start when this is true — the existing running turn owns the stream.
+   */
+  steered?: boolean;
+  startAcknowledged: AgentRunStartAcknowledgement;
+}
+
+export interface AgentRunStartAcknowledgement {
+  promise: Promise<void>;
+  abort: (reason?: unknown) => void;
+}
+
+/**
+ * Try to steer an already-running turn instead of replacing it. Returns the
+ * steered dispatch result when steering applies, or null when the caller should
+ * fall through to the replace/stream path. Steering applies only when the
+ * provider declares supportsSteering AND an active foreground turn exists — a
+ * pending run with no provider turn has nothing to steer against.
+ */
+async function trySteerActiveTurn(
+  agentManager: AgentRunController,
+  agentId: string,
+  prompt: AgentPromptInput,
+  snapshot: ManagedAgent | null,
+  runOptions: AgentRunOptions | undefined,
+  logger: Logger,
+): Promise<StartAgentRunResult | null> {
+  if (!snapshot?.capabilities?.supportsSteering || !snapshot.activeForegroundTurnId) {
+    return null;
+  }
+  await agentManager.steerAgentTurn(agentId, prompt, runOptions);
+  logger.trace(
+    {
+      agentId,
+      provider: snapshot.provider,
+      turnId: snapshot.activeForegroundTurnId,
+    },
+    "agent.session.steer.steered",
+  );
+  return {
+    outOfBand: false,
+    steered: true,
+    startAcknowledged: createResolvedStartAcknowledgement(),
+  };
 }
 
 export async function startAgentRun(
@@ -24,14 +81,17 @@ export async function startAgentRun(
   prompt: AgentPromptInput,
   logger: Logger,
   options?: StartAgentRunOptions,
-): Promise<{ outOfBand: boolean }> {
+): Promise<StartAgentRunResult> {
   const snapshot = agentManager.getAgent(agentId);
+  const provider = snapshot?.provider;
+  const providerSessionId = snapshot?.persistence?.sessionId ?? undefined;
+  const turnId = snapshot?.activeForegroundTurnId ?? undefined;
   logger.trace(
     {
       agentId,
-      provider: snapshot?.provider,
-      providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
-      turnId: snapshot?.activeForegroundTurnId ?? undefined,
+      provider,
+      providerSessionId,
+      turnId,
       promptType: typeof prompt === "string" ? "string" : "structured",
       hasRunOptions: Boolean(options?.runOptions),
       replaceRunning: Boolean(options?.replaceRunning),
@@ -42,22 +102,62 @@ export async function startAgentRun(
   // in-flight turn — replaceAgentRun would interrupt the running turn. The
   // intercept lives at this layer so it covers every prompt entrypoint.
   if (agentManager.tryRunOutOfBand(agentId, prompt)) {
-    return { outOfBand: true };
+    return {
+      outOfBand: true,
+      startAcknowledged: createResolvedStartAcknowledgement(),
+    };
   }
   const shouldReplace = Boolean(options?.replaceRunning && agentManager.hasInFlightRun(agentId));
   const runOptions = options?.runOptions;
+  // Steering: when a follow-up is requested while a turn is in flight AND the
+  // provider declares supportsSteering AND an active foreground turn exists
+  // (i.e. the run has started, not merely pending), inject the prompt into the
+  // running turn instead of replacing it. A pending-but-not-yet-started run has
+  // no provider turn id to steer against, so it must fall through to replace.
+  // Unsupported providers also fall through, preserving the existing behavior.
+  const steered = shouldReplace
+    ? await trySteerActiveTurn(agentManager, agentId, prompt, snapshot, runOptions, logger)
+    : null;
+  if (steered) {
+    return steered;
+  }
   const iterator = shouldReplace
     ? await agentManager.replaceAgentRun(agentId, prompt, runOptions)
     : agentManager.streamAgent(agentId, prompt, runOptions);
   logger.trace(
     {
       agentId,
-      provider: snapshot?.provider,
-      providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
+      provider,
+      providerSessionId,
       shouldReplace,
     },
     "agent.session.start_stream.iterator_returned",
   );
+  const startAcknowledgedAbort = new AbortController();
+  const startAcknowledged = {
+    promise: agentManager.waitForAgentRunStart(agentId, { signal: startAcknowledgedAbort.signal }),
+    abort: (reason?: unknown) => {
+      if (!startAcknowledgedAbort.signal.aborted) {
+        startAcknowledgedAbort.abort(reason ?? "aborted");
+      }
+    },
+  } satisfies AgentRunStartAcknowledgement;
+  drainAgentRunIterator(iterator, agentId, snapshot, logger);
+  return { outOfBand: false, startAcknowledged };
+}
+
+/**
+ * Consume the agent run iterator in the background so the run proceeds even
+ * though startAgentRun returns immediately. Events are broadcast via the
+ * AgentManager subscribers; this pump only drains the stream and logs the
+ * outcome. Kept out of startAgentRun to bound its cyclomatic complexity.
+ */
+function drainAgentRunIterator(
+  iterator: AsyncIterable<unknown>,
+  agentId: string,
+  snapshot: ManagedAgent | null,
+  logger: Logger,
+): void {
   void (async () => {
     try {
       for await (const _ of iterator) {
@@ -84,7 +184,6 @@ export async function startAgentRun(
       logger.error({ err: error, agentId }, "Agent stream failed");
     }
   })();
-  return { outOfBand: false };
 }
 
 /**
@@ -119,6 +218,29 @@ export function isSystemInjectedEnvelope(text: string): boolean {
   return SYSTEM_ENVELOPE_PATTERN.test(text);
 }
 
+// Matches a <paseo-system> block at the START of a message that has further
+// content after it (spawn-context injection: envelope + blank line + prompt).
+// Non-greedy so the first closing tag ends the envelope.
+const LEADING_SYSTEM_ENVELOPE_PATTERN = /^<paseo-system>\n[\s\S]*?\n<\/paseo-system>\n\n/;
+
+/**
+ * Resolve what a user_message should display in the timeline once daemon-injected
+ * context is accounted for:
+ * - `null` when the whole message is a system envelope (hide it entirely).
+ * - the trailing body when an envelope only prefixes real content, so the
+ *   visible first message is exactly what the parent/user asked for.
+ * - the text unchanged otherwise.
+ *
+ * The provider still receives the full text; this only shapes the display echo.
+ */
+export function displayTextForUserMessage(text: string): string | null {
+  if (isSystemInjectedEnvelope(text)) {
+    return null;
+  }
+  const leadingEnvelope = LEADING_SYSTEM_ENVELOPE_PATTERN.exec(text);
+  return leadingEnvelope ? text.slice(leadingEnvelope[0].length) : text;
+}
+
 export interface SendPromptToAgentParams {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
@@ -127,6 +249,8 @@ export interface SendPromptToAgentParams {
   prompt: AgentPromptInput;
   messageId?: string;
   runOptions?: AgentRunOptions;
+  /** Whether this send may interrupt an active foreground run. Defaults to true. */
+  replaceRunning?: boolean;
   /** Optional mode to set on the agent before the run starts. */
   sessionMode?: string;
   /**
@@ -136,6 +260,19 @@ export interface SendPromptToAgentParams {
    */
   unarchive?: boolean;
   logger: Logger;
+}
+
+export interface SendPromptToAgentResult {
+  outOfBand: boolean;
+  /**
+   * Set when the prompt was injected into an already-running provider turn
+   * (steering) instead of starting a new run. Callers that set up finish
+   * notifications or wait for completion must account for the fact that no new
+   * run was started — the existing running turn owns the stream and completion.
+   */
+  steered?: boolean;
+  startAcknowledged: AgentRunStartAcknowledgement;
+  skippedReason?: "archived";
 }
 
 export interface StartCreatedAgentInitialPromptParams {
@@ -149,18 +286,80 @@ export interface StartCreatedAgentInitialPromptParams {
 
 const AGENT_RUN_START_TIMEOUT_MS = 15_000;
 
+export class AgentRunStartTimeoutError extends Error {
+  constructor() {
+    super(`Agent run start timed out after ${AGENT_RUN_START_TIMEOUT_MS}ms`);
+    this.name = "AgentRunStartTimeoutError";
+  }
+}
+
 export async function waitForAgentRunStartWithTimeout(
-  agentManager: AgentManager,
-  agentId: string,
+  startAcknowledged: AgentRunStartAcknowledgement,
 ): Promise<void> {
-  const startAbort = new AbortController();
-  const startTimeout = setTimeout(() => startAbort.abort("timeout"), AGENT_RUN_START_TIMEOUT_MS);
+  const startTimeout = setTimeout(
+    () => startAcknowledged.abort("timeout"),
+    AGENT_RUN_START_TIMEOUT_MS,
+  );
 
   try {
-    await agentManager.waitForAgentRunStart(agentId, { signal: startAbort.signal });
+    await startAcknowledged.promise;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.name === "AbortError" &&
+      error.message.toLowerCase().includes("timeout")
+    ) {
+      throw new AgentRunStartTimeoutError();
+    }
+    throw error;
   } finally {
     clearTimeout(startTimeout);
   }
+}
+
+interface BackgroundAgentRunStartOwnershipParams {
+  startAcknowledged: AgentRunStartAcknowledgement;
+  logger: Logger;
+  context: Record<string, unknown>;
+  timeoutMessage: string;
+  failureMessage: string;
+}
+
+function logAgentRunStartOwnershipFailure(
+  logger: Logger,
+  level: "warn" | "error",
+  context: Record<string, unknown>,
+  message: string,
+): void {
+  try {
+    logger[level](context, message);
+  } catch {
+    // Detached ownership must never rethrow from logging.
+  }
+}
+
+export function ownBackgroundAgentRunStart(params: BackgroundAgentRunStartOwnershipParams): void {
+  void (async () => {
+    try {
+      await waitForAgentRunStartWithTimeout(params.startAcknowledged);
+    } catch (error) {
+      if (error instanceof AgentRunStartTimeoutError) {
+        logAgentRunStartOwnershipFailure(
+          params.logger,
+          "warn",
+          { ...params.context, err: error },
+          params.timeoutMessage,
+        );
+        return;
+      }
+      logAgentRunStartOwnershipFailure(
+        params.logger,
+        "warn",
+        { ...params.context, err: error },
+        params.failureMessage,
+      );
+    }
+  })();
 }
 
 /**
@@ -171,19 +370,34 @@ export async function waitForAgentRunStartWithTimeout(
  * chat mentions, notify-on-finish) MUST go through this so behavior can never
  * drift between them.
  *
- * When `unarchive` is false and the agent is archived, the call is a silent
- * no-op (returns `{ outOfBand: false }`) — the agent is not run.
+ * When `unarchive` is false and the agent is archived, the call is a no-op
+ * with `skippedReason: "archived"` — the agent is not run.
  */
 export async function sendPromptToAgent(
   params: SendPromptToAgentParams,
-): Promise<{ outOfBand: boolean }> {
+): Promise<SendPromptToAgentResult> {
   const unarchive = params.unarchive ?? true;
 
   const record = await params.agentStorage.get(params.agentId);
   if (record?.archivedAt) {
     if (!unarchive) {
-      return { outOfBand: false };
+      return {
+        outOfBand: false,
+        startAcknowledged: createResolvedStartAcknowledgement(),
+        skippedReason: "archived",
+      };
     }
+  }
+
+  const liveBeforeLoad = params.agentManager.getAgent(params.agentId);
+  const cwd = liveBeforeLoad?.cwd ?? record?.cwd;
+  if (cwd) {
+    await assertAgentCwdExists(params.agentId, cwd);
+  } else if (!record && !liveBeforeLoad) {
+    throw new Error(`Agent not found: ${params.agentId}`);
+  }
+
+  if (record?.archivedAt && unarchive) {
     await unarchiveAgentState(params.agentStorage, params.agentManager, params.agentId);
   }
 
@@ -191,6 +405,7 @@ export async function sendPromptToAgent(
     agentManager: params.agentManager,
     agentStorage: params.agentStorage,
     logger: params.logger,
+    allowMissingCwd: false,
   });
 
   if (params.sessionMode) {
@@ -198,11 +413,11 @@ export async function sendPromptToAgent(
   }
 
   const runOptions = params.messageId
-    ? { ...params.runOptions, clientMessageId: params.messageId }
+    ? { ...params.runOptions, messageId: params.messageId }
     : params.runOptions;
 
   return await startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
-    replaceRunning: true,
+    replaceRunning: params.replaceRunning ?? true,
     runOptions,
   });
 }
@@ -230,7 +445,7 @@ export async function startCreatedAgentInitialPrompt(
   );
 
   if (!dispatchResult.outOfBand) {
-    await waitForAgentRunStartWithTimeout(params.agentManager, params.agentId);
+    await waitForAgentRunStartWithTimeout(dispatchResult.startAcknowledged);
   }
 
   const refreshedSnapshot = params.agentManager.getAgent(params.agentId) ?? params.snapshot ?? null;
@@ -240,12 +455,27 @@ export async function startCreatedAgentInitialPrompt(
   return refreshedSnapshot;
 }
 
+function createResolvedStartAcknowledgement(): AgentRunStartAcknowledgement {
+  return {
+    promise: Promise.resolve(),
+    abort: () => {},
+  };
+}
+
 export interface SetupFinishNotificationParams {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   childAgentId: string;
   callerAgentId: string;
   requireParentOwnership?: boolean;
+  /**
+   * Asserts the child was already running when the dispatch that triggers this
+   * notification happened (e.g. a steered follow-up). This resolves the race
+   * where a steered turn finishes before this subscription is established: an
+   * immediate "idle" is a real finish (not a not-yet-started run), so it is
+   * treated as finished instead of being ignored.
+   */
+  assumeRunning?: boolean;
   logger: Logger;
 }
 
@@ -303,7 +533,7 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
       lastAssistantMessage,
     });
 
-    await sendPromptToAgent({
+    const dispatchResult = await sendPromptToAgent({
       agentManager,
       agentStorage,
       agentId: callerAgentId,
@@ -311,6 +541,15 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
       unarchive: false,
       logger,
     });
+    if (!dispatchResult.outOfBand && !dispatchResult.skippedReason) {
+      ownBackgroundAgentRunStart({
+        startAcknowledged: dispatchResult.startAcknowledged,
+        logger,
+        context: { childAgentId, callerAgentId, reason },
+        timeoutMessage: "Caller agent notification run did not acknowledge start before timeout",
+        failureMessage: "Caller agent notification run failed before start acknowledgement",
+      });
+    }
   }
 
   function notifySafely(reason: "finished" | "errored" | "needs permission"): void {
@@ -370,5 +609,10 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
     hasSeenRunning = true;
   } else if (childSnapshot.lifecycle === "error") {
     notifySafely("errored");
+  } else if (childSnapshot.lifecycle === "idle" && params.assumeRunning) {
+    // The child was running at dispatch time (e.g. a steered follow-up) and has
+    // since become idle before our subscription was established — treat that as
+    // a real finish rather than a not-yet-started run.
+    notifySafely("finished");
   }
 }

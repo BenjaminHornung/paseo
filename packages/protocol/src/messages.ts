@@ -289,6 +289,8 @@ const AgentCapabilityFlagsSchema: z.ZodType<AgentCapabilityFlags> = z
     supportsRewindFiles: z.boolean().optional().default(false),
     // COMPAT(rewind): added in v0.1.X, drop when floor >= v0.1.X.
     supportsRewindBoth: z.boolean().optional().default(false),
+    // COMPAT(steering): added in v0.1.X, drop when floor >= v0.1.X.
+    supportsSteering: z.boolean().optional().default(false),
   })
   .catchall(z.boolean());
 
@@ -988,7 +990,7 @@ export const ChangeRequestCheckoutSourceSchema = z.object({
   projectPath: z.string().optional(),
 });
 
-const ImageAttachmentSchema = z.object({
+export const ImageAttachmentSchema = z.object({
   data: z.string(), // base64 encoded image
   mimeType: z.string(), // e.g., "image/jpeg", "image/png"
 });
@@ -1072,6 +1074,11 @@ export const FetchWorkspacesRequestMessageSchema = z.object({
     .optional(),
 });
 
+export const ProjectListRequestMessageSchema = z.object({
+  type: z.literal("project.list.request"),
+  requestId: z.string(),
+});
+
 export const FetchAgentHistoryRequestMessageSchema = z.object({
   type: z.literal("fetch_agent_history_request"),
   requestId: z.string(),
@@ -1117,6 +1124,57 @@ export const SendAgentMessageRequestSchema = z.object({
   messageId: z.string().optional(), // Client-provided ID for deduplication
   images: z.array(ImageAttachmentSchema).optional(),
   attachments: AgentAttachmentsSchema,
+});
+
+export const QueuedAgentMessagePayloadSchema = z.object({
+  id: z.string(),
+  agentId: z.string(),
+  text: z.string(),
+  createdAt: z.string(),
+  images: z.array(ImageAttachmentSchema).default([]),
+  attachments: z.array(AgentAttachmentSchema).default([]),
+  imageCount: z.number().int().nonnegative().default(0),
+  attachmentCount: z.number().int().nonnegative().default(0),
+});
+
+export const QueuedAgentMessageQueuePayloadSchema = z.object({
+  agentId: z.string(),
+  revision: z.number().int().nonnegative().optional(),
+  messages: z.array(QueuedAgentMessagePayloadSchema),
+});
+
+export const QueueAgentMessageRequestSchema = z.object({
+  type: z.literal("queue.agent_message.enqueue.request"),
+  requestId: z.string(),
+  /** Accepts full ID, unique prefix, or exact full title (server resolves). */
+  agentId: z.string(),
+  text: z.string(),
+  messageId: z.string().optional(),
+  images: z.array(ImageAttachmentSchema).optional().default([]),
+  attachments: z.array(AgentAttachmentSchema).optional().default([]),
+});
+
+export const QueueAgentMessageListRequestSchema = z.object({
+  type: z.literal("queue.agent_message.list.request"),
+  requestId: z.string(),
+  /** Omit to list queued messages for all agents. */
+  agentId: z.string().optional(),
+});
+
+export const QueueAgentMessageCancelRequestSchema = z.object({
+  type: z.literal("queue.agent_message.cancel.request"),
+  requestId: z.string(),
+  /** Accepts full ID, unique prefix, or exact full title (server resolves). */
+  agentId: z.string(),
+  queuedMessageId: z.string(),
+});
+
+export const QueueAgentMessageDispatchRequestSchema = z.object({
+  type: z.literal("queue.agent_message.dispatch.request"),
+  requestId: z.string(),
+  /** Accepts full ID, unique prefix, or exact full title (server resolves). */
+  agentId: z.string(),
+  queuedMessageId: z.string(),
 });
 
 export const WaitForFinishRequestSchema = z.object({
@@ -2445,6 +2503,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   FetchAgentHistoryRequestMessageSchema,
   FetchRecentProviderSessionsRequestMessageSchema,
   FetchWorkspacesRequestMessageSchema,
+  ProjectListRequestMessageSchema,
   FetchAgentRequestMessageSchema,
   DeleteAgentRequestMessageSchema,
   ArchiveAgentRequestMessageSchema,
@@ -2458,6 +2517,10 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   WorkspaceRecoveryRestoreRequestSchema,
   SetVoiceModeMessageSchema,
   SendAgentMessageRequestSchema,
+  QueueAgentMessageRequestSchema,
+  QueueAgentMessageListRequestSchema,
+  QueueAgentMessageCancelRequestSchema,
+  QueueAgentMessageDispatchRequestSchema,
   WaitForFinishRequestSchema,
   DaemonGetStatusRequestSchema,
   DaemonGetPairingOfferRequestSchema,
@@ -2792,6 +2855,8 @@ export const ServerInfoStatusPayloadSchema = z
         providerUsageList: z.boolean().optional(),
         // COMPAT(agentDetach): added in v0.1.98, remove gate after 2026-12-19 once daemon floor >= v0.1.98.
         agentDetach: z.boolean().optional(),
+        // COMPAT(agentThinkingUpdate): added in v0.2.4, remove gate after 2027-01-28.
+        agentThinkingUpdate: z.boolean().optional(),
         // COMPAT(daemonDiagnostics): added in v0.1.100, remove gate after 2026-12-25 once daemon floor >= v0.1.100.
         daemonDiagnostics: z.boolean().optional(),
         // COMPAT(daemonSelfUpdate): added in v0.1.93, remove gate after 2026-12-13.
@@ -2812,6 +2877,8 @@ export const ServerInfoStatusPayloadSchema = z
         workspaceGithubRepositorySearch: z.boolean().optional(),
         // COMPAT(projectCreateDirectory): added in v0.1.108, remove gate after 2027-01-15.
         projectCreateDirectory: z.boolean().optional(),
+        // COMPAT(projectList): added in v0.2.4, drop the gate when floor >= v0.2.4.
+        projectList: z.boolean().optional(),
         // COMPAT(commitsList): added in v0.1.110, remove gate after 2027-01-16.
         commitsList: z.boolean().optional(),
         // COMPAT(commitBaseClassification): added in v0.2.0, remove gate after 2027-01-23.
@@ -2828,6 +2895,8 @@ export const ServerInfoStatusPayloadSchema = z
         selectiveAgentTimeline: z.boolean().optional(),
         // COMPAT(stableProjectIdentity): added in v0.1.109, remove gate after 2027-01-15.
         stableProjectIdentity: z.boolean().optional(),
+        // COMPAT(agentMessageQueue): added in v0.2.0, remove gate after 2027-01-20.
+        agentMessageQueue: z.boolean().optional(),
         // COMPAT(workspaceScriptManagement): added in v0.1.105, remove gate after 2027-01-10.
         workspaceScriptManagement: z.boolean().optional(),
       })
@@ -2890,6 +2959,9 @@ export const AgentCreateFailedStatusPayloadSchema = z.object({
   requestId: z.string(),
   error: z.string(),
   errorCode: z.string().optional(),
+  // Optional for compatibility with older daemons. Only false is meaningful:
+  // it certifies that agent registration never occurred.
+  agentCreated: z.literal(false).optional(),
 });
 
 export const AgentResumedStatusPayloadSchema = z
@@ -3230,6 +3302,8 @@ export const FetchRecentProviderSessionsResponseMessageSchema = z.object({
 // workspace is archived.
 export const WorkspaceProjectDescriptorPayloadSchema = z.object({
   projectId: z.string(),
+  // COMPAT(projectKey): added in v0.2.4 on 2026-07-28; remove optional after 2027-01-28.
+  projectKey: z.string().optional(),
   projectDisplayName: z.string(),
   projectCustomName: z.string().nullable().optional(),
   projectRootPath: z.string(),
@@ -3284,6 +3358,14 @@ export const ProjectUpdateMessageSchema = z.object({
     z.object({ kind: z.literal("upsert"), project: WorkspaceProjectDescriptorPayloadSchema }),
     z.object({ kind: z.literal("remove"), projectId: z.string() }),
   ]),
+});
+
+export const ProjectListResponseMessageSchema = z.object({
+  type: z.literal("project.list.response"),
+  payload: z.object({
+    requestId: z.string(),
+    projects: z.array(WorkspaceProjectDescriptorPayloadSchema),
+  }),
 });
 
 export const ScriptStatusUpdateMessageSchema = z.object({
@@ -3711,6 +3793,53 @@ export const SendAgentMessageResponseMessageSchema = z.object({
   }),
 });
 
+export const QueueAgentMessageResponseMessageSchema = z.object({
+  type: z.literal("queue.agent_message.enqueue.response"),
+  payload: z.object({
+    requestId: z.string(),
+    agentId: z.string(),
+    accepted: z.boolean(),
+    message: QueuedAgentMessagePayloadSchema.nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const QueueAgentMessageListResponseMessageSchema = z.object({
+  type: z.literal("queue.agent_message.list.response"),
+  payload: z.object({
+    requestId: z.string(),
+    queues: z.array(QueuedAgentMessageQueuePayloadSchema),
+    error: z.string().nullable(),
+  }),
+});
+
+export const QueueAgentMessageCancelResponseMessageSchema = z.object({
+  type: z.literal("queue.agent_message.cancel.response"),
+  payload: z.object({
+    requestId: z.string(),
+    agentId: z.string(),
+    queuedMessageId: z.string(),
+    accepted: z.boolean(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const QueueAgentMessageDispatchResponseMessageSchema = z.object({
+  type: z.literal("queue.agent_message.dispatch.response"),
+  payload: z.object({
+    requestId: z.string(),
+    agentId: z.string(),
+    queuedMessageId: z.string(),
+    accepted: z.boolean(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const QueueAgentMessageUpdatedMessageSchema = z.object({
+  type: z.literal("queue.agent_message.updated"),
+  payload: QueuedAgentMessageQueuePayloadSchema,
+});
+
 export const WaitForFinishResponseMessageSchema = z.object({
   type: z.literal("wait_for_finish_response"),
   payload: z.object({
@@ -4126,6 +4255,8 @@ const CheckoutDiffSubscriptionPayloadSchema = z.object({
   cwd: z.string(),
   files: z.array(ParsedDiffFileSchema),
   error: CheckoutErrorSchema.nullable(),
+  // COMPAT(diffTooLarge): added in v0.2.4, keep optional until the daemon floor is v0.2.4.
+  diffTooLarge: z.boolean().optional(),
 });
 
 export const SubscribeCheckoutDiffResponseSchema = z.object({
@@ -5181,6 +5312,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   AgentUpdateMessageSchema,
   WorkspaceUpdateMessageSchema,
   ProjectUpdateMessageSchema,
+  ProjectListResponseMessageSchema,
   ScriptStatusUpdateMessageSchema,
   WorkspaceSetupProgressMessageSchema,
   WorkspaceSetupStatusResponseMessageSchema,
@@ -5215,6 +5347,11 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   WorkspaceCreateResponseSchema,
   WorkspaceClearAttentionResponseSchema,
   SendAgentMessageResponseMessageSchema,
+  QueueAgentMessageResponseMessageSchema,
+  QueueAgentMessageListResponseMessageSchema,
+  QueueAgentMessageCancelResponseMessageSchema,
+  QueueAgentMessageDispatchResponseMessageSchema,
+  QueueAgentMessageUpdatedMessageSchema,
   SetVoiceModeResponseMessageSchema,
   DaemonGetStatusResponseSchema,
   DaemonGetPairingOfferResponseSchema,
@@ -5359,6 +5496,7 @@ export type WorkspaceDescriptorPayload = z.infer<typeof WorkspaceDescriptorPaylo
 export type WorkspaceProjectDescriptorPayload = z.infer<
   typeof WorkspaceProjectDescriptorPayloadSchema
 >;
+export type ProjectListResponseMessage = z.infer<typeof ProjectListResponseMessageSchema>;
 export type WorkspaceScriptLifecycle = z.infer<typeof WorkspaceScriptLifecycleSchema>;
 export type WorkspaceScriptHealth = z.infer<typeof WorkspaceScriptHealthSchema>;
 export type WorkspaceScriptPayload = z.infer<typeof WorkspaceScriptPayloadSchema>;
@@ -5408,6 +5546,19 @@ export type FetchAgentTimelineResponseMessage = z.infer<
 export type AgentForkContextResponseMessage = z.infer<typeof AgentForkContextResponseMessageSchema>;
 export type CancelAgentResponseMessage = z.infer<typeof CancelAgentResponseMessageSchema>;
 export type SendAgentMessageResponseMessage = z.infer<typeof SendAgentMessageResponseMessageSchema>;
+export type QueueAgentMessageResponseMessage = z.infer<
+  typeof QueueAgentMessageResponseMessageSchema
+>;
+export type QueueAgentMessageListResponseMessage = z.infer<
+  typeof QueueAgentMessageListResponseMessageSchema
+>;
+export type QueueAgentMessageCancelResponseMessage = z.infer<
+  typeof QueueAgentMessageCancelResponseMessageSchema
+>;
+export type QueueAgentMessageDispatchResponseMessage = z.infer<
+  typeof QueueAgentMessageDispatchResponseMessageSchema
+>;
+export type QueueAgentMessageUpdatedMessage = z.infer<typeof QueueAgentMessageUpdatedMessageSchema>;
 export type SetVoiceModeResponseMessage = z.infer<typeof SetVoiceModeResponseMessageSchema>;
 export type SetAgentModeResponseMessage = z.infer<typeof SetAgentModeResponseMessageSchema>;
 export type SetAgentModelResponseMessage = z.infer<typeof SetAgentModelResponseMessageSchema>;
@@ -5504,9 +5655,18 @@ export type FetchRecentProviderSessionsRequestMessage = z.infer<
   typeof FetchRecentProviderSessionsRequestMessageSchema
 >;
 export type FetchWorkspacesRequestMessage = z.infer<typeof FetchWorkspacesRequestMessageSchema>;
+export type ProjectListRequestMessage = z.infer<typeof ProjectListRequestMessageSchema>;
 export type FetchAgentRequestMessage = z.infer<typeof FetchAgentRequestMessageSchema>;
 export type AgentForkContextRequestMessage = z.infer<typeof AgentForkContextRequestMessageSchema>;
 export type SendAgentMessageRequest = z.infer<typeof SendAgentMessageRequestSchema>;
+export type QueueAgentMessageRequest = z.infer<typeof QueueAgentMessageRequestSchema>;
+export type QueueAgentMessageListRequest = z.infer<typeof QueueAgentMessageListRequestSchema>;
+export type QueueAgentMessageCancelRequest = z.infer<typeof QueueAgentMessageCancelRequestSchema>;
+export type QueueAgentMessageDispatchRequest = z.infer<
+  typeof QueueAgentMessageDispatchRequestSchema
+>;
+export type QueuedAgentMessagePayload = z.infer<typeof QueuedAgentMessagePayloadSchema>;
+export type QueuedAgentMessageQueuePayload = z.infer<typeof QueuedAgentMessageQueuePayloadSchema>;
 export type WaitForFinishRequest = z.infer<typeof WaitForFinishRequestSchema>;
 export type DictationStreamStartMessage = z.infer<typeof DictationStreamStartMessageSchema>;
 export type DictationStreamChunkMessage = z.infer<typeof DictationStreamChunkMessageSchema>;
@@ -5776,6 +5936,7 @@ export const WSHelloMessageSchema = z.object({
       [CLIENT_CAPS.providerSubagents]: z.boolean().optional(),
       [CLIENT_CAPS.projectUpdates]: z.boolean().optional(),
       [CLIENT_CAPS.browserHost]: BrowserAutomationHostCapabilitySchema.optional(),
+      [CLIENT_CAPS.agentMessageQueueEvents]: z.boolean().optional(),
     })
     .passthrough()
     .optional(),

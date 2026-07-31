@@ -58,7 +58,13 @@ import {
   toScheduleSummary,
   waitForAgentWithTimeout,
 } from "../mcp-shared.js";
-import { sendPromptToAgent, setupFinishNotification } from "../agent-prompt.js";
+import {
+  ownBackgroundAgentRunStart,
+  sendPromptToAgent,
+  setupFinishNotification,
+  waitForAgentRunStartWithTimeout,
+} from "../agent-prompt.js";
+import { buildAgentMessageEnvelope } from "../agent-spawn-context.js";
 import { respondToAgentPermission } from "../permission-response.js";
 import {
   archiveAgentCommand,
@@ -108,7 +114,7 @@ export interface PaseoToolHostDependencies {
   archiveWorkspaceRecord?: ArchiveDependencies["archiveWorkspaceRecord"];
   emitWorkspaceUpdatesForWorkspaceIds?: ArchiveDependencies["emitWorkspaceUpdatesForWorkspaceIds"];
   workspaceRegistry?: Pick<WorkspaceRegistry, "get" | "list" | "upsert">;
-  projectRegistry?: Pick<ProjectRegistry, "get">;
+  projectRegistry?: Pick<ProjectRegistry, "get" | "list">;
   createDirectoryWorkspace?: (
     cwd: string,
     title?: string | null,
@@ -1873,14 +1879,42 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     }) => {
       const shouldNotifyOnFinish = Boolean(callerAgentId && notifyOnFinish && background);
 
-      await sendPromptToAgent({
+      // Agent-to-agent sends get a sender-identity envelope so the receiver knows
+      // who is asking and how to reply. Human/app sends and other system paths
+      // (chat mentions, schedule fires, notify-on-finish) are left untouched.
+      let deliveredPrompt = prompt;
+      if (callerAgentId) {
+        const senderRecord = await agentStorage.get(callerAgentId);
+        deliveredPrompt = buildAgentMessageEnvelope({
+          senderAgentId: callerAgentId,
+          senderTitle: senderRecord?.title ?? null,
+          prompt,
+          autoReply: shouldNotifyOnFinish,
+        });
+      }
+
+      const dispatchResult = await sendPromptToAgent({
         agentManager,
         agentStorage,
         agentId,
-        prompt,
+        prompt: deliveredPrompt,
         sessionMode,
         logger: childLogger,
       });
+      if (background) {
+        if (!dispatchResult.outOfBand && !dispatchResult.skippedReason) {
+          ownBackgroundAgentRunStart({
+            startAcknowledged: dispatchResult.startAcknowledged,
+            logger: childLogger,
+            context: { agentId, callerAgentId, tool: "send_agent_prompt" },
+            timeoutMessage:
+              "Background send_agent_prompt run did not acknowledge start before timeout",
+            failureMessage: "Background send_agent_prompt run failed before start acknowledgement",
+          });
+        }
+      } else if (!dispatchResult.outOfBand && !dispatchResult.skippedReason) {
+        await waitForAgentRunStartWithTimeout(dispatchResult.startAcknowledged);
+      }
 
       if (shouldNotifyOnFinish && callerAgentId) {
         setupFinishNotification({
@@ -1888,6 +1922,10 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           agentStorage,
           childAgentId: agentId,
           callerAgentId,
+          // A steered dispatch injects into a running turn without starting a
+          // new run, so the child was already running — resolve the
+          // finish-before-subscribe race by assuming that running state.
+          assumeRunning: dispatchResult.steered === true,
           logger: childLogger,
         });
       }

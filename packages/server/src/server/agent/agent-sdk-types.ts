@@ -128,6 +128,7 @@ export interface ResolveAgentCreateConfigInput {
   parent: AgentCreateConfigParent | null;
   unattended: boolean;
   availableModes: AgentMode[] | undefined;
+  defaultModeId?: string | null;
 }
 
 export interface ResolveAgentCreateConfigResult {
@@ -178,6 +179,7 @@ export interface AgentCapabilityFlags {
   supportsRewindConversation?: boolean;
   supportsRewindFiles?: boolean;
   supportsRewindBoth?: boolean;
+  supportsSteering?: boolean;
 }
 
 export interface AgentPersistenceHandle {
@@ -588,6 +590,12 @@ export interface AgentLaunchContext {
   agentId?: string;
   env?: Record<string, string>;
   /**
+   * Runtime-only, non-persisted cwd for provider process launch and recovery
+   * loadSession/unstable_resumeSession calls; AgentSessionConfig.cwd remains
+   * the logical recorded cwd.
+   */
+  processCwd?: string;
+  /**
    * Runtime-only internal Paseo tools. This must never be persisted into
    * AgentSessionConfig; providers may adapt it to their native tool surface.
    */
@@ -623,6 +631,14 @@ export interface AgentSession {
   readonly features?: AgentFeature[];
   run(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<AgentRunResult>;
   startTurn(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<{ turnId: string }>;
+  /**
+   * Inject a follow-up prompt into an already-running turn instead of starting a
+   * new run. Only providers that declare `supportsSteering` implement this;
+   * unsupported providers fall back to the replace behavior in the central send
+   * path. Optional because old provider implementations predate the capability.
+   * @see AgentCapabilityFlags.supportsSteering
+   */
+  steerTurn?(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<void>;
   subscribe(callback: (event: AgentStreamEvent) => void): () => void;
   streamHistory(): AsyncGenerator<AgentStreamEvent>;
   getRuntimeInfo(): Promise<AgentRuntimeInfo>;

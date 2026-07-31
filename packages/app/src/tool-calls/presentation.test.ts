@@ -47,7 +47,10 @@ describe("tool-call presentation", () => {
       isLoadingDetails: false,
       hasDetails: true,
       canOpenDetails: true,
-      openFilePath: "/tmp/repo/src/index.ts",
+      openFileTarget: {
+        raw: "/tmp/repo/src/index.ts",
+        path: "/tmp/repo/src/index.ts",
+      },
       isPlan: false,
     });
   });
@@ -71,8 +74,30 @@ describe("tool-call presentation", () => {
       isLoadingDetails: true,
       hasDetails: false,
       canOpenDetails: true,
-      openFilePath: null,
+      openFileTarget: null,
       isPlan: false,
+    });
+  });
+
+  it("separates Windows line locations before presenting a tool-call file action", () => {
+    const filePath = String.raw`C:\Users\test\project\src\index.ts:7`;
+    const presentation = buildToolCallPresentation({
+      toolName: "read_file",
+      status: "completed",
+      error: null,
+      detail: {
+        type: "read",
+        filePath,
+        content: "console.log('hi');",
+      },
+      resolveIcon: fakeResolveIcon,
+    });
+
+    expect(presentation.openFileTarget).toEqual({
+      raw: filePath,
+      path: "C:/Users/test/project/src/index.ts",
+      lineStart: 7,
+      lineEnd: undefined,
     });
   });
 

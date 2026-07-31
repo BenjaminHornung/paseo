@@ -19,6 +19,7 @@ import type { DaemonConfigStore, MutableDaemonConfig } from "./daemon-config-sto
 import {
   type ServerInfoStatusPayload,
   type SessionOutboundMessage,
+  type QueuedAgentMessageQueuePayload,
   type WorkspaceSetupSnapshot,
   type WSHelloMessage,
   type WSInboundMessage,
@@ -28,6 +29,10 @@ import {
   type WSOutboundMessage,
   wrapSessionMessage,
 } from "./messages.js";
+import {
+  createAgentMessageQueueService,
+  type AgentMessageQueueService,
+} from "./agent-message-queue.js";
 import { asUint8Array, decodeBinaryFrame } from "@getpaseo/protocol/binary-frames/index";
 import type { TerminalActivity } from "@getpaseo/protocol/terminal-activity";
 import type { HostnamesConfig } from "./hostnames.js";
@@ -81,7 +86,7 @@ import {
   CLIENT_SHUTDOWN_RPC_REASON,
   normalizeClientRestartRpcReason,
 } from "./lifecycle-reasons.js";
-import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
+import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-capabilities";
 import type { BrowserAutomationExecuteResponse } from "@getpaseo/protocol/browser-automation/rpc-schemas";
 import {
   BrowserAutomationHostCapabilitySchema,
@@ -96,6 +101,7 @@ import {
   outboundFrameByteLength,
   physicalSocketHasCapacity,
   sendBoundedPhysicalFrame,
+  sendBoundedPhysicalFrameAndWait,
 } from "./websocket/physical-socket.js";
 
 const WS_CLOSE_DAEMON_AUTH_FAILED = 4401;
@@ -259,6 +265,7 @@ function createNoopProjectRegistry(): ProjectRegistry {
       rootPath: input.rootPath,
       kind: input.kind,
       displayName: input.displayName,
+      projectKey: input.projectKey ?? null,
       customName: null,
       createdAt: input.timestamp,
       updatedAt: input.timestamp,
@@ -371,7 +378,10 @@ function getBrowserHostCapability(
 export interface WebSocketLike {
   readyState: number;
   bufferedAmount?: number;
-  send: (data: string | Uint8Array | ArrayBuffer) => void;
+  send: (
+    data: string | Uint8Array | ArrayBuffer,
+    callback?: (error?: Error) => void,
+  ) => void | Promise<void>;
   close: (code?: number, reason?: string) => void;
   terminate?: () => void;
   on: (event: "message" | "close" | "error", listener: (...args: unknown[]) => void) => void;
@@ -423,6 +433,7 @@ interface SocketSessionOptions {
   onMessage: (message: SessionOutboundMessage) => void;
   onMessageToSource?: (source: object, message: SessionOutboundMessage) => void;
   onBinaryMessage?: (frame: Uint8Array) => void;
+  onBinaryMessageToSource?: (source: object, frame: Uint8Array) => Promise<void>;
   getTransportBufferedAmount?: () => number | null;
   onLifecycleIntent?: (intent: SessionLifecycleIntent) => void;
   hubExecutionAgents?: HubExecutionAgents;
@@ -528,6 +539,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly workspaceSetupSnapshots = new Map<string, WorkspaceSetupSnapshot>();
   private readonly providerSnapshotManager: ProviderSnapshotManager;
   private onLifecycleIntent!: ((intent: SessionLifecycleIntent) => void) | null;
+  private readonly agentMessageQueue: AgentMessageQueueService;
   private onBranchChanged!:
     | ((workspaceId: string, oldBranch: string | null, newBranch: string | null) => void)
     | null;
@@ -660,6 +672,15 @@ export class VoiceAssistantWebSocketServer {
     this.pushTokenStore = new PushTokenStore(pushLogger, join(paseoHome, "push-tokens.json"));
     this.pushNotificationSender =
       pushNotificationSender ?? createPushNotificationSender(pushLogger, this.pushTokenStore);
+
+    this.agentMessageQueue = createAgentMessageQueueService({
+      paseoHome,
+      agentManager: this.agentManager,
+      agentStorage: this.agentStorage,
+      logger: this.logger.child({ module: "agent-message-queue" }),
+      onQueueUpdated: (queue) => this.broadcastAgentMessageQueueUpdated(queue),
+    });
+    this.agentMessageQueue.start();
 
     this.agentManager.setAgentAttentionCallback((params) => {
       void this.broadcastAgentAttention(params).catch((err) => {
@@ -939,6 +960,7 @@ export class VoiceAssistantWebSocketServer {
 
   public async close(): Promise<void> {
     this.prepareForShutdown();
+    this.agentMessageQueue.stop();
     this.unsubscribeSpeechReadiness?.();
     this.unsubscribeSpeechReadiness = null;
     this.unsubscribeDaemonConfigChange?.();
@@ -1054,6 +1076,23 @@ export class VoiceAssistantWebSocketServer {
     });
   }
 
+  private async sendBinaryToClientAndWait(ws: WebSocketLike, frame: Uint8Array): Promise<void> {
+    try {
+      const sent = await sendBoundedPhysicalFrameAndWait({
+        socket: ws,
+        frame,
+        onHighWater: () => this.closeAtOutboundHighWater(ws),
+      });
+      if (!sent) {
+        throw new Error("Physical WebSocket is not open");
+      }
+      this.runtimeMetrics.recordOutboundBinaryFrame(ws.bufferedAmount);
+    } catch (err) {
+      this.logger.warn({ err }, "ws_send_failed");
+      throw err;
+    }
+  }
+
   private sendFrameToClient(
     ws: WebSocketLike,
     frame: string | Uint8Array,
@@ -1125,6 +1164,18 @@ export class VoiceAssistantWebSocketServer {
   private sendToConnection(connection: SessionConnection, message: WSOutboundMessage): void {
     const sockets = connection.kind === "trusted" ? connection.sockets : [connection.socket];
     this.sendMessageToSockets(sockets, message);
+  }
+
+  private sendToConnectionsWithClientCapability(
+    capability: ClientCapability,
+    message: WSOutboundMessage,
+  ): void {
+    for (const connection of new Set(this.sessions.values())) {
+      if (connection.kind !== "trusted" || connection.clientCapabilities?.[capability] !== true) {
+        continue;
+      }
+      this.sendToConnection(connection, message);
+    }
   }
 
   private sendBinaryToConnection(connection: SessionConnection, frame: Uint8Array): void {
@@ -1226,6 +1277,12 @@ export class VoiceAssistantWebSocketServer {
         }
         this.sendBinaryToConnection(connection, frame);
       },
+      onBinaryMessageToSource: async (source, frame) => {
+        if (!connection || !connection.sockets.has(source as WebSocketLike)) {
+          throw new Error("File transfer source socket is no longer attached");
+        }
+        await this.sendBinaryToClientAndWait(source as WebSocketLike, frame);
+      },
       getTransportBufferedAmount: () => {
         if (!connection) {
           return null;
@@ -1271,6 +1328,7 @@ export class VoiceAssistantWebSocketServer {
       onMessage: options.onMessage,
       onMessageToSource: options.onMessageToSource,
       onBinaryMessage: options.onBinaryMessage,
+      onBinaryMessageToSource: options.onBinaryMessageToSource,
       getTransportBufferedAmount: options.getTransportBufferedAmount,
       onLifecycleIntent: options.onLifecycleIntent,
       logger: options.connectionLogger.child({ module: "session" }),
@@ -1287,6 +1345,7 @@ export class VoiceAssistantWebSocketServer {
       worktreesRoot: this.worktreesRoot,
       agentManager: this.agentManager,
       agentStorage: this.agentStorage,
+      agentMessageQueue: this.agentMessageQueue,
       projectRegistry: this.projectRegistry,
       workspaceRegistry: this.workspaceRegistry,
       chatService: this.chatService,
@@ -1501,16 +1560,18 @@ export class VoiceAssistantWebSocketServer {
         projectRemove: true,
         // COMPAT(projectAdd): added in v0.1.97, drop the gate when floor >= v0.1.97.
         projectAdd: true,
+        // COMPAT(projectList): added in v0.2.4, drop the gate when floor >= v0.2.4.
+        projectList: true,
         // COMPAT(worktreeRestore): keep through 2027-01-11 for clients older than v0.1.105.
         worktreeRestore: true,
         // COMPAT(workspaceRecovery): added in v0.1.105, remove after 2027-01-11 once daemon floor >= v0.1.105.
         workspaceRecovery: true,
-        // COMPAT(workspaceFileEditing): added in v0.2.0, remove after 2027-01-18 once daemon floor >= v0.2.0.
-        workspaceFileEditing: true,
         // COMPAT(providerUsageList): added in v0.1.98, drop the gate when daemon floor >= v0.1.98.
         providerUsageList: true,
         // COMPAT(agentDetach): added in v0.1.98, remove gate after 2026-12-19 once daemon floor >= v0.1.98.
         agentDetach: true,
+        // COMPAT(agentThinkingUpdate): added in v0.2.4, remove gate after 2027-01-28.
+        agentThinkingUpdate: true,
         // COMPAT(daemonDiagnostics): added in v0.1.100, remove gate after 2026-12-25 once daemon floor >= v0.1.100.
         daemonDiagnostics: true,
         // COMPAT(daemonSelfUpdate): added in v0.1.93, remove gate after 2026-12-13.
@@ -1545,6 +1606,8 @@ export class VoiceAssistantWebSocketServer {
         selectiveAgentTimeline: true,
         // COMPAT(stableProjectIdentity): added in v0.1.109, remove gate after 2027-01-15.
         stableProjectIdentity: true,
+        // COMPAT(agentMessageQueue): added in v0.2.0, remove gate after 2027-01-20.
+        agentMessageQueue: true,
         // COMPAT(workspaceScriptManagement): added in v0.1.105, remove gate after 2027-01-10.
         workspaceScriptManagement: true,
       },
@@ -1577,6 +1640,16 @@ export class VoiceAssistantWebSocketServer {
 
   private broadcastDaemonConfigChanged(config: MutableDaemonConfig): void {
     this.broadcast(this.createDaemonConfigChangedMessage(config));
+  }
+
+  private broadcastAgentMessageQueueUpdated(queue: QueuedAgentMessageQueuePayload): void {
+    this.sendToConnectionsWithClientCapability(
+      CLIENT_CAPS.agentMessageQueueEvents,
+      wrapSessionMessage({
+        type: "queue.agent_message.updated",
+        payload: queue,
+      }),
+    );
   }
 
   private bindSocketHandlers(ws: WebSocketLike): void {

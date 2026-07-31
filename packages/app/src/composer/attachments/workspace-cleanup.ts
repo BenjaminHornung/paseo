@@ -41,16 +41,19 @@ export function getAttachmentKey(attachment: WorkspaceComposerAttachment): strin
   });
 }
 
-export function removeWorkspaceAttachmentsMatching(selectedKey: string): void {
+export function removeWorkspaceAttachmentsMatching(selectedKey: string): boolean {
   const { attachmentsByScope, setWorkspaceAttachments } = useWorkspaceAttachmentsStore.getState();
+  let removed = false;
   for (const [scopeKey, attachments] of Object.entries(attachmentsByScope)) {
     const nextAttachments = attachments.filter(
       (attachment) => getAttachmentKey(attachment) !== selectedKey,
     );
     if (nextAttachments.length !== attachments.length) {
+      removed = true;
       setWorkspaceAttachments({ scopeKey, attachments: nextAttachments });
     }
   }
+  return removed;
 }
 
 function isSentContextAttachment(

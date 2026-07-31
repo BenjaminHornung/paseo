@@ -103,7 +103,7 @@ export const OmpModelSchema = z
     name: z.string().optional(),
     reasoning: z.boolean().optional(),
     thinking: OmpModelThinkingSchema.optional(),
-    contextWindow: z.number().optional(),
+    contextWindow: z.number().nullable().optional(),
     maxTokens: z.number().nullable().optional(),
     api: z.string().optional(),
     baseUrl: z.string().optional(),
@@ -178,6 +178,7 @@ export const OmpRpcHostToolDefinitionSchema = z
     name: z.string(),
     label: z.string().optional(),
     description: z.string(),
+    loadMode: z.enum(["essential", "discoverable"]).optional(),
     parameters: z.record(z.string(), z.unknown()),
     hidden: z.boolean().optional(),
   })
@@ -531,6 +532,7 @@ export const OmpRpcCommandSchema = z.discriminatedUnion("type", [
     type: z.literal("set_subagent_subscription"),
     level: OmpSubagentSubscriptionLevelSchema,
   }),
+  z.object({ ...OmpCommandBase, type: z.literal("get_subagents") }),
   z.object({
     ...OmpCommandBase,
     type: z.literal("set_host_tools"),
@@ -561,6 +563,24 @@ export const OmpCommandsResultSchema = z
 export const OmpHostToolsResultSchema = z
   .object({ toolNames: z.array(z.string()).optional() })
   .passthrough();
+export const OmpSubagentSnapshotSchema = z
+  .object({
+    id: z.string(),
+    index: z.number().int().nonnegative().optional(),
+    agent: z.string(),
+    description: z.string().optional(),
+    status: OmpSubagentStatusSchema,
+    task: z.string().optional(),
+    assignment: z.string().optional(),
+    sessionFile: z.string().optional(),
+    parentToolCallId: z.string().optional(),
+    detached: z.boolean().optional(),
+    lastUpdate: z.number().optional(),
+  })
+  .passthrough();
+export const OmpSubagentsResultSchema = z
+  .object({ subagents: z.array(OmpSubagentSnapshotSchema).optional() })
+  .passthrough();
 export const OmpBranchResultSchema = z
   .object({ text: z.string().optional(), cancelled: z.boolean().optional() })
   .passthrough();
@@ -589,6 +609,7 @@ export type OmpRpcHostToolUpdate = z.infer<typeof OmpRpcHostToolUpdateSchema>;
 export type OmpRpcHostToolResult = z.infer<typeof OmpRpcHostToolResultSchema>;
 export type OmpSubagentSubscriptionLevel = z.infer<typeof OmpSubagentSubscriptionLevelSchema>;
 export type OmpSubagentStatus = z.infer<typeof OmpSubagentStatusSchema>;
+export type OmpSubagentSnapshot = z.infer<typeof OmpSubagentSnapshotSchema>;
 export type OmpSubagentLifecyclePayload = z.infer<typeof OmpSubagentLifecyclePayloadSchema>;
 export type OmpSubagentProgressPayload = z.infer<typeof OmpSubagentProgressPayloadSchema>;
 export type OmpSubagentEventPayload = z.infer<typeof OmpSubagentEventPayloadSchema>;
@@ -611,19 +632,6 @@ export type OmpAvailableCommand = z.infer<typeof OmpAvailableCommandSchema>;
 export type OmpAvailableCommandsUpdateEvent = z.infer<typeof OmpAvailableCommandsUpdateEventSchema>;
 export type OmpRpcCommand = z.infer<typeof OmpRpcCommandSchema>;
 export type OmpPromptAck = z.infer<typeof OmpPromptAckSchema> & { requestId?: string };
-
-export interface OmpSubagentSnapshot {
-  id: string;
-  index: number;
-  agent: string;
-  description?: string;
-  status: OmpSubagentStatus;
-  task?: string;
-  assignment?: string;
-  sessionFile?: string;
-  parentToolCallId?: string;
-  lastUpdate?: number;
-}
 
 export interface OmpSubagentMessagesResult {
   sessionFile: string;

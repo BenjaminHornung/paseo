@@ -20,6 +20,8 @@ const INLINE_LINE_FRAGMENT = /^L([0-9]+)(?:C[0-9]+)?(?:-L?([0-9]+)(?:C[0-9]+)?)?
 const INLINE_COLON_LINE_SUFFIX = /^(.+?):([0-9]+)(?::[0-9]+)?(?:-([0-9]+)(?::[0-9]+)?)?$/;
 const INLINE_PAREN_LINE_SUFFIX = /^(.+?)\(([0-9]+)(?:,[0-9]+)?(?:-([0-9]+)(?:,[0-9]+)?)?\)$/;
 const INLINE_WORD_LINE_SUFFIX = /^(.+?)\s+lines?\s+([0-9]+)(?:-([0-9]+))?$/i;
+const URI_SCHEME_PREFIX = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+const WINDOWS_DRIVE_PATH_PREFIX = /^[A-Za-z]:[\\/]/;
 const ASSISTANT_FILE_EXTENSIONS = new Set([
   "astro",
   "bash",
@@ -198,6 +200,15 @@ export function parseInlinePathToken(value: string): InlinePathTarget | null {
     lineStart,
     lineEnd,
   };
+}
+
+export function parseToolCallFilePathTarget(value: string): InlinePathTarget {
+  const parsedTarget = parseInlinePathToken(value);
+  const path = parsedTarget?.path ?? value.trim();
+  if (URI_SCHEME_PREFIX.test(path) && !WINDOWS_DRIVE_PATH_PREFIX.test(path)) {
+    return { raw: value, path: value };
+  }
+  return parsedTarget ?? { raw: value, path: value };
 }
 
 export function parseFileProtocolUrl(value: string): InlinePathTarget | null {

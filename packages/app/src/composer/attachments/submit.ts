@@ -55,6 +55,11 @@ export function splitComposerAttachmentsForSubmit(
       continue;
     }
 
+    if (attachment.kind === "agent_attachment") {
+      agentAttachments.push(attachment.attachment);
+      continue;
+    }
+
     if (isWorkspaceAttachment(attachment)) {
       if (attachment.kind === "browser_element" && attachment.attachment.screenshot) {
         images.push(attachment.attachment.screenshot);

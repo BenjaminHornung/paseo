@@ -21,10 +21,12 @@ import {
 import { isSessionRpcAllowed, Session } from "./session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import { StructuredAgentFallbackError } from "./agent/agent-response-loop.js";
+import { AgentRunStartTimeoutError } from "./agent/agent-prompt.js";
 import type { StoredAgentRecord } from "./agent/agent-storage.js";
-import type { AgentManagerEvent } from "./agent/agent-manager.js";
+import type { AgentManagerEvent, ManagedAgent } from "./agent/agent-manager.js";
 import type { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
 import { createPersistedProjectRecord } from "./workspace-registry.js";
+import { deriveProjectKey } from "./project-key.js";
 import type { SessionOptions } from "./session.js";
 import type { SessionInboundMessage, SessionOutboundMessage } from "./messages.js";
 import {
@@ -52,7 +54,121 @@ import {
 import type { CheckDetails, ForgeService } from "../services/forge-service.js";
 import type { GitHubPullRequestStatusFacts } from "../services/github-facts.js";
 
+vi.mock("@isaacs/ttlcache", () => {
+  class TestTTLCache<K, V> {
+    private readonly storage = new Map<K, V>();
+
+    clear(): void {
+      this.storage.clear();
+    }
+
+    cancelTimer(): void {}
+
+    delete(key: K): boolean {
+      return this.storage.delete(key);
+    }
+
+    get(key: K): V | undefined {
+      return this.storage.get(key);
+    }
+
+    has(key: K): boolean {
+      return this.storage.has(key);
+    }
+
+    set(key: K, value: V): this {
+      this.storage.set(key, value);
+      return this;
+    }
+  }
+
+  return { TTLCache: TestTTLCache };
+});
+
+const providerClientStubs = vi.hoisted(() => ({
+  create(provider: string) {
+    return class ProviderClientStub {
+      readonly capabilities = {
+        supportsStreaming: true,
+        supportsSessionPersistence: true,
+        supportsDynamicModes: true,
+        supportsMcpServers: true,
+        supportsReasoningStream: true,
+        supportsToolInvocations: true,
+      };
+      readonly provider = provider;
+
+      async createSession(): Promise<never> {
+        throw new Error("not implemented");
+      }
+
+      async resumeSession(): Promise<never> {
+        throw new Error("not implemented");
+      }
+
+      async fetchCatalog() {
+        return { models: [], modes: [] };
+      }
+
+      async isAvailable(): Promise<boolean> {
+        return true;
+      }
+    };
+  },
+}));
+
+vi.mock("./agent/providers/claude/agent.js", () => ({
+  ClaudeAgentClient: providerClientStubs.create("claude"),
+}));
+
+vi.mock("./agent/providers/codex-app-server-agent.js", () => ({
+  CodexAppServerAgentClient: providerClientStubs.create("codex"),
+}));
+
+vi.mock("./agent/providers/copilot-acp-agent.js", () => ({
+  CopilotACPAgentClient: providerClientStubs.create("copilot"),
+}));
+
+vi.mock("./agent/providers/cursor-acp-agent.js", () => ({
+  CursorACPAgentClient: providerClientStubs.create("cursor"),
+}));
+
+vi.mock("./agent/providers/generic-acp-agent.js", () => ({
+  GenericACPAgentClient: providerClientStubs.create("acp"),
+}));
+
+vi.mock("./agent/providers/kiro-acp-agent.js", () => ({
+  KiroACPAgentClient: providerClientStubs.create("kiro"),
+}));
+
+vi.mock("./agent/providers/opencode-agent.js", () => ({
+  OpenCodeAgentClient: providerClientStubs.create("opencode"),
+}));
+
+vi.mock("./agent/providers/omp/agent.js", () => ({
+  OmpAgentClient: providerClientStubs.create("omp"),
+}));
+
+vi.mock("./agent/providers/pi/agent.js", () => ({
+  PiRpcAgentClient: providerClientStubs.create("pi"),
+}));
+
+vi.mock("./agent/providers/trae-acp-agent.js", () => ({
+  TraeACPAgentClient: providerClientStubs.create("trae"),
+}));
+
+vi.mock("./agent/providers/mock-load-test-agent.js", () => ({
+  MockLoadTestAgentClient: providerClientStubs.create("mock"),
+}));
+
+vi.mock("./agent/providers/mock-slow-provider.js", () => ({
+  MockSlowProviderClient: providerClientStubs.create("mock-slow"),
+}));
+
 interface SessionHandlerInternals {
+  agentUpdates: {
+    removeAgent(agentId: string): void;
+  };
   interruptAgentIfRunning(agentId: string): Promise<void>;
   handleSendAgentMessage(
     agentId: string,
@@ -99,6 +215,8 @@ function createBinaryMessageHandler(
     binaryMessages.push(frame);
   };
 }
+
+async function* emptyAgentStream(): AsyncGenerator<never> {}
 
 test("interruptAgentIfRunning rejects when graceful cancellation is refused", async () => {
   const agentId = "11111111-1111-4111-8111-111111111111";
@@ -177,6 +295,286 @@ test("legacy cancel_agent_request reports refusal through the activity log", asy
       },
     },
   ]);
+});
+
+test("send_agent_message_request commits replay admission only after confirmed provider start", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const waitForStart = deferred<void>();
+  const commitAdmission = vi.fn(async () => undefined);
+  const releaseAdmission = vi.fn(async () => undefined);
+  const settlePendingAdmission = vi.fn();
+  const streamAgent = vi.fn(async function* () {
+    yield* [];
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      listAgents: vi.fn(() => [{ id: "agent-1" }]),
+      getAgent: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      touchAgentActivity: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      admitRecordedUserMessage: vi.fn(async () => ({
+        disposition: "new",
+        messageId: "msg-1",
+        fingerprint: "fp-1",
+      })),
+      commitRecordedUserMessageAdmissionForAgent: commitAdmission,
+      releaseRecordedUserMessageAdmissionForAgent: releaseAdmission,
+      settleRecordedUserMessageAdmissionPendingForAgent: settlePendingAdmission,
+      tryRunOutOfBand: vi.fn(() => null),
+      hasInFlightRun: vi.fn(() => false),
+      streamAgent,
+      waitForAgentRunStart: vi.fn(() => waitForStart.promise),
+    },
+    agentStorage: {
+      list: vi.fn().mockResolvedValue([{ id: "agent-1", internal: false }]),
+    },
+  });
+
+  const pending = session.handleMessage({
+    type: "send_agent_message_request",
+    requestId: "send-commit-after-start",
+    agentId: "agent-1",
+    text: "ship it",
+    messageId: "  msg-1  ",
+  });
+
+  await expect.poll(() => streamAgent.mock.calls.length).toBe(1);
+  expect(streamAgent).toHaveBeenCalledWith("agent-1", "ship it", {
+    messageId: "msg-1",
+  });
+  expect(commitAdmission).not.toHaveBeenCalled();
+
+  waitForStart.resolve();
+  await pending;
+
+  expect(commitAdmission).toHaveBeenCalledTimes(1);
+  expect(releaseAdmission).not.toHaveBeenCalled();
+  expect(settlePendingAdmission).not.toHaveBeenCalled();
+  expect(messages).toContainEqual({
+    type: "send_agent_message_response",
+    payload: {
+      requestId: "send-commit-after-start",
+      agentId: "agent-1",
+      accepted: true,
+      error: null,
+    },
+  });
+});
+
+test("send_agent_message_request omits a whitespace-only replay id from provider dispatch", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const streamAgent = vi.fn(async function* () {
+    yield* [];
+  });
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      listAgents: vi.fn(() => [{ id: "agent-1" }]),
+      getAgent: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      touchAgentActivity: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      admitRecordedUserMessage: vi.fn(async () => ({
+        disposition: "new",
+        messageId: undefined,
+        fingerprint: "fp-no-id",
+      })),
+      commitRecordedUserMessageAdmissionForAgent: vi.fn(async () => undefined),
+      releaseRecordedUserMessageAdmissionForAgent: vi.fn(async () => undefined),
+      settleRecordedUserMessageAdmissionPendingForAgent: vi.fn(),
+      tryRunOutOfBand: vi.fn(() => null),
+      hasInFlightRun: vi.fn(() => false),
+      streamAgent,
+      waitForAgentRunStart: vi.fn(async () => undefined),
+    },
+    agentStorage: {
+      list: vi.fn().mockResolvedValue([{ id: "agent-1", internal: false }]),
+    },
+  });
+
+  await session.handleMessage({
+    type: "send_agent_message_request",
+    requestId: "send-whitespace-id",
+    agentId: "agent-1",
+    text: "ship it",
+    messageId: "   ",
+  });
+
+  expect(streamAgent).toHaveBeenCalledWith("agent-1", "ship it", undefined);
+});
+
+test("send_agent_message_request releases replay admission on definitive pre-start failure", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const commitAdmission = vi.fn(async () => undefined);
+  const releaseAdmission = vi.fn(async () => undefined);
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      listAgents: vi.fn(() => [{ id: "agent-1" }]),
+      getAgent: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      touchAgentActivity: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      admitRecordedUserMessage: vi.fn(async () => ({
+        disposition: "new",
+        messageId: "msg-1",
+        fingerprint: "fp-1",
+      })),
+      commitRecordedUserMessageAdmissionForAgent: commitAdmission,
+      releaseRecordedUserMessageAdmissionForAgent: releaseAdmission,
+      settleRecordedUserMessageAdmissionPendingForAgent: vi.fn(),
+      tryRunOutOfBand: vi.fn(() => null),
+      hasInFlightRun: vi.fn(() => false),
+      streamAgent: vi.fn(async function* () {
+        yield* [];
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }),
+      waitForAgentRunStart: vi.fn(async () => {
+        throw new Error("provider rejected start");
+      }),
+    },
+    agentStorage: {
+      list: vi.fn().mockResolvedValue([{ id: "agent-1", internal: false }]),
+    },
+  });
+
+  await session.handleMessage({
+    type: "send_agent_message_request",
+    requestId: "send-start-reject",
+    agentId: "agent-1",
+    text: "ship it",
+    messageId: "msg-1",
+  });
+
+  expect(commitAdmission).not.toHaveBeenCalled();
+  expect(releaseAdmission).toHaveBeenCalledWith(
+    "agent-1",
+    expect.objectContaining({ disposition: "new", messageId: "msg-1" }),
+    "provider rejected start",
+  );
+  expect(messages).toContainEqual({
+    type: "send_agent_message_response",
+    payload: {
+      requestId: "send-start-reject",
+      agentId: "agent-1",
+      accepted: false,
+      error: "provider rejected start",
+    },
+  });
+});
+
+test("send_agent_message_request keeps durable pending but settles in-memory replay flight on start timeout", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const commitAdmission = vi.fn(async () => undefined);
+  const releaseAdmission = vi.fn(async () => undefined);
+  const settlePendingAdmission = vi.fn();
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      listAgents: vi.fn(() => [{ id: "agent-1" }]),
+      getAgent: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      touchAgentActivity: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      admitRecordedUserMessage: vi.fn(async () => ({
+        disposition: "new",
+        messageId: "msg-1",
+        fingerprint: "fp-1",
+      })),
+      commitRecordedUserMessageAdmissionForAgent: commitAdmission,
+      releaseRecordedUserMessageAdmissionForAgent: releaseAdmission,
+      settleRecordedUserMessageAdmissionPendingForAgent: settlePendingAdmission,
+      tryRunOutOfBand: vi.fn(() => null),
+      hasInFlightRun: vi.fn(() => false),
+      streamAgent: vi.fn(async function* () {
+        yield* [];
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }),
+      waitForAgentRunStart: vi.fn(async () => {
+        throw new AgentRunStartTimeoutError();
+      }),
+    },
+    agentStorage: {
+      list: vi.fn().mockResolvedValue([{ id: "agent-1", internal: false }]),
+    },
+  });
+
+  await session.handleMessage({
+    type: "send_agent_message_request",
+    requestId: "send-start-timeout",
+    agentId: "agent-1",
+    text: "ship it",
+    messageId: "msg-1",
+  });
+
+  expect(commitAdmission).not.toHaveBeenCalled();
+  expect(releaseAdmission).not.toHaveBeenCalled();
+  expect(settlePendingAdmission).toHaveBeenCalledWith(
+    "agent-1",
+    expect.objectContaining({ disposition: "new", messageId: "msg-1" }),
+    "Provider start timed out; delivery outcome is unknown",
+  );
+  expect(messages).toContainEqual({
+    type: "send_agent_message_response",
+    payload: {
+      requestId: "send-start-timeout",
+      agentId: "agent-1",
+      accepted: false,
+      error: "Provider start timed out; delivery outcome is unknown",
+    },
+  });
+});
+
+test("send_agent_message_request commits replay admission immediately for out-of-band acceptance", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const commitAdmission = vi.fn(async () => undefined);
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      listAgents: vi.fn(() => [{ id: "agent-1" }]),
+      getAgent: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      touchAgentActivity: vi.fn(() => ({ id: "agent-1", provider: "codex", lifecycle: "idle" })),
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      admitRecordedUserMessage: vi.fn(async () => ({
+        disposition: "new",
+        messageId: "goal-msg-1",
+        fingerprint: "fp-goal-1",
+      })),
+      commitRecordedUserMessageAdmissionForAgent: commitAdmission,
+      releaseRecordedUserMessageAdmissionForAgent: vi.fn(async () => undefined),
+      settleRecordedUserMessageAdmissionPendingForAgent: vi.fn(),
+      tryRunOutOfBand: vi.fn(() => ({
+        run: async () => undefined,
+      })),
+      hasInFlightRun: vi.fn(() => false),
+      streamAgent: vi.fn(async function* () {
+        yield* [];
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }),
+      waitForAgentRunStart: vi.fn(async () => undefined),
+    },
+    agentStorage: {
+      list: vi.fn().mockResolvedValue([{ id: "agent-1", internal: false }]),
+    },
+  });
+
+  await session.handleMessage({
+    type: "send_agent_message_request",
+    requestId: "send-goal-pause",
+    agentId: "agent-1",
+    text: "/goal pause",
+    messageId: "goal-msg-1",
+  });
+
+  expect(commitAdmission).toHaveBeenCalledTimes(1);
+  expect(messages).toContainEqual({
+    type: "send_agent_message_response",
+    payload: {
+      requestId: "send-goal-pause",
+      agentId: "agent-1",
+      accepted: true,
+      error: null,
+    },
+  });
 });
 
 const checkoutGitMocks = vi.hoisted(() => ({
@@ -281,6 +679,7 @@ interface SessionForTestOptions {
   scopes?: readonly string[];
   agentManager?: { [K in keyof SessionOptions["agentManager"]]?: unknown };
   agentStorage?: { [K in keyof SessionOptions["agentStorage"]]?: unknown };
+  agentMessageQueue?: SessionOptions["agentMessageQueue"];
   github?: Partial<ForgeService & GitHubService>;
   checkoutDiffManager?: { scheduleRefreshForCwd: ReturnType<typeof vi.fn> };
   workspaceGitService?: {
@@ -374,6 +773,7 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
       list: vi.fn().mockResolvedValue([]),
       ...options.agentStorage,
     }),
+    ...(options.agentMessageQueue ? { agentMessageQueue: options.agentMessageQueue } : {}),
     projectRegistry: {
       list: vi.fn().mockResolvedValue([]),
       get: vi.fn(),
@@ -419,6 +819,368 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
   };
   return new Session(sessionOptions);
 }
+
+test("delete_agent_request fails closed on queue persistence failure and retries queue-first", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const durableOrder: string[] = [];
+  const queueMessages = ["queued-1"];
+  let queueRevision: number | undefined = 1;
+  let clearAttempts = 0;
+  let timelineRemoved = false;
+
+  const clearAgent = vi.fn(async (_agentId: string, options?: { dropRevision?: boolean }) => {
+    durableOrder.push("queue");
+    expect(options).toEqual({ dropRevision: true });
+    expect(messages.some((message) => message.type === "agent_deleted")).toBe(false);
+    clearAttempts++;
+    if (clearAttempts === 1) {
+      throw new Error("queue persist failed");
+    }
+    queueMessages.splice(0);
+    queueRevision = undefined;
+  });
+  const remove = vi.fn(async () => {
+    durableOrder.push("record");
+    expect(queueMessages).toEqual([]);
+    expect(queueRevision).toBeUndefined();
+    expect(timelineRemoved).toBe(true);
+    expect(messages.some((message) => message.type === "agent_deleted")).toBe(false);
+  });
+  const deleteAgentState = vi.fn(async () => {
+    durableOrder.push("timeline");
+    expect(messages.some((message) => message.type === "agent_deleted")).toBe(false);
+    timelineRemoved = true;
+  });
+  const session = createSessionForTest({
+    messages,
+    agentMessageQueue: {
+      enqueue: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+      dispatchNow: vi.fn(),
+      clearAgent,
+    },
+    agentManager: {
+      getAgent: vi.fn(() => ({ id: "agent-1", workspaceId: "workspace-1" })),
+      closeAgent: vi.fn(async () => undefined),
+      flush: vi.fn(async () => undefined),
+      deleteAgentState,
+    },
+    agentStorage: {
+      beginDelete: vi.fn(),
+      get: vi.fn().mockResolvedValue({ id: "agent-1", workspaceId: "workspace-1" }),
+      remove,
+    },
+  });
+  const removeProjection = vi.spyOn(asSessionInternals(session).agentUpdates, "removeAgent");
+  const workspaceProjection = vi.spyOn(session, "emitWorkspaceUpdateForWorkspaceId");
+
+  await session.handleMessage({
+    type: "delete_agent_request",
+    agentId: "agent-1",
+    requestId: "delete-first",
+  });
+
+  expect(queueMessages).toEqual(["queued-1"]);
+  expect(queueRevision).toBe(1);
+  expect(messages).toContainEqual({
+    type: "rpc_error",
+    payload: {
+      requestId: "delete-first",
+      requestType: "delete_agent_request",
+      error: "Request failed: queue persist failed",
+      code: "handler_error",
+    },
+  });
+  expect(messages.filter((message) => message.type === "agent_deleted")).toEqual([]);
+  expect(remove).not.toHaveBeenCalled();
+  expect(deleteAgentState).not.toHaveBeenCalled();
+  expect(removeProjection).not.toHaveBeenCalled();
+  expect(workspaceProjection).not.toHaveBeenCalled();
+
+  await session.handleMessage({
+    type: "delete_agent_request",
+    agentId: "agent-1",
+    requestId: "delete-retry",
+  });
+
+  expect(durableOrder).toEqual(["queue", "queue", "timeline", "record"]);
+  expect(queueMessages).toEqual([]);
+  expect(queueRevision).toBeUndefined();
+  expect(messages.filter((message) => message.type === "agent_deleted")).toEqual([
+    {
+      type: "agent_deleted",
+      payload: { agentId: "agent-1", requestId: "delete-retry" },
+    },
+  ]);
+  expect(removeProjection).toHaveBeenCalledOnce();
+  expect(removeProjection).toHaveBeenCalledWith("agent-1");
+  expect(workspaceProjection).toHaveBeenCalledOnce();
+  expect(workspaceProjection).toHaveBeenCalledWith("workspace-1");
+});
+
+test("delete_agent_request retains the record when timeline cleanup fails and retries safely", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const durableOrder: string[] = [];
+  let timelineAttempts = 0;
+  let recordPresent = true;
+  const clearAgent = vi.fn(async () => {
+    durableOrder.push("queue");
+  });
+  const deleteAgentState = vi.fn(async () => {
+    durableOrder.push("timeline");
+    timelineAttempts++;
+    if (timelineAttempts === 1) {
+      throw new Error("timeline delete failed");
+    }
+  });
+  const remove = vi.fn(async () => {
+    durableOrder.push("record");
+    recordPresent = false;
+  });
+  const session = createSessionForTest({
+    messages,
+    agentMessageQueue: {
+      enqueue: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+      dispatchNow: vi.fn(),
+      clearAgent,
+    },
+    agentManager: {
+      getAgent: vi.fn(() => undefined),
+      closeAgent: vi.fn(async () => undefined),
+      flush: vi.fn(async () => undefined),
+      deleteAgentState,
+    },
+    agentStorage: {
+      beginDelete: vi.fn(),
+      get: vi.fn(async () =>
+        recordPresent ? { id: "agent-1", workspaceId: "workspace-1" } : undefined,
+      ),
+      remove,
+    },
+  });
+  const removeProjection = vi.spyOn(asSessionInternals(session).agentUpdates, "removeAgent");
+  const workspaceProjection = vi.spyOn(session, "emitWorkspaceUpdateForWorkspaceId");
+
+  await session.handleMessage({
+    type: "delete_agent_request",
+    agentId: "agent-1",
+    requestId: "delete-first",
+  });
+
+  expect(recordPresent).toBe(true);
+  expect(remove).not.toHaveBeenCalled();
+  expect(messages).toContainEqual({
+    type: "rpc_error",
+    payload: {
+      requestId: "delete-first",
+      requestType: "delete_agent_request",
+      error: "Request failed: timeline delete failed",
+      code: "handler_error",
+    },
+  });
+  expect(messages.some((message) => message.type === "agent_deleted")).toBe(false);
+  expect(removeProjection).not.toHaveBeenCalled();
+  expect(workspaceProjection).not.toHaveBeenCalled();
+
+  await session.handleMessage({
+    type: "delete_agent_request",
+    agentId: "agent-1",
+    requestId: "delete-retry",
+  });
+
+  expect(durableOrder).toEqual(["queue", "timeline", "queue", "timeline", "record"]);
+  expect(messages.filter((message) => message.type === "agent_deleted")).toEqual([
+    {
+      type: "agent_deleted",
+      payload: { agentId: "agent-1", requestId: "delete-retry" },
+    },
+  ]);
+  expect(removeProjection).toHaveBeenCalledOnce();
+  expect(workspaceProjection).toHaveBeenCalledOnce();
+  expect(workspaceProjection).toHaveBeenCalledWith("workspace-1");
+});
+
+test("delete_agent_request repeats idempotent cleanup when record removal fails", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const order: string[] = [];
+  let removeAttempts = 0;
+  let recordPresent = true;
+  const session = createSessionForTest({
+    messages,
+    agentMessageQueue: {
+      enqueue: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+      dispatchNow: vi.fn(),
+      clearAgent: vi.fn(async () => {
+        order.push("queue");
+      }),
+    },
+    agentManager: {
+      getAgent: vi.fn(() => undefined),
+      closeAgent: vi.fn(async () => undefined),
+      flush: vi.fn(async () => undefined),
+      deleteAgentState: vi.fn(async () => {
+        order.push("timeline");
+      }),
+    },
+    agentStorage: {
+      beginDelete: vi.fn(),
+      get: vi.fn(async () =>
+        recordPresent ? { id: "agent-1", workspaceId: "workspace-1" } : undefined,
+      ),
+      remove: vi.fn(async () => {
+        order.push("record");
+        removeAttempts++;
+        if (removeAttempts === 1) {
+          throw new Error("record unlink failed");
+        }
+        recordPresent = false;
+      }),
+    },
+  });
+  const removeProjection = vi.spyOn(asSessionInternals(session).agentUpdates, "removeAgent");
+  const workspaceProjection = vi.spyOn(session, "emitWorkspaceUpdateForWorkspaceId");
+
+  await session.handleMessage({
+    type: "delete_agent_request",
+    agentId: "agent-1",
+    requestId: "delete-first",
+  });
+
+  expect(recordPresent).toBe(true);
+  expect(messages).toContainEqual({
+    type: "rpc_error",
+    payload: {
+      requestId: "delete-first",
+      requestType: "delete_agent_request",
+      error: "Request failed: record unlink failed",
+      code: "handler_error",
+    },
+  });
+  expect(messages.some((message) => message.type === "agent_deleted")).toBe(false);
+  expect(removeProjection).not.toHaveBeenCalled();
+  expect(workspaceProjection).not.toHaveBeenCalled();
+
+  await session.handleMessage({
+    type: "delete_agent_request",
+    agentId: "agent-1",
+    requestId: "delete-retry",
+  });
+
+  expect(order).toEqual(["queue", "timeline", "record", "queue", "timeline", "record"]);
+  expect(messages.filter((message) => message.type === "agent_deleted")).toEqual([
+    {
+      type: "agent_deleted",
+      payload: { agentId: "agent-1", requestId: "delete-retry" },
+    },
+  ]);
+  expect(removeProjection).toHaveBeenCalledOnce();
+  expect(workspaceProjection).toHaveBeenCalledOnce();
+  expect(workspaceProjection).toHaveBeenCalledWith("workspace-1");
+});
+
+describe("agent create failure outcome", () => {
+  test("marks a failure before agent registration as definitively uncreated", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const cwd = process.cwd();
+    const providerSnapshot = createProviderSnapshotManagerStub();
+    providerSnapshot.resolveCreateConfig.mockRejectedValue(new Error("mode rejected"));
+    const session = createSessionForTest({
+      messages,
+      providerSnapshotManager: providerSnapshot.manager,
+      workspaceRegistry: {
+        get: vi.fn(async () => ({ workspaceId: "workspace-1", cwd, archivedAt: null })),
+      },
+    });
+
+    await session.handleMessage({
+      type: "create_agent_request",
+      requestId: "create-before-registration",
+      config: { provider: "codex", cwd, modeId: "invalid" },
+      workspaceId: "workspace-1",
+      attachments: [],
+      labels: {},
+    });
+
+    expect(messages).toContainEqual({
+      type: "status",
+      payload: {
+        status: "agent_create_failed",
+        requestId: "create-before-registration",
+        error: "mode rejected",
+        errorCode: "unknown",
+        agentCreated: false,
+      },
+    });
+  });
+
+  test("leaves an initial-prompt failure unmarked after agent registration", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const cwd = process.cwd();
+    const snapshot = {
+      id: "agent-created-before-prompt-failure",
+      provider: "codex",
+      cwd,
+      runtimeInfo: null,
+    } as ManagedAgent;
+    const createAgent = vi.fn(
+      async (
+        _config: unknown,
+        _agentId: string | undefined,
+        options: { onRegistered?: (agentId: string) => void },
+      ) => {
+        options.onRegistered?.(snapshot.id);
+        return snapshot;
+      },
+    );
+    const session = createSessionForTest({
+      messages,
+      workspaceRegistry: {
+        get: vi.fn(async () => ({ workspaceId: "workspace-1", cwd, archivedAt: null })),
+      },
+      agentManager: {
+        createAgent,
+        getAgent: vi.fn(() => snapshot),
+        tryRunOutOfBand: vi.fn(() => false),
+        hasInFlightRun: vi.fn(() => false),
+        streamAgent: vi.fn(emptyAgentStream),
+        waitForAgentRunStart: vi.fn(async () => {
+          throw new Error("initial prompt failed to start");
+        }),
+      },
+    });
+
+    await session.handleMessage({
+      type: "create_agent_request",
+      requestId: "create-after-registration",
+      config: { provider: "codex", cwd },
+      workspaceId: "workspace-1",
+      initialPrompt: "start me",
+      attachments: [],
+      labels: {},
+    });
+
+    const failure = messages.find(
+      (message) =>
+        message.type === "status" &&
+        message.payload.status === "agent_create_failed" &&
+        message.payload.requestId === "create-after-registration",
+    );
+    expect(failure).toEqual({
+      type: "status",
+      payload: {
+        status: "agent_create_failed",
+        requestId: "create-after-registration",
+        error: "initial prompt failed to start",
+        errorCode: "unknown",
+      },
+    });
+  });
+});
 
 describe("session authorization scopes", () => {
   test("rejects an RPC outside an exact grant with the generic RPC error", async () => {
@@ -649,6 +1411,12 @@ describe("project command-center RPCs", () => {
         rootPath: directoryPath,
         kind: "non_git",
         displayName: "new-project",
+        projectKey: deriveProjectKey({
+          rootPath: directoryPath,
+          remoteUrl: null,
+          worktreeRoot: null,
+          mainRepoRoot: null,
+        }),
         timestamp: expect.any(String),
       });
       expect(messages).toEqual([
@@ -3416,7 +4184,7 @@ describe("session workspace descriptors", () => {
     const messages: unknown[] = [];
     const workspace = {
       workspaceId: "ws-gh",
-      projectId: "remote:github.com/acme/app",
+      projectId: "prj_app",
       cwd: "/repo/app",
       kind: "local_checkout" as const,
       displayName: "app",
@@ -3424,7 +4192,8 @@ describe("session workspace descriptors", () => {
       archivedAt: null,
     };
     const project = {
-      projectId: "remote:github.com/acme/app",
+      projectId: "prj_app",
+      projectKey: "remote:github.com/acme/app",
       rootPath: "/repo/app",
       kind: "git" as const,
       displayName: "acme/app",
@@ -3435,7 +4204,10 @@ describe("session workspace descriptors", () => {
     const session = createSessionForTest({
       messages,
       workspaceRegistry: { get: vi.fn(), list: vi.fn().mockResolvedValue([workspace]) },
-      projectRegistry: { list: vi.fn().mockResolvedValue([project]), get: vi.fn() },
+      projectRegistry: {
+        list: vi.fn().mockResolvedValue([project]),
+        get: vi.fn().mockResolvedValue(project),
+      },
       workspaceGitService: {
         getSnapshot: vi.fn(),
         peekSnapshot: vi.fn(() =>
@@ -3464,8 +4236,9 @@ describe("session workspace descriptors", () => {
         entries: [
           expect.objectContaining({
             id: "ws-gh",
+            projectId: "prj_app",
             project: expect.objectContaining({
-              projectKey: "remote:github.com/acme/app",
+              projectKey: "prj_app",
               projectName: "acme/app",
               workspaceName: "app",
               checkout: expect.objectContaining({
@@ -4900,13 +5673,60 @@ test("sends project updates only to capable sockets in a retained session", () =
   ]);
 });
 
+test("project.list returns every active project descriptor", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const active = createPersistedProjectRecord({
+    projectId: "project-active",
+    projectKey: "remote:github.com/acme/app",
+    rootPath: "/tmp/project-active",
+    kind: "git",
+    displayName: "acme/app",
+    createdAt: "2026-07-17T00:00:00.000Z",
+    updatedAt: "2026-07-17T00:00:00.000Z",
+  });
+  const archived = createPersistedProjectRecord({
+    projectId: "project-archived",
+    rootPath: "/tmp/project-archived",
+    kind: "non_git",
+    displayName: "archived",
+    createdAt: "2026-07-17T00:00:00.000Z",
+    updatedAt: "2026-07-17T00:00:00.000Z",
+    archivedAt: "2026-07-18T00:00:00.000Z",
+  });
+  const session = createSessionForTest({
+    messages,
+    projectRegistry: { list: vi.fn().mockResolvedValue([active, archived]) },
+  });
+
+  await session.handleMessage({ type: "project.list.request", requestId: "projects-1" });
+
+  expect(messages).toEqual([
+    {
+      type: "project.list.response",
+      payload: {
+        requestId: "projects-1",
+        projects: [
+          {
+            projectId: "project-active",
+            projectKey: "remote:github.com/acme/app",
+            projectDisplayName: "acme/app",
+            projectCustomName: null,
+            projectRootPath: "/tmp/project-active",
+            projectKind: "git",
+          },
+        ],
+      },
+    },
+  ]);
+});
+
 describe("agent config setters", () => {
   function liveAgentManager(overrides: { [K in keyof SessionOptions["agentManager"]]?: unknown }): {
     [K in keyof SessionOptions["agentManager"]]?: unknown;
   } {
     return {
       waitForAgentClose: vi.fn().mockResolvedValue(undefined),
-      touchAgentActivity: vi.fn(() => ({ id: "agent-1" })),
+      getAgent: vi.fn(() => ({ id: "agent-1" })),
       ...overrides,
     };
   }

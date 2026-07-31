@@ -209,6 +209,7 @@ const CODEX_APP_SERVER_CAPABILITIES: AgentCapabilityFlags = {
   supportsRewindConversation: true,
   supportsRewindFiles: false,
   supportsRewindBoth: false,
+  supportsSteering: true,
 };
 
 const CODEX_MODES: AgentMode[] = [
@@ -963,8 +964,8 @@ function buildPlanPermissionActions(options?: {
 }): AgentPermissionAction[] {
   const actions: AgentPermissionAction[] = [
     {
-      id: "reject",
-      label: "Reject",
+      id: "dismiss",
+      label: "Dismiss",
       behavior: "deny",
       variant: "danger",
       intent: "dismiss",
@@ -1068,6 +1069,22 @@ export function normalizeCodexQuestionPrompts(raw: unknown): CodexQuestionPrompt
     });
   }
   return questions;
+}
+
+function formatCodexSkillWarningMessage(warnings: string[]): string {
+  const normalized = warnings
+    .map((warning) => warning.trim())
+    .filter((warning) => warning.length > 0);
+  if (normalized.length === 0) {
+    return "";
+  }
+  const count = normalized.length;
+  const noun = count === 1 ? "skill" : "skills";
+  const fileNoun = count === 1 ? "file" : "files";
+  return [
+    `Skipped loading ${count} ${noun} due to invalid SKILL.md ${fileNoun}.`,
+    ...normalized,
+  ].join("\n");
 }
 
 export function formatCodexQuestionPrompts(questions: CodexQuestionPrompt[]): string {
@@ -1577,10 +1594,12 @@ function mapCodexThreadUserMessageItem(
   }
   const text = extractUserText(normalizedItem.content) ?? "";
   const messageId = nonEmptyString(normalizedItem.id);
+  const clientMessageId = nonEmptyString(normalizedItem.clientId);
   return {
     type: "user_message",
     text,
     ...(messageId ? { messageId } : {}),
+    ...(clientMessageId ? { clientMessageId } : {}),
   };
 }
 
@@ -1865,6 +1884,44 @@ const CodexThreadReadResponseSchema = z
 type CodexThreadReadResponse = z.infer<typeof CodexThreadReadResponseSchema>;
 type CodexThreadReadRequest = (threadId: string) => Promise<unknown>;
 
+const CodexThreadStatusValueSchema = z.union([
+  z.string(),
+  z
+    .object({
+      type: z.string(),
+    })
+    .passthrough(),
+]);
+
+const StrictCodexIdleThreadReadResponseSchema = z
+  .object({
+    thread: z
+      .object({
+        id: z.string(),
+        status: CodexThreadStatusValueSchema,
+        turns: z.array(
+          z
+            .object({
+              id: z.string(),
+              status: z.string(),
+            })
+            .passthrough(),
+        ),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+function readCodexThreadStatusType(status: z.infer<typeof CodexThreadStatusValueSchema>): string {
+  return typeof status === "string" ? status : status.type;
+}
+
+function isCodexThreadReadTerminalStatus(statusType: string): boolean {
+  return ["idle", "completed", "interrupted", "failed", "canceled", "cancelled"].includes(
+    statusType,
+  );
+}
+
 async function requestCodexThreadHistory(
   requestThread: CodexThreadReadRequest,
   threadId: string,
@@ -1976,9 +2033,27 @@ const ThreadStartedNotificationSchema = z
   })
   .passthrough();
 
+const ThreadStatusChangedNotificationSchema = z
+  .object({
+    threadId: z.string().optional(),
+    status: z
+      .object({
+        type: z.string().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
 const TurnStartedNotificationSchema = z
   .object({
     threadId: z.string().optional(),
+    turn: z.object({ id: z.string() }).passthrough(),
+  })
+  .passthrough();
+
+const TurnStartResponseSchema = z
+  .object({
     turn: z.object({ id: z.string() }).passthrough(),
   })
   .passthrough();
@@ -1988,6 +2063,7 @@ const TurnCompletedNotificationSchema = z
     threadId: z.string().optional(),
     turn: z
       .object({
+        id: z.string(),
         status: z.string(),
         error: z
           .object({
@@ -2260,13 +2336,9 @@ const CodexEventThreadRolledBackNotificationSchema = z
 
 type ParsedCodexNotification =
   | { kind: "thread_started"; threadId: string }
+  | { kind: "thread_status_changed"; threadId: string | null; statusType: string | null }
   | { kind: "turn_started"; turnId: string; threadId: string | null }
-  | {
-      kind: "turn_completed";
-      status: string;
-      errorMessage: string | null;
-      threadId: string | null;
-    }
+  | ParsedTurnCompletedNotification
   | {
       kind: "plan_updated";
       plan: Array<{ step: string | null; status: string | null }>;
@@ -2347,6 +2419,28 @@ type ParsedCodexNotification =
   | { kind: "invalid_payload"; method: string; params: unknown }
   | { kind: "unknown_method"; method: string; params: unknown };
 
+interface ParsedCanonicalTurnCompletedNotification {
+  kind: "turn_completed";
+  source: "canonical";
+  turnId: string | null;
+  status: string;
+  errorMessage: string | null;
+  threadId: string | null;
+}
+
+interface ParsedLegacyAliasTurnCompletedNotification {
+  kind: "turn_completed";
+  source: "legacy_alias";
+  turnId: null;
+  status: string;
+  errorMessage: string | null;
+  threadId: string | null;
+}
+
+type ParsedTurnCompletedNotification =
+  | ParsedCanonicalTurnCompletedNotification
+  | ParsedLegacyAliasTurnCompletedNotification;
+
 type CodexDeltaNotification = Extract<
   ParsedCodexNotification,
   {
@@ -2394,6 +2488,25 @@ const CodexNotificationSchema = z.union([
       params,
     }),
   ),
+  z
+    .object({
+      method: z.literal("thread/status/changed"),
+      params: ThreadStatusChangedNotificationSchema,
+    })
+    .transform(
+      ({ params }): ParsedCodexNotification => ({
+        kind: "thread_status_changed",
+        threadId: params.threadId ?? null,
+        statusType: params.status?.type ?? null,
+      }),
+    ),
+  z.object({ method: z.literal("thread/status/changed"), params: z.unknown() }).transform(
+    ({ method, params }): ParsedCodexNotification => ({
+      kind: "invalid_payload",
+      method,
+      params,
+    }),
+  ),
   z.object({ method: z.literal("turn/started"), params: TurnStartedNotificationSchema }).transform(
     ({ params }): ParsedCodexNotification => ({
       kind: "turn_started",
@@ -2413,6 +2526,8 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        source: "canonical",
+        turnId: params.turn.id,
         status: params.turn.status,
         errorMessage: params.turn.error?.message ?? null,
         threadId: params.threadId ?? null,
@@ -2833,6 +2948,8 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        source: "legacy_alias",
+        turnId: null,
         status: "interrupted",
         errorMessage: null,
         threadId: getCodexEventThreadId(params),
@@ -2853,6 +2970,8 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        source: "legacy_alias",
+        turnId: null,
         status: "completed",
         errorMessage: null,
         threadId: getCodexEventThreadId(params),
@@ -3092,6 +3211,13 @@ interface CodexSubAgentCallState {
   childThreadIds: Set<string>;
 }
 
+interface CodexPendingPermissionHandler {
+  resolve: (value: unknown) => void;
+  kind: "command" | "file" | "question" | "mcp_elicitation" | "plan";
+  questions?: CodexQuestionPrompt[];
+  planText?: string;
+}
+
 export class CodexAppServerAgentSession implements AgentSession {
   readonly provider = CODEX_PROVIDER;
   readonly capabilities = CODEX_APP_SERVER_CAPABILITIES;
@@ -3106,6 +3232,19 @@ export class CodexAppServerAgentSession implements AgentSession {
   private nextTurnOrdinal = 0;
   private activeForegroundTurnId: string | null = null;
   private activeClientMessageId: string | null = null;
+  private nextTurnGeneration = 0;
+  private activeTurnGeneration: number | null = null;
+  private turnStartAcknowledgedGeneration: number | null = null;
+  private turnStartedGeneration: number | null = null;
+  private activeProviderTurnId: string | null = null;
+  private pendingRootTurnStartedIds = new Set<string>();
+  private pendingRootTurnCompletions = new Map<string, ParsedCanonicalTurnCompletedNotification>();
+  private pendingRootIdle = false;
+  private pendingRootIdleReconciliationGeneration: number | null = null;
+  private pendingLegacyRootTerminalHint: {
+    generation: number;
+    threadId: string;
+  } | null = null;
   private cachedRuntimeInfo: AgentRuntimeInfo | null = null;
   private serviceTier: "fast" | null = null;
   private planModeEnabled = false;
@@ -3115,15 +3254,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   private persistedProviderSubagentEvents: AgentStreamEvent[] = [];
   private pendingPermissions = new Map<string, AgentPermissionRequest>();
   private mcpElicitationPermissionIds = new Map<number, string>();
-  private pendingPermissionHandlers = new Map<
-    string,
-    {
-      resolve: (value: unknown) => void;
-      kind: "command" | "file" | "question" | "mcp_elicitation" | "plan";
-      questions?: CodexQuestionPrompt[];
-      planText?: string;
-    }
-  >();
+  private pendingPermissionHandlers = new Map<string, CodexPendingPermissionHandler>();
   private resolvedPermissionRequests = new Set<string>();
   private pendingAgentMessages = new Map<string, string>();
   private pendingReasoning = new Map<string, string[]>();
@@ -3172,6 +3303,8 @@ export class CodexAppServerAgentSession implements AgentSession {
     name: string;
   } | null = null;
   private cachedSkills: Array<{ name: string; description: string; path: string }> = [];
+
+  private latestSkillWarningMessage: string | null = null;
 
   constructor(
     config: AgentSessionConfig,
@@ -3306,15 +3439,15 @@ export class CodexAppServerAgentSession implements AgentSession {
     try {
       const response = toObjectRecord(
         await this.client.request("skills/list", {
-          cwd: [this.config.cwd],
+          cwds: [this.config.cwd],
         }),
       );
       const entries = Array.isArray(response?.data) ? response.data : [];
       const skillsByName = new Map<string, { name: string; description: string; path: string }>();
+      const skillWarnings: string[] = [];
       for (const entry of entries) {
         const entryRecord = toObjectRecord(entry);
-        const list = Array.isArray(entryRecord?.skills) ? entryRecord.skills : [];
-        for (const skill of list) {
+        for (const skill of Array.isArray(entryRecord?.skills) ? entryRecord.skills : []) {
           const skillRecord = toObjectRecord(skill);
           if (typeof skillRecord?.name !== "string" || typeof skillRecord?.path !== "string")
             continue;
@@ -3326,8 +3459,10 @@ export class CodexAppServerAgentSession implements AgentSession {
             });
           }
         }
+        skillWarnings.push(...CodexAppServerAgentSession.collectSkillErrors(entryRecord));
       }
       this.cachedSkills = Array.from(skillsByName.values());
+      this.publishSkillWarnings(skillWarnings);
     } catch (error) {
       this.logger.trace(
         {
@@ -3340,7 +3475,56 @@ export class CodexAppServerAgentSession implements AgentSession {
         "provider.codex.metadata.skills_failed",
       );
       this.cachedSkills = [];
+      this.publishSkillWarnings([]);
     }
+  }
+
+  private static collectSkillErrors(
+    entryRecord: Record<string, unknown> | null | undefined,
+  ): string[] {
+    const errors = Array.isArray(entryRecord?.errors) ? entryRecord.errors : [];
+    const warnings: string[] = [];
+    for (const error of errors) {
+      if (!error || typeof error !== "object") {
+        continue;
+      }
+      const record = error as { path?: unknown; message?: unknown };
+      const message = nonEmptyString(
+        typeof record.message === "string" ? record.message : undefined,
+      );
+      if (!message) {
+        continue;
+      }
+      const skillPath = nonEmptyString(typeof record.path === "string" ? record.path : undefined);
+      warnings.push(skillPath ? `${skillPath}: ${message}` : message);
+    }
+    return warnings;
+  }
+
+  private publishSkillWarnings(warnings: string[]): void {
+    if (warnings.length === 0) {
+      this.latestSkillWarningMessage = null;
+      return;
+    }
+
+    const message = formatCodexSkillWarningMessage(warnings);
+    if (!message || message === this.latestSkillWarningMessage) {
+      return;
+    }
+
+    this.latestSkillWarningMessage = message;
+    const item: AgentTimelineItem = {
+      type: "error",
+      message,
+    };
+
+    if (this.connected) {
+      this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item });
+      return;
+    }
+
+    this.persistedHistory.push({ item });
+    this.historyPending = true;
   }
 
   private findCollaborationMode(target: "code" | "plan"): {
@@ -3430,6 +3614,8 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private emitSyntheticPlanApprovalRequest(planText: string): void {
+    this.dismissPendingPlanApprovals("Superseded by a newer plan");
+
     const requestId = `permission-${randomUUID()}`;
     const request: AgentPermissionRequest = {
       id: requestId,
@@ -3519,7 +3705,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         this.rememberCodexUserMessageTurn(entry.item.messageId);
       }
     }
-    this.persistedHistory = timeline;
+    this.persistedHistory = [...this.persistedHistory, ...timeline];
     this.historyPending = timeline.length > 0;
   }
 
@@ -3673,6 +3859,13 @@ export class CodexAppServerAgentSession implements AgentSession {
     return args ? `$${commandName} ${args}` : `$${commandName}`;
   }
 
+  private async buildEffectivePromptInput(prompt: AgentPromptInput): Promise<CodexPromptInput> {
+    const slashCommand = await this.resolveSlashCommandInvocation(prompt);
+    return slashCommand
+      ? await this.buildCommandPromptInput(slashCommand.commandName, slashCommand.args)
+      : prompt;
+  }
+
   private async buildTurnStartParams(
     prompt: CodexPromptInput,
     options?: AgentRunOptions,
@@ -3724,6 +3917,9 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     if (options?.outputSchema) {
       params.outputSchema = normalizeCodexOutputSchema(options.outputSchema);
+    }
+    if (options?.clientMessageId) {
+      params.clientUserMessageId = options.clientMessageId;
     }
     const developerInstructions = composeSystemPromptParts(
       this.config.systemPrompt,
@@ -3837,30 +4033,41 @@ export class CodexAppServerAgentSession implements AgentSession {
       throw new Error("A foreground turn is already active");
     }
 
-    await this.connect();
-    if (!this.client) {
-      throw new Error("Codex client not initialized");
-    }
-
-    const slashCommand = await this.resolveSlashCommandInvocation(prompt);
-    const effectivePrompt = slashCommand
-      ? await this.buildCommandPromptInput(slashCommand.commandName, slashCommand.args)
-      : prompt;
-
-    if (this.currentThreadId) {
-      await this.ensureThreadLoaded();
-    } else {
-      await this.ensureThread();
-    }
-
-    const turnStart = await this.buildTurnStartParams(effectivePrompt, options);
-
-    const turnId = this.createTurnId();
-    this.activeForegroundTurnId = turnId;
-    this.activeClientMessageId = options?.clientMessageId ?? null;
-    this.currentTurnId = null;
+    this.dismissPendingPlanApprovals("Dismissed by a new prompt");
+    const generation = ++this.nextTurnGeneration;
 
     try {
+      await this.connect();
+      if (!this.client) {
+        throw new Error("Codex client not initialized");
+      }
+
+      const slashCommand = await this.resolveSlashCommandInvocation(prompt);
+      const effectivePrompt = slashCommand
+        ? await this.buildCommandPromptInput(slashCommand.commandName, slashCommand.args)
+        : prompt;
+
+      if (this.currentThreadId) {
+        await this.ensureThreadLoaded();
+      } else {
+        await this.ensureThread();
+      }
+
+      const turnStart = await this.buildTurnStartParams(effectivePrompt, options);
+      const turnId = this.createTurnId();
+      this.activeForegroundTurnId = turnId;
+      this.activeTurnGeneration = generation;
+      this.turnStartAcknowledgedGeneration = null;
+      this.turnStartedGeneration = null;
+      this.activeProviderTurnId = null;
+      this.pendingRootTurnStartedIds.clear();
+      this.pendingRootTurnCompletions.clear();
+      this.pendingRootIdle = false;
+      this.pendingRootIdleReconciliationGeneration = null;
+      this.pendingLegacyRootTerminalHint = null;
+      this.activeClientMessageId = options?.clientMessageId ?? null;
+      this.currentTurnId = null;
+
       this.logTurnStartSummary({
         turnId,
         thinkingOptionId: turnStart.thinkingOptionId,
@@ -3870,14 +4077,45 @@ export class CodexAppServerAgentSession implements AgentSession {
         hasDeveloperInstructions: turnStart.hasDeveloperInstructions,
         hasCodexConfig: turnStart.hasCodexConfig,
       });
-      await this.client.request("turn/start", turnStart.params, TURN_START_TIMEOUT_MS);
+      const response = TurnStartResponseSchema.parse(
+        await this.client.request("turn/start", turnStart.params, TURN_START_TIMEOUT_MS),
+      );
+      if (this.activeTurnGeneration === generation) {
+        this.activeProviderTurnId = response.turn.id;
+        this.currentTurnId = response.turn.id;
+        this.turnStartAcknowledgedGeneration = generation;
+        this.replayPendingRootTurnEvents(response.turn.id);
+        const currentThreadId = this.currentThreadId;
+        if (
+          currentThreadId !== null &&
+          this.consumePendingLegacyRootTerminalHint(generation, currentThreadId)
+        ) {
+          this.scheduleStrictRootTurnReconciliation({
+            generation,
+            threadId: currentThreadId,
+            providerTurnId: response.turn.id,
+            reason: "legacy_terminal_alias",
+          });
+        }
+      }
+      return { turnId };
     } catch (error) {
-      this.activeForegroundTurnId = null;
-      this.activeClientMessageId = null;
+      if (this.activeTurnGeneration === generation) {
+        this.activeForegroundTurnId = null;
+        this.activeClientMessageId = null;
+        this.activeTurnGeneration = null;
+        this.turnStartAcknowledgedGeneration = null;
+        this.turnStartedGeneration = null;
+        this.activeProviderTurnId = null;
+        this.currentTurnId = null;
+        this.pendingRootTurnStartedIds.clear();
+        this.pendingRootTurnCompletions.clear();
+        this.pendingRootIdle = false;
+        this.pendingRootIdleReconciliationGeneration = null;
+        this.pendingLegacyRootTerminalHint = null;
+      }
       throw error;
     }
-
-    return { turnId };
   }
 
   private rememberCodexUserMessageTurn(messageId: string | null | undefined): boolean {
@@ -3913,6 +4151,30 @@ export class CodexAppServerAgentSession implements AgentSession {
       resolve: (messageId) => this.userMessageTurnIndexes.get(messageId) ?? null,
       count: () => this.userMessageTurnIds.length,
     };
+  }
+
+  async steerTurn(prompt: AgentPromptInput, _options?: AgentRunOptions): Promise<void> {
+    await this.connect();
+    if (!this.client) {
+      throw new Error("Codex client not initialized");
+    }
+    if (!this.currentThreadId) {
+      throw new Error("Cannot steer Codex turn without an active thread");
+    }
+    if (!this.activeForegroundTurnId) {
+      throw new Error("Cannot steer Codex turn without an active foreground turn");
+    }
+    if (!this.currentTurnId) {
+      throw new Error("Cannot steer Codex turn without an active app-server turn");
+    }
+
+    const effectivePrompt = await this.buildEffectivePromptInput(prompt);
+    const input = await this.buildUserInput(effectivePrompt);
+    await this.client.request("turn/steer", {
+      threadId: this.currentThreadId,
+      input,
+      expectedTurnId: this.currentTurnId,
+    });
   }
 
   subscribe(callback: (event: AgentStreamEvent) => void): () => void {
@@ -4128,12 +4390,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   private handlePlanPermissionResponse(params: {
     requestId: string;
     response: AgentPermissionResponse;
-    pending: {
-      resolve: (value: unknown) => void;
-      kind: "command" | "file" | "question" | "mcp_elicitation" | "plan";
-      questions?: CodexQuestionPrompt[];
-      planText?: string;
-    };
+    pending: CodexPendingPermissionHandler;
     pendingRequest: AgentPermissionRequest | null;
   }): AgentPermissionResult | void {
     const { requestId, response, pending, pendingRequest } = params;
@@ -4144,6 +4401,23 @@ export class CodexAppServerAgentSession implements AgentSession {
       });
     }
 
+    this.resolvePlanPermission(requestId, response);
+    if (followUpPrompt) {
+      return { followUpPrompt };
+    }
+  }
+
+  private dismissPendingPlanApprovals(message: string): void {
+    const requestIds = Array.from(this.pendingPermissionHandlers)
+      .filter(([, pending]) => pending.kind === "plan")
+      .map(([requestId]) => requestId);
+
+    for (const requestId of requestIds) {
+      this.resolvePlanPermission(requestId, { behavior: "deny", message });
+    }
+  }
+
+  private resolvePlanPermission(requestId: string, resolution: AgentPermissionResponse): void {
     this.pendingPermissionHandlers.delete(requestId);
     this.pendingPermissions.delete(requestId);
     this.resolvedPermissionRequests.add(requestId);
@@ -4151,11 +4425,8 @@ export class CodexAppServerAgentSession implements AgentSession {
       type: "permission_resolved",
       provider: CODEX_PROVIDER,
       requestId,
-      resolution: response,
+      resolution,
     });
-    if (followUpPrompt) {
-      return { followUpPrompt };
-    }
   }
 
   private emitDeniedToolCallTimelineEvent(params: {
@@ -4278,6 +4549,15 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.subscribers.clear();
     this.activeForegroundTurnId = null;
     this.activeClientMessageId = null;
+    this.activeTurnGeneration = null;
+    this.turnStartAcknowledgedGeneration = null;
+    this.turnStartedGeneration = null;
+    this.activeProviderTurnId = null;
+    this.pendingRootTurnStartedIds.clear();
+    this.pendingRootTurnCompletions.clear();
+    this.pendingRootIdle = false;
+    this.pendingRootIdleReconciliationGeneration = null;
+    this.pendingLegacyRootTerminalHint = null;
     if (this.client) {
       await this.client.dispose();
     }
@@ -4784,6 +5064,26 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   private handleThreadStateNotification(parsed: ParsedCodexNotification): boolean {
     switch (parsed.kind) {
+      case "thread_status_changed":
+        if (
+          parsed.statusType === "idle" &&
+          this.activeForegroundTurnId &&
+          this.activeTurnGeneration !== null
+        ) {
+          if (
+            this.turnStartAcknowledgedGeneration === this.activeTurnGeneration &&
+            this.turnStartedGeneration === this.activeTurnGeneration &&
+            this.activeProviderTurnId
+          ) {
+            this.schedulePendingRootIdleReconciliation();
+          } else if (
+            this.activeProviderTurnId === null &&
+            this.pendingRootTurnStartedIds.size > 0
+          ) {
+            this.pendingRootIdle = true;
+          }
+        }
+        return true;
       case "context_compacted":
         this.handleContextCompactedNotification(parsed);
         return true;
@@ -5289,14 +5589,36 @@ export class CodexAppServerAgentSession implements AgentSession {
       this.emitSubAgentActivityUpdate(subAgentCallId, "running");
       return;
     }
-    this.currentTurnId = parsed.turnId;
+    if (this.activeTurnGeneration === null) {
+      return;
+    }
+    if (parsed.turnId === null) {
+      return;
+    }
+    if (this.activeProviderTurnId === null) {
+      this.pendingRootTurnStartedIds.add(parsed.turnId);
+      return;
+    }
+    if (parsed.turnId !== this.activeProviderTurnId) {
+      return;
+    }
+    this.acceptRootTurnStarted(parsed.turnId);
+  }
+
+  private acceptRootTurnStarted(turnId: string): void {
+    if (
+      this.activeTurnGeneration === null ||
+      this.turnStartedGeneration === this.activeTurnGeneration
+    ) {
+      return;
+    }
+    this.currentTurnId = turnId;
+    this.turnStartedGeneration = this.activeTurnGeneration;
     this.resetTurnTrackingState();
     this.emitEvent({ type: "turn_started", provider: CODEX_PROVIDER });
   }
 
-  private handleTurnCompletedNotification(
-    parsed: Extract<ParsedCodexNotification, { kind: "turn_completed" }>,
-  ): void {
+  private handleTurnCompletedNotification(parsed: ParsedTurnCompletedNotification): void {
     const subAgentCallId = this.getSubAgentCallIdForThread(parsed.threadId);
     if (subAgentCallId) {
       let status: ToolCallTimelineItem["status"] = "completed";
@@ -5308,6 +5630,47 @@ export class CodexAppServerAgentSession implements AgentSession {
       this.emitSubAgentActivityUpdate(subAgentCallId, status);
       return;
     }
+    if (this.activeTurnGeneration === null) {
+      return;
+    }
+    if (parsed.source === "legacy_alias") {
+      this.handleLegacyRootTurnTerminalHint(parsed);
+      return;
+    }
+    if (this.activeProviderTurnId === null) {
+      if (parsed.turnId === null) {
+        return;
+      }
+      this.pendingRootTurnCompletions.set(parsed.turnId, parsed);
+      return;
+    }
+    if (parsed.turnId !== this.activeProviderTurnId) {
+      return;
+    }
+    this.completeRootTurn(parsed);
+  }
+
+  private handleLegacyRootTurnTerminalHint(
+    parsed: ParsedLegacyAliasTurnCompletedNotification,
+  ): void {
+    const generation = this.activeTurnGeneration;
+    const threadId = this.currentThreadId;
+    if (generation === null || !threadId || parsed.threadId !== threadId) {
+      return;
+    }
+    if (this.activeProviderTurnId === null) {
+      this.pendingLegacyRootTerminalHint = { generation, threadId };
+      return;
+    }
+    this.scheduleStrictRootTurnReconciliation({
+      generation,
+      threadId,
+      providerTurnId: this.activeProviderTurnId,
+      reason: "legacy_terminal_alias",
+    });
+  }
+
+  private completeRootTurn(parsed: ParsedTurnCompletedNotification): void {
     if (parsed.status === "failed") {
       this.emitEvent({
         type: "turn_failed",
@@ -5317,19 +5680,167 @@ export class CodexAppServerAgentSession implements AgentSession {
     } else if (parsed.status === "interrupted") {
       this.emitEvent({ type: "turn_canceled", provider: CODEX_PROVIDER, reason: "interrupted" });
     } else {
-      if (this.planModeEnabled && this.latestPlanResult?.text) {
-        this.emitSyntheticPlanApprovalRequest(this.latestPlanResult.text);
-      }
-      this.emitEvent({
-        type: "turn_completed",
-        provider: CODEX_PROVIDER,
-        usage: this.latestUsage,
-      });
+      this.emitCompletedRootTurn();
     }
+    this.finalizeRootTurn();
+  }
+
+  private replayPendingRootTurnEvents(turnId: string): void {
+    const sawStarted = this.pendingRootTurnStartedIds.delete(turnId);
+    const completion = this.pendingRootTurnCompletions.get(turnId);
+    this.pendingRootTurnStartedIds.clear();
+    this.pendingRootTurnCompletions.clear();
+    if (sawStarted) {
+      this.acceptRootTurnStarted(turnId);
+    }
+    if (completion) {
+      this.completeRootTurn(completion);
+      return;
+    }
+    if (
+      this.pendingRootIdle &&
+      this.activeTurnGeneration !== null &&
+      this.turnStartedGeneration === this.activeTurnGeneration
+    ) {
+      this.schedulePendingRootIdleReconciliation();
+    }
+    this.pendingRootIdle = false;
+  }
+
+  private consumePendingLegacyRootTerminalHint(generation: number, threadId: string): boolean {
+    const pendingLegacyRootTerminalHint = this.pendingLegacyRootTerminalHint;
+    if (
+      pendingLegacyRootTerminalHint === null ||
+      pendingLegacyRootTerminalHint.generation !== generation ||
+      pendingLegacyRootTerminalHint.threadId !== threadId
+    ) {
+      return false;
+    }
+    this.pendingLegacyRootTerminalHint = null;
+    return true;
+  }
+
+  private emitCompletedRootTurn(): void {
+    if (this.planModeEnabled && this.latestPlanResult?.text) {
+      this.emitSyntheticPlanApprovalRequest(this.latestPlanResult.text);
+    }
+    this.emitEvent({
+      type: "turn_completed",
+      provider: CODEX_PROVIDER,
+      usage: this.latestUsage,
+    });
+  }
+
+  private finalizeRootTurn(): void {
     this.activeForegroundTurnId = null;
     this.activeClientMessageId = null;
+    this.activeTurnGeneration = null;
+    this.turnStartAcknowledgedGeneration = null;
+    this.turnStartedGeneration = null;
+    this.activeProviderTurnId = null;
+    this.currentTurnId = null;
+    this.pendingRootTurnStartedIds.clear();
+    this.pendingRootTurnCompletions.clear();
+    this.pendingRootIdle = false;
+    this.pendingRootIdleReconciliationGeneration = null;
+    this.pendingLegacyRootTerminalHint = null;
     this.pendingSubAgentNotificationsByThreadId.clear();
     this.resetTurnTrackingState();
+  }
+
+  private schedulePendingRootIdleReconciliation(): void {
+    const generation = this.activeTurnGeneration;
+    const threadId = this.currentThreadId;
+    const providerTurnId = this.activeProviderTurnId;
+    if (
+      generation === null ||
+      !threadId ||
+      !providerTurnId ||
+      this.pendingRootIdleReconciliationGeneration === generation
+    ) {
+      return;
+    }
+    this.pendingRootIdleReconciliationGeneration = generation;
+    void this.reconcileAcceptedRootTurnFromThreadRead({
+      generation,
+      threadId,
+      providerTurnId,
+      reason: "thread_idle",
+    });
+  }
+
+  private scheduleStrictRootTurnReconciliation(params: {
+    generation: number;
+    threadId: string;
+    providerTurnId: string;
+    reason: "thread_idle" | "legacy_terminal_alias";
+  }): void {
+    if (this.pendingRootIdleReconciliationGeneration === params.generation) {
+      return;
+    }
+    this.pendingRootIdleReconciliationGeneration = params.generation;
+    void this.reconcileAcceptedRootTurnFromThreadRead(params);
+  }
+
+  private async reconcileAcceptedRootTurnFromThreadRead(params: {
+    generation: number;
+    threadId: string;
+    providerTurnId: string;
+    reason: "thread_idle" | "legacy_terminal_alias";
+  }): Promise<void> {
+    const { generation, threadId, providerTurnId } = params;
+    try {
+      if (!this.client) {
+        return;
+      }
+      const response = StrictCodexIdleThreadReadResponseSchema.parse(
+        await readCodexThread(this.client, threadId),
+      );
+      if (response.thread.id !== threadId) {
+        return;
+      }
+      if (!isCodexThreadReadTerminalStatus(readCodexThreadStatusType(response.thread.status))) {
+        return;
+      }
+      const terminalTurn = response.thread.turns.find((turn) => turn.id === providerTurnId);
+      if (!terminalTurn) {
+        return;
+      }
+      if (!["completed", "interrupted", "failed"].includes(terminalTurn.status)) {
+        return;
+      }
+      if (
+        this.activeTurnGeneration !== generation ||
+        this.currentThreadId !== threadId ||
+        this.activeProviderTurnId !== providerTurnId
+      ) {
+        return;
+      }
+      this.completeRootTurn({
+        kind: "turn_completed",
+        source: "canonical",
+        turnId: providerTurnId,
+        status: terminalTurn.status,
+        errorMessage: null,
+        threadId,
+      });
+    } catch (error) {
+      this.logger.warn(
+        {
+          agentId: this.agentId,
+          provider: CODEX_PROVIDER,
+          sessionId: threadId,
+          turnId: providerTurnId,
+          reconciliationReason: params.reason,
+          err: error,
+        },
+        "provider.codex.root_turn_idle_reconciliation_failed_closed",
+      );
+    } finally {
+      if (this.pendingRootIdleReconciliationGeneration === generation) {
+        this.pendingRootIdleReconciliationGeneration = null;
+      }
+    }
   }
 
   private resetTurnTrackingState(): void {
@@ -5369,7 +5880,11 @@ export class CodexAppServerAgentSession implements AgentSession {
       if (this.planModeEnabled) {
         return;
       }
-      this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item: timelineItem });
+      const item = this.activeClientMessageId
+        ? { ...timelineItem, clientMessageId: this.activeClientMessageId }
+        : timelineItem;
+      this.activeClientMessageId = null;
+      this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item });
     }
   }
 
@@ -5866,11 +6381,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (!this.rememberCodexUserMessageTurn(timelineItem.messageId)) {
       return;
     }
-    const item = this.activeClientMessageId
-      ? { ...timelineItem, clientMessageId: this.activeClientMessageId }
-      : timelineItem;
-    this.activeClientMessageId = null;
-    this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item });
+    this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item: timelineItem });
   }
 
   private warnUnknownNotificationMethod(method: string, params: unknown): void {

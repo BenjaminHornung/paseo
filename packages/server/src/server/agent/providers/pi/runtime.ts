@@ -26,6 +26,8 @@ export interface PiRuntimeLaunch {
 
 export interface PiStartSessionInput {
   cwd: string;
+  /** Spawn cwd only; `cwd` remains the logical session/workspace identity. */
+  processCwd?: string;
   env?: Record<string, string>;
   protocolMode?: "rpc" | "rpc-ui";
   model?: string;
@@ -86,7 +88,7 @@ export function buildPiLaunch(input: {
   appendPiLaunchArgs(argv, input.session, protocolMode);
 
   return {
-    cwd: input.session.cwd,
+    cwd: input.session.processCwd ?? input.session.cwd,
     argv,
     env:
       input.runtimeSettings?.env || input.session.env

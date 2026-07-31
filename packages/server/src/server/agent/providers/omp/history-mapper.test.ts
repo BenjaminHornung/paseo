@@ -644,4 +644,80 @@ describe("OMP history mapper", () => {
       ]),
     );
   });
+
+  test("recovers orphan child transcripts with evidence-based terminal statuses", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omp-orphan-parent-"));
+    const parentFile = join(dir, "parent.jsonl");
+    const parentStem = parentFile.slice(0, -".jsonl".length);
+    mkdirSync(parentStem, { recursive: true });
+
+    const writeChild = (
+      id: string,
+      message?: { stopReason?: string; errorMessage?: string; text?: string },
+    ): void => {
+      const entries: object[] = [{ type: "session", id: `${id}-root`, parentId: null }];
+      if (message) {
+        entries.push({
+          type: "message",
+          id: `${id}-answer`,
+          parentId: `${id}-root`,
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: message.text ?? id }],
+            ...(message.stopReason ? { stopReason: message.stopReason } : {}),
+            ...(message.errorMessage ? { errorMessage: message.errorMessage } : {}),
+          },
+        });
+      }
+      writeFileSync(
+        join(parentStem, `${id}.jsonl`),
+        entries.map((entry) => JSON.stringify(entry)).join("\n"),
+      );
+    };
+
+    writeChild("CompletedChild", { stopReason: "stop", text: "audit ok" });
+    writeChild("FailedByReason", { stopReason: "error" });
+    writeChild("FailedByMessage", { stopReason: "stop", errorMessage: "provider failed" });
+    writeChild("CanceledChild", { stopReason: "aborted" });
+    writeChild("FailedWhileAborting", {
+      stopReason: "aborted",
+      errorMessage: "provider failed while aborting",
+    });
+    writeChild("CanceledWithBlankError", { stopReason: "aborted", errorMessage: " " });
+    writeChild("NoAssistantEvidence");
+
+    const events: AgentStreamEvent[] = [];
+    for await (const event of streamOmpHistory({ sessionFile: parentFile, provider: "omp" })) {
+      events.push(event);
+    }
+    const terminalById = Object.fromEntries(
+      events.flatMap((event) =>
+        event.type === "provider_subagent" &&
+        event.event.type === "upsert" &&
+        event.event.status !== "running"
+          ? [[event.event.id, event.event.status]]
+          : [],
+      ),
+    );
+
+    expect(terminalById).toEqual({
+      CanceledChild: "canceled",
+      CanceledWithBlankError: "canceled",
+      CompletedChild: "completed",
+      FailedByMessage: "failed",
+      FailedByReason: "failed",
+      FailedWhileAborting: "failed",
+      NoAssistantEvidence: "failed",
+    });
+    expect(
+      events.flatMap((event) =>
+        event.type === "provider_subagent" && event.event.type === "timeline" ? [event.event] : [],
+      ),
+    ).toContainEqual(
+      expect.objectContaining({
+        id: "CompletedChild",
+        item: expect.objectContaining({ type: "assistant_message", text: "audit ok" }),
+      }),
+    );
+  });
 });

@@ -1,9 +1,9 @@
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import {
   View,
   Text,
   Image,
   Pressable,
-  ActivityIndicator,
   type GestureResponderEvent,
   type LayoutChangeEvent,
   StyleProp,
@@ -62,7 +62,11 @@ import Svg, { Defs, LinearGradient as SvgLinearGradient, Rect, Stop } from "reac
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { MarkdownRenderer, type MarkdownStyles } from "@/components/markdown/renderer";
-import type { TodoEntry, UserMessageImageAttachment } from "@/types/stream";
+import type {
+  TodoEntry,
+  UserMessageDeliveryHint,
+  UserMessageImageAttachment,
+} from "@/types/stream";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
 import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
 import { buildToolCallPresentation } from "@/tool-calls/presentation";
@@ -133,6 +137,7 @@ interface UserMessageProps {
   isFirstInGroup?: boolean;
   isLastInGroup?: boolean;
   disableOuterSpacing?: boolean;
+  deliveryHint?: UserMessageDeliveryHint;
 }
 
 const MessageOuterSpacingContext = createContext(false);
@@ -172,6 +177,7 @@ const ThemedTodoCheckIcon = withUnistyles(Check);
 const ThemedFileSymlinkIcon = withUnistyles(FileSymlink);
 const ThemedTriangleAlertIcon = withUnistyles(TriangleAlertIcon);
 const ThemedChevronRightIcon = withUnistyles(ChevronRight);
+const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 
 const foregroundColorMapping = (theme: Theme) => ({ color: theme.colors.foreground });
 const foregroundMutedColorMapping = (theme: Theme) => ({
@@ -338,6 +344,12 @@ const userMessageStylesheet = StyleSheet.create((theme) => ({
     maxWidth: "100%",
     cursor: "auto",
   },
+  deliveryHintLabel: {
+    alignSelf: "flex-end",
+    marginTop: theme.spacing[1],
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.xs,
+  },
   containerSpacing: {
     marginBottom: theme.spacing[1],
   },
@@ -430,6 +442,7 @@ export const UserMessage = memo(function UserMessage({
   isFirstInGroup = true,
   isLastInGroup = true,
   disableOuterSpacing,
+  deliveryHint,
 }: UserMessageProps) {
   const isCompact = useIsCompactFormFactor();
   const { t } = useTranslation();
@@ -553,6 +566,14 @@ export const UserMessage = memo(function UserMessage({
               accessibilityLabel={t("message.actions.copyMessage")}
             />
           </View>
+        ) : null}
+        {deliveryHint === "steering" ? (
+          <Text
+            accessibilityLabel="Steering conversation"
+            style={userMessageStylesheet.deliveryHintLabel}
+          >
+            Steering conversation
+          </Text>
         ) : null}
       </View>
       <AttachmentLightbox metadata={lightboxMetadata} onClose={handleLightboxClose} />
@@ -865,7 +886,9 @@ const AssistantMarkdownResolvedImage = memo(function AssistantMarkdownResolvedIm
     return (
       <View style={frameStyle}>
         <View style={stateSurfaceStyle}>
-          {loadState.status === "loading" ? <ActivityIndicator size="small" /> : null}
+          {loadState.status === "loading" ? (
+            <ThemedLoadingSpinner size="small" uniProps={foregroundMutedColorMapping} />
+          ) : null}
           {loadState.status === "error" ? (
             <Text style={assistantMessageStylesheet.imageErrorText}>
               {t("message.attachments.imageUnavailable")}
@@ -1004,7 +1027,7 @@ function AssistantMarkdownImage({
   if (query.isLoading || dataImageQuery.isLoading) {
     return (
       <View style={stateFrameStyle}>
-        <ActivityIndicator size="small" />
+        <ThemedLoadingSpinner size="small" uniProps={foregroundMutedColorMapping} />
       </View>
     );
   }
@@ -2244,7 +2267,7 @@ export const CompactionMarker = memo(function CompactionMarker({
       <View style={compactionStylesheet.line} />
       <View style={compactionStylesheet.label}>
         {status === "loading" ? (
-          <ActivityIndicator size="small" color="#a1a1aa" />
+          <LoadingSpinner size="small" color="#a1a1aa" />
         ) : (
           <Scissors size={12} color="#a1a1aa" />
         )}
@@ -3094,7 +3117,7 @@ interface ToolCallProps {
   disableOuterSpacing?: boolean;
   onInlineDetailsHoverChange?: (hovered: boolean) => void;
   onInlineDetailsExpandedChange?: (expanded: boolean) => void;
-  onOpenFilePath?: (filePath: string) => void;
+  onOpenFileTarget?: (target: InlinePathTarget) => void;
   defaultExpanded?: boolean;
   forceInline?: boolean;
   maxDetailHeight?: number;
@@ -3113,7 +3136,7 @@ export const ToolCall = memo(function ToolCall({
   disableOuterSpacing,
   onInlineDetailsHoverChange,
   onInlineDetailsExpandedChange,
-  onOpenFilePath,
+  onOpenFileTarget,
   defaultExpanded,
   forceInline = false,
   maxDetailHeight = 400,
@@ -3152,12 +3175,12 @@ export const ToolCall = memo(function ToolCall({
     [toolName, status, error, effectiveDetail, metadata, cwd],
   );
   const handleOpenFile = useMemo(() => {
-    const openFilePath = presentation.openFilePath;
-    if (!openFilePath || !onOpenFilePath) {
+    const openFileTarget = presentation.openFileTarget;
+    if (!openFileTarget || !onOpenFileTarget) {
       return undefined;
     }
-    return () => onOpenFilePath(openFilePath);
-  }, [presentation.openFilePath, onOpenFilePath]);
+    return () => onOpenFileTarget(openFileTarget);
+  }, [presentation.openFileTarget, onOpenFileTarget]);
 
   const handleToggle = useCallback(() => {
     if (!shouldRenderInline) {
@@ -3269,7 +3292,7 @@ function areToolCallPropsEqual(previous: ToolCallProps, next: ToolCallProps) {
   if (previous.metadata !== next.metadata) return false;
   if (previous.isLastInSequence !== next.isLastInSequence) return false;
   if (previous.disableOuterSpacing !== next.disableOuterSpacing) return false;
-  if (previous.onOpenFilePath !== next.onOpenFilePath) return false;
+  if (previous.onOpenFileTarget !== next.onOpenFileTarget) return false;
   if (previous.defaultExpanded !== next.defaultExpanded) return false;
   if (previous.forceInline !== next.forceInline) return false;
   if (previous.maxDetailHeight !== next.maxDetailHeight) return false;

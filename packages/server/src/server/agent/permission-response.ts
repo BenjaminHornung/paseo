@@ -1,7 +1,11 @@
 import type { Logger } from "pino";
 
 import type { AgentPermissionResponse, AgentPermissionResult } from "./agent-sdk-types.js";
-import { startAgentRun, type AgentRunController } from "./agent-prompt.js";
+import {
+  ownBackgroundAgentRunStart,
+  startAgentRun,
+  type AgentRunController,
+} from "./agent-prompt.js";
 
 export interface PermissionResponseAgentManager extends AgentRunController {
   respondToPermission(
@@ -33,8 +37,23 @@ export async function respondToAgentPermission(
 
   if (result?.followUpPrompt) {
     logger.debug({ agentId }, "Permission response requires follow-up turn, starting agent stream");
-    await startAgentRun(agentManager, agentId, result.followUpPrompt, logger, {
-      replaceRunning: true,
-    });
+    const dispatchResult = await startAgentRun(
+      agentManager,
+      agentId,
+      result.followUpPrompt,
+      logger,
+      {
+        replaceRunning: true,
+      },
+    );
+    if (!dispatchResult.outOfBand) {
+      ownBackgroundAgentRunStart({
+        startAcknowledged: dispatchResult.startAcknowledged,
+        logger,
+        context: { agentId, requestId },
+        timeoutMessage: "Permission follow-up run did not acknowledge start before timeout",
+        failureMessage: "Permission follow-up run failed before start acknowledgement",
+      });
+    }
   }
 }

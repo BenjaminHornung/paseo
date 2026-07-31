@@ -111,6 +111,7 @@ import { DEFAULT_OMP_THINKING_LEVEL, mapOmpModel } from "./map-omp-model.js";
 
 const OMP_PROVIDER = "omp";
 const OMP_CATALOG_REQUEST_TIMEOUT_MS = 120_000;
+const OMP_SUBAGENT_PROBE_TIMEOUT_MS = 1_000;
 const QUESTION_RESPONSE_HEADER = "Response";
 const QUESTION_COMMENT_HEADER = "Comment";
 const OMP_ASK_USER_FREEFORM_SENTINEL = "✏️ Type custom response...";
@@ -898,6 +899,11 @@ export class OmpAgentSession implements AgentSession {
   private readonly currentModeId: string | null;
   private readonly providerIdleScheduler: OmpProviderIdleScheduler;
   private readonly noTurnScheduler: OmpNoTurnScheduler;
+  private activeTurnGeneration = 0;
+  private providerIdleCompletionGeneration: number | null = null;
+  private subagentSnapshotCapability: "unknown" | "supported" | "unsupported" = "unknown";
+  private interrupting = false;
+  private interruptPromise: Promise<void> | null = null;
   private closed = false;
   private live: boolean;
   private readonly emittedUserMessageIds = new Set<string>();
@@ -960,7 +966,7 @@ export class OmpAgentSession implements AgentSession {
   }
 
   async startTurn(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<StartTurnResult> {
-    if (this.activeTurnId) {
+    if (this.activeTurnId || this.activeTurnStarted || this.interrupting) {
       throw new Error("An OMP turn is already active");
     }
 
@@ -1128,26 +1134,48 @@ export class OmpAgentSession implements AgentSession {
   }
 
   async interrupt(): Promise<void> {
+    if (this.interruptPromise) {
+      await this.interruptPromise;
+      return;
+    }
+    const interruptPromise = this.performInterrupt();
+    this.interruptPromise = interruptPromise;
+    try {
+      await interruptPromise;
+    } finally {
+      if (this.interruptPromise === interruptPromise) {
+        this.interruptPromise = null;
+      }
+    }
+  }
+
+  private async performInterrupt(): Promise<void> {
     const turnId = this.activeTurnId;
+    const hadActiveTurn = this.activeTurnStarted || turnId !== null;
+    this.interrupting = true;
+    // Invalidate any in-flight idle probe before waiting for OMP to abort.
+    this.activeTurnStarted = false;
+    this.terminalizeActiveWork();
     try {
       await this.runtimeSession.abort();
     } finally {
-      this.terminalizeActiveWork();
-    }
-    if (turnId && this.activeTurnId === turnId) {
+      const shouldEmitCancellation =
+        hadActiveTurn && (turnId === null || this.activeTurnId === turnId);
       this.activeTurnId = null;
       this.activeClientMessageId = null;
-      this.activeTurnStarted = false;
       this.activeTurnHasUserMessage = false;
       this.activeAssistantMessageId = null;
       this.activeTurnTerminalAssistantMessage = null;
       this.clearNoTurnBuffers();
-      this.emit({
-        type: "turn_canceled",
-        provider: this.provider,
-        reason: "interrupted",
-        turnId,
-      });
+      this.interrupting = false;
+      if (shouldEmitCancellation) {
+        this.emit({
+          type: "turn_canceled",
+          provider: this.provider,
+          reason: "interrupted",
+          ...(turnId ? { turnId } : {}),
+        });
+      }
     }
   }
 
@@ -1779,7 +1807,7 @@ export class OmpAgentSession implements AgentSession {
         // streamHistory, so replay must not re-enter the live timeline.
         return;
       }
-      this.handleSessionEvent(event);
+      this.handleLiveSessionEvent(event);
       return;
     }
     this.logger.debug({ event }, "Dropped unknown OMP runtime event");
@@ -1806,13 +1834,19 @@ export class OmpAgentSession implements AgentSession {
     });
   }
 
+  private handleLiveSessionEvent(event: OmpAgentSessionEvent): void {
+    if (this.interrupting) {
+      return;
+    }
+    this.handleSessionEvent(event);
+  }
+
   private handleSessionEvent(event: OmpAgentSessionEvent): void {
     const turnId = this.currentTurnIdForEvent();
 
     switch (event.type) {
       case "agent_start":
-        this.activeTurnStarted = true;
-        this.clearNoTurnBuffers();
+        this.markActiveTurnStarted();
         this.emit({
           type: "thread_started",
           provider: this.provider,
@@ -1820,8 +1854,7 @@ export class OmpAgentSession implements AgentSession {
         });
         return;
       case "turn_start":
-        this.activeTurnStarted = true;
-        this.clearNoTurnBuffers();
+        this.markActiveTurnStarted();
         this.emit({
           type: "turn_started",
           provider: this.provider,
@@ -1897,12 +1930,24 @@ export class OmpAgentSession implements AgentSession {
         }
         // A state request is processed after OMP's RPC loop becomes promptable,
         // so do not advertise Paseo idle until it reports that transition.
-        void this.completeTurnAfterProviderIdle(turnId, terminalMessages);
+        void this.completeTurnAfterProviderIdle(
+          turnId,
+          terminalMessages,
+          this.activeTurnGeneration,
+        );
         return;
       }
       default:
         return;
     }
+  }
+
+  private markActiveTurnStarted(): void {
+    if (!this.activeTurnStarted) {
+      this.activeTurnGeneration += 1;
+    }
+    this.activeTurnStarted = true;
+    this.clearNoTurnBuffers();
   }
 
   private handleToolExecutionEnd(
@@ -2161,19 +2206,97 @@ export class OmpAgentSession implements AgentSession {
   private async completeTurnAfterProviderIdle(
     turnId: string | undefined,
     messages: OmpAgentMessage[],
+    turnGeneration: number,
   ): Promise<void> {
-    while (!this.closed && this.activeTurnStarted && this.currentTurnIdForEvent() === turnId) {
-      try {
-        const state = await this.runtimeSession.getState();
-        this.state = state;
-        if (!state.isStreaming && !state.isCompacting) {
-          this.completeTurn(turnId, messages);
+    if (
+      !this.isCurrentActiveTurn(turnId, turnGeneration) ||
+      this.providerIdleCompletionGeneration === turnGeneration
+    ) {
+      return;
+    }
+    this.providerIdleCompletionGeneration = turnGeneration;
+    try {
+      while (this.isCurrentActiveTurn(turnId, turnGeneration)) {
+        try {
+          if (await this.canCompleteTurn(turnId, turnGeneration)) {
+            this.completeTurn(turnId, messages);
+            return;
+          }
+        } catch (error) {
+          this.logger.debug(
+            { err: error },
+            "OMP state unavailable while waiting for provider idle",
+          );
+        }
+        if (!this.isCurrentActiveTurn(turnId, turnGeneration)) {
           return;
         }
-      } catch (error) {
-        this.logger.debug({ err: error }, "OMP state unavailable while waiting for provider idle");
+        await this.providerIdleScheduler.waitForRetry();
       }
-      await this.providerIdleScheduler.waitForRetry();
+    } finally {
+      if (this.providerIdleCompletionGeneration === turnGeneration) {
+        this.providerIdleCompletionGeneration = null;
+      }
+    }
+  }
+
+  private async canCompleteTurn(
+    turnId: string | undefined,
+    turnGeneration: number,
+  ): Promise<boolean> {
+    const state = await this.runtimeSession.getState();
+    if (!this.isCurrentActiveTurn(turnId, turnGeneration)) {
+      return false;
+    }
+    this.state = state;
+    if (state.isStreaming || state.isCompacting) {
+      return false;
+    }
+    if (await this.shouldBlockForSubagents(turnId, turnGeneration)) {
+      return false;
+    }
+    return this.isCurrentActiveTurn(turnId, turnGeneration);
+  }
+
+  private isCurrentActiveTurn(turnId: string | undefined, turnGeneration: number): boolean {
+    return (
+      !this.closed &&
+      !this.interrupting &&
+      this.activeTurnStarted &&
+      this.currentTurnIdForEvent() === turnId &&
+      this.activeTurnGeneration === turnGeneration
+    );
+  }
+
+  private async shouldBlockForSubagents(
+    turnId: string | undefined,
+    turnGeneration: number,
+  ): Promise<boolean> {
+    if (this.subagentSnapshotCapability === "unsupported") {
+      return this.subagentIndex.hasRunning(this.runtimeSession);
+    }
+
+    try {
+      const snapshots = await this.runtimeSession.getSubagents(OMP_SUBAGENT_PROBE_TIMEOUT_MS);
+      if (!this.isCurrentActiveTurn(turnId, turnGeneration)) {
+        return true;
+      }
+      this.subagentSnapshotCapability = "supported";
+      for (const event of this.subagentIndex.reconcileSnapshots(this.runtimeSession, snapshots)) {
+        this.emit(event);
+      }
+      return this.subagentIndex.hasRunning(this.runtimeSession);
+    } catch (error) {
+      if (!this.isCurrentActiveTurn(turnId, turnGeneration)) {
+        return true;
+      }
+      if (isUnsupportedGetSubagentsError(error)) {
+        this.subagentSnapshotCapability = "unsupported";
+        this.logger.debug({ err: error }, "OMP get_subagents unsupported during idle gate");
+      } else {
+        this.logger.debug({ err: error }, "OMP get_subagents unavailable during idle gate");
+      }
+      return true;
     }
   }
 
@@ -2199,6 +2322,13 @@ export class OmpAgentSession implements AgentSession {
       });
     }
   }
+}
+
+function isUnsupportedGetSubagentsError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /^(?:OMP RPC request timed out for get_subagents|Unknown command: get_subagents)(?:\r?\n|$)/i.test(
+    message,
+  );
 }
 
 export class OmpAgentClient implements AgentClient {

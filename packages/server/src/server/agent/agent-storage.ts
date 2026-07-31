@@ -33,6 +33,75 @@ const PERSISTENCE_HANDLE_SCHEMA = z
   .nullable()
   .optional();
 
+const CLIENT_MESSAGE_ADMISSION_ENTRY_STATUS_SCHEMA = z.enum([
+  "pending",
+  "committed",
+  "legacy_unverifiable",
+]);
+
+const CLIENT_MESSAGE_ADMISSION_ENTRY_SCHEMA = z.object({
+  fingerprint: z.string(),
+  status: CLIENT_MESSAGE_ADMISSION_ENTRY_STATUS_SCHEMA,
+});
+
+export const MAX_CLIENT_MESSAGE_ID_LENGTH = 256;
+export const MAX_CLIENT_MESSAGE_ADMISSIONS = 4_096;
+
+const CLIENT_MESSAGE_ADMISSION_ENTRIES_SCHEMA = z
+  .custom<Record<string, unknown>>((value) => typeof value === "object" && value !== null)
+  .transform(
+    (value, ctx): Record<string, z.infer<typeof CLIENT_MESSAGE_ADMISSION_ENTRY_SCHEMA>> => {
+      const normalized = Object.create(null) as Record<
+        string,
+        z.infer<typeof CLIENT_MESSAGE_ADMISSION_ENTRY_SCHEMA>
+      >;
+      for (const messageId of Object.getOwnPropertyNames(value)) {
+        const parsed = CLIENT_MESSAGE_ADMISSION_ENTRY_SCHEMA.safeParse(value[messageId]);
+        if (!parsed.success) {
+          for (const issue of parsed.error.issues) {
+            ctx.addIssue({
+              ...issue,
+              path: ["entries", messageId, ...issue.path],
+            });
+          }
+          continue;
+        }
+        Object.defineProperty(normalized, messageId, {
+          value: parsed.data,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
+      return normalized;
+    },
+  );
+
+const CLIENT_MESSAGE_ADMISSION_LEDGER_SCHEMA = z
+  .object({
+    version: z.literal(1),
+    entries: CLIENT_MESSAGE_ADMISSION_ENTRIES_SCHEMA,
+    legacyOverflow: z.boolean().optional(),
+  })
+  .superRefine((ledger, ctx) => {
+    const messageIds = Object.keys(ledger.entries);
+    if (messageIds.length > MAX_CLIENT_MESSAGE_ADMISSIONS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `clientMessageAdmissions exceeds ${MAX_CLIENT_MESSAGE_ADMISSIONS} entries`,
+      });
+    }
+    for (const messageId of messageIds) {
+      if (messageId.length > MAX_CLIENT_MESSAGE_ID_LENGTH) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `clientMessageAdmissions contains an overlong messageId (${messageId.length} > ${MAX_CLIENT_MESSAGE_ID_LENGTH})`,
+          path: ["entries", messageId],
+        });
+      }
+    }
+  });
+
 const STORED_AGENT_SCHEMA = z.object({
   id: z.string(),
   provider: z.string(),
@@ -66,7 +135,18 @@ const STORED_AGENT_SCHEMA = z.object({
   internal: z.boolean().optional(),
   archivedAt: z.string().nullable().optional(),
   owner: AgentOwnerSchema.optional(),
+  clientMessageAdmissions: CLIENT_MESSAGE_ADMISSION_LEDGER_SCHEMA.optional(),
 });
+
+export type ClientMessageAdmissionDisposition =
+  | "new"
+  | "duplicate"
+  | "conflict"
+  | "pending"
+  | "capacity"
+  | "legacy"
+  | "legacy_unverifiable";
+export type ClientMessageAdmissionLedger = z.infer<typeof CLIENT_MESSAGE_ADMISSION_LEDGER_SCHEMA>;
 
 export type SerializableAgentConfig = Pick<
   AgentSessionConfig,
@@ -81,7 +161,41 @@ export type SerializableAgentConfig = Pick<
 
 export type StoredAgentRecord = z.infer<typeof STORED_AGENT_SCHEMA>;
 export function parseStoredAgentRecord(value: unknown): StoredAgentRecord {
-  return STORED_AGENT_SCHEMA.parse(value);
+  const record = STORED_AGENT_SCHEMA.parse(value);
+  if (!record.clientMessageAdmissions) {
+    return record;
+  }
+  return {
+    ...record,
+    clientMessageAdmissions: normalizeClientMessageAdmissionLedger(record.clientMessageAdmissions),
+  };
+}
+
+function copyClientMessageAdmissionEntries<
+  T extends {
+    fingerprint: string;
+    status: z.infer<typeof CLIENT_MESSAGE_ADMISSION_ENTRY_STATUS_SCHEMA>;
+  },
+>(entries: Record<string, T>): Record<string, T> {
+  const normalized = Object.create(null) as Record<string, T>;
+  for (const messageId of Object.getOwnPropertyNames(entries)) {
+    Object.defineProperty(normalized, messageId, {
+      value: entries[messageId],
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return normalized;
+}
+
+function normalizeClientMessageAdmissionLedger(
+  ledger: ClientMessageAdmissionLedger,
+): ClientMessageAdmissionLedger {
+  return {
+    ...ledger,
+    entries: copyClientMessageAdmissionEntries(ledger.entries),
+  };
 }
 
 export class AgentStorage {
@@ -127,17 +241,221 @@ export class AgentStorage {
     await this.queueRecordWrite(record);
   }
 
+  async admitClientMessage(
+    agentId: string,
+    messageId: string,
+    fingerprint: string,
+  ): Promise<ClientMessageAdmissionDisposition> {
+    await this.load();
+    let disposition: ClientMessageAdmissionDisposition = "new";
+    const previous = this.pendingWrites.get(agentId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.deleting.has(agentId)) {
+          throw new Error(`Agent ${agentId} is being deleted`);
+        }
+        const record = this.cache.get(agentId);
+        if (!record) {
+          throw new Error(`Agent ${agentId} not found`);
+        }
+        const ledger = record.clientMessageAdmissions;
+        if (!ledger) {
+          disposition = "legacy";
+          return undefined;
+        }
+        const existing = Object.hasOwn(ledger.entries, messageId)
+          ? ledger.entries[messageId]
+          : undefined;
+        if (existing) {
+          if (existing.status === "legacy_unverifiable") {
+            disposition = "legacy_unverifiable";
+            return undefined;
+          }
+          if (existing.fingerprint !== fingerprint) {
+            disposition = "conflict";
+          } else if (existing.status === "committed") {
+            disposition = "duplicate";
+          } else {
+            disposition = "pending";
+          }
+          return undefined;
+        }
+        if (
+          ledger.legacyOverflow ||
+          Object.keys(ledger.entries).length >= MAX_CLIENT_MESSAGE_ADMISSIONS
+        ) {
+          disposition = "capacity";
+          return undefined;
+        }
+        const entries = copyClientMessageAdmissionEntries(ledger.entries);
+        entries[messageId] = { fingerprint, status: "pending" };
+        await this.writeRecord({
+          ...record,
+          clientMessageAdmissions: {
+            ...ledger,
+            entries,
+          },
+        });
+        return undefined;
+      });
+    const tracked = next.finally(() => {
+      if (this.pendingWrites.get(agentId) === tracked) {
+        this.pendingWrites.delete(agentId);
+      }
+    });
+    this.pendingWrites.set(agentId, tracked);
+    await tracked;
+    return disposition;
+  }
+
+  async releaseClientMessageAdmission(
+    agentId: string,
+    messageId: string,
+    fingerprint: string,
+  ): Promise<void> {
+    await this.load();
+    const previous = this.pendingWrites.get(agentId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.deleting.has(agentId)) {
+          throw new Error(`Agent ${agentId} is being deleted`);
+        }
+        const record = this.cache.get(agentId);
+        const ledger = record?.clientMessageAdmissions;
+        const existing =
+          ledger && Object.hasOwn(ledger.entries, messageId)
+            ? ledger.entries[messageId]
+            : undefined;
+        if (
+          !record ||
+          !ledger ||
+          existing?.fingerprint !== fingerprint ||
+          existing.status !== "pending"
+        ) {
+          return undefined;
+        }
+        const entries = copyClientMessageAdmissionEntries(ledger.entries);
+        delete entries[messageId];
+        await this.writeRecord({
+          ...record,
+          clientMessageAdmissions: { ...ledger, entries },
+        });
+        return undefined;
+      });
+    const tracked = next.finally(() => {
+      if (this.pendingWrites.get(agentId) === tracked) {
+        this.pendingWrites.delete(agentId);
+      }
+    });
+    this.pendingWrites.set(agentId, tracked);
+    await tracked;
+  }
+
+  async commitClientMessageAdmission(
+    agentId: string,
+    messageId: string,
+    fingerprint: string,
+  ): Promise<void> {
+    await this.load();
+    const previous = this.pendingWrites.get(agentId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.deleting.has(agentId)) {
+          throw new Error(`Agent ${agentId} is being deleted`);
+        }
+        const record = this.cache.get(agentId);
+        const ledger = record?.clientMessageAdmissions;
+        const existing =
+          ledger && Object.hasOwn(ledger.entries, messageId)
+            ? ledger.entries[messageId]
+            : undefined;
+        if (!record || !ledger || existing?.fingerprint !== fingerprint) {
+          throw new Error(`Client message admission ${messageId} is no longer reserved`);
+        }
+        if (existing.status === "committed") {
+          return undefined;
+        }
+        const entries = copyClientMessageAdmissionEntries(ledger.entries);
+        entries[messageId] = { ...existing, status: "committed" };
+        await this.writeRecord({
+          ...record,
+          clientMessageAdmissions: {
+            ...ledger,
+            entries,
+          },
+        });
+        return undefined;
+      });
+    const tracked = next.finally(() => {
+      if (this.pendingWrites.get(agentId) === tracked) {
+        this.pendingWrites.delete(agentId);
+      }
+    });
+    this.pendingWrites.set(agentId, tracked);
+    await tracked;
+  }
+
+  async initializeClientMessageAdmissions(
+    agentId: string,
+    entries: Record<string, { fingerprint: string; status: "committed" | "legacy_unverifiable" }>,
+    legacyOverflow: boolean,
+  ): Promise<void> {
+    await this.load();
+    if (Object.keys(entries).length > MAX_CLIENT_MESSAGE_ADMISSIONS) {
+      throw new Error("Initial client message admission ledger exceeds its durable limit");
+    }
+    const previous = this.pendingWrites.get(agentId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.deleting.has(agentId)) {
+          throw new Error(`Agent ${agentId} is being deleted`);
+        }
+        const record = this.cache.get(agentId);
+        if (!record) {
+          throw new Error(`Agent ${agentId} not found`);
+        }
+        if (record.clientMessageAdmissions) {
+          return undefined;
+        }
+        await this.writeRecord({
+          ...record,
+          clientMessageAdmissions: {
+            version: 1,
+            entries: copyClientMessageAdmissionEntries(entries),
+            ...(legacyOverflow ? { legacyOverflow: true } : {}),
+          },
+        });
+        return undefined;
+      });
+    const tracked = next.finally(() => {
+      if (this.pendingWrites.get(agentId) === tracked) {
+        this.pendingWrites.delete(agentId);
+      }
+    });
+    this.pendingWrites.set(agentId, tracked);
+    await tracked;
+  }
+
   private queueRecordWrite(record: StoredAgentRecord): Promise<void> {
     const agentId = record.id;
     const prev = this.pendingWrites.get(agentId) ?? Promise.resolve();
-    const next = prev.then(async () => {
-      if (this.deleting.has(agentId)) {
-        return undefined;
-      }
+    const next = prev
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.deleting.has(agentId)) {
+          return undefined;
+        }
 
-      await this.writeRecord(record);
-      return undefined;
-    });
+        const currentLedger = this.cache.get(agentId)?.clientMessageAdmissions;
+        await this.writeRecord(
+          currentLedger ? { ...record, clientMessageAdmissions: currentLedger } : record,
+        );
+        return undefined;
+      });
 
     const tracked = next.finally(() => {
       if (this.pendingWrites.get(agentId) === tracked) {
@@ -178,7 +496,9 @@ export class AgentStorage {
   async remove(agentId: string): Promise<void> {
     await this.load();
     this.beginDelete(agentId);
-    await (this.pendingWrites.get(agentId) ?? Promise.resolve());
+    while (this.pendingWrites.has(agentId)) {
+      await this.waitForPendingWrite(agentId);
+    }
     const paths = Array.from(this.pathsById.get(agentId) ?? []);
     await Promise.all(
       paths.map(async (filePath) => {
@@ -186,12 +506,11 @@ export class AgentStorage {
           await fs.unlink(filePath);
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code;
-          if (code && code !== "ENOENT") {
-            this.logger.warn(
-              { err: error, agentId, filePath },
-              "Failed to remove agent record file",
-            );
+          if (code === "ENOENT") {
+            return;
           }
+          this.logger.warn({ err: error, agentId, filePath }, "Failed to remove agent record file");
+          throw error;
         }
       }),
     );
@@ -200,6 +519,7 @@ export class AgentStorage {
     this.removeOwnerIndex(agentId);
     this.pathById.delete(agentId);
     this.pathsById.delete(agentId);
+    this.deleting.delete(agentId);
   }
 
   async applySnapshot(
@@ -224,6 +544,9 @@ export class AgentStorage {
     // would wipe it during normal persistence (including on daemon restart).
     if (existing && existing.archivedAt !== undefined) {
       record.archivedAt = existing.archivedAt;
+    }
+    if (existing?.clientMessageAdmissions !== undefined) {
+      record.clientMessageAdmissions = existing.clientMessageAdmissions;
     }
     await this.upsert(record);
   }

@@ -1,26 +1,42 @@
-import type { OpenCodeServerAcquisition, OpenCodeServerManagerLike } from "./server-manager.js";
+import type {
+  OpenCodeServerAcquisition,
+  OpenCodeServerManagerLike,
+  OpenCodeServerScope,
+} from "./server-manager.js";
 
 export interface TestOpenCodeServerAcquisition {
   kind: "current" | "new" | "dedicated" | "existing";
   env?: Record<string, string>;
   url?: string;
+  cwd?: string;
+  agentId?: string;
+  sessionId?: string;
   released: boolean;
 }
 
 export class TestOpenCodeServerManager implements OpenCodeServerManagerLike {
   readonly acquisitions: TestOpenCodeServerAcquisition[] = [];
   readonly server = { port: 1234, url: "http://127.0.0.1:1234" };
+  ensureRunningCount = 0;
 
-  async acquireCurrent(): Promise<OpenCodeServerAcquisition> {
-    return this.recordAcquisition({ kind: "current" });
+  async ensureRunning(_scope?: OpenCodeServerScope): Promise<{ port: number; url: string }> {
+    this.ensureRunningCount += 1;
+    return this.server;
   }
 
-  async acquireNew(): Promise<OpenCodeServerAcquisition> {
-    return this.recordAcquisition({ kind: "new" });
+  async acquireCurrent(scope?: OpenCodeServerScope): Promise<OpenCodeServerAcquisition> {
+    return this.recordAcquisition({ kind: "current", scope });
   }
 
-  async acquireDedicated(env: Record<string, string>): Promise<OpenCodeServerAcquisition> {
-    return this.recordAcquisition({ kind: "dedicated", env });
+  async acquireNew(scope?: OpenCodeServerScope): Promise<OpenCodeServerAcquisition> {
+    return this.recordAcquisition({ kind: "new", scope });
+  }
+
+  async acquireDedicated(
+    env: Record<string, string>,
+    scope?: OpenCodeServerScope,
+  ): Promise<OpenCodeServerAcquisition> {
+    return this.recordAcquisition({ kind: "dedicated", env, scope });
   }
 
   acquireExisting(url: string): OpenCodeServerAcquisition | null {
@@ -31,17 +47,21 @@ export class TestOpenCodeServerManager implements OpenCodeServerManagerLike {
     kind: TestOpenCodeServerAcquisition["kind"];
     env?: Record<string, string>;
     url?: string;
+    scope?: OpenCodeServerScope;
   }): OpenCodeServerAcquisition {
     const acquisition: TestOpenCodeServerAcquisition = {
       kind: input.kind,
       released: false,
       ...(input.env ? { env: input.env } : {}),
       ...(input.url ? { url: input.url } : {}),
+      ...(input.scope?.cwd ? { cwd: input.scope.cwd } : {}),
+      ...(input.scope?.agentId ? { agentId: input.scope.agentId } : {}),
+      ...(input.scope?.sessionId ? { sessionId: input.scope.sessionId } : {}),
     };
     this.acquisitions.push(acquisition);
     return {
       server: this.server,
-      release: async () => {
+      release: () => {
         acquisition.released = true;
       },
     };

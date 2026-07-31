@@ -455,6 +455,10 @@ export class OmpHarness {
     await promptStarted;
   }
 
+  async startTurn(message: string): Promise<void> {
+    await this.requireSession().startTurn(message);
+  }
+
   async interrupt(): Promise<void> {
     await this.requireSession().interrupt();
   }

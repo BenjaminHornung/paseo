@@ -526,6 +526,7 @@ function buildResumeStartInput(input: {
 }): PiStartSessionInput {
   return {
     cwd: input.resumeConfig.cwd,
+    ...(input.launchContext?.processCwd ? { processCwd: input.launchContext.processCwd } : {}),
     env: input.launchContext?.env,
     session: input.sessionFile,
     model: input.resumeConfig.model,
@@ -847,6 +848,11 @@ function latestPiErrorMessage(messages: PiAgentMessage[]): string | null {
     return null;
   }
   return formatPiErrorMessage(latestAssistant);
+}
+
+function isPiAbortedTerminalResponse(messages: PiAgentMessage[]): boolean {
+  const latestAssistant = messages.findLast((message) => message.role === "assistant");
+  return latestAssistant?.stopReason?.toLowerCase() === "aborted";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1241,6 +1247,11 @@ export class PiRpcAgentSession implements AgentSession {
   private state: PiSessionState;
   private readonly currentModeId: string | null;
   private closed = false;
+  // Pi reports an aborted OpenAI Responses stream before the abort RPC resolves.
+  // Keep the turn active until that RPC acknowledges the user-requested cancellation.
+  private interruptingTurnId: string | null = null;
+  private lastInterruptedTurnId: string | null = null;
+  private interruptedTerminalError: { turnId: string; error: string } | null = null;
 
   constructor(options: PiRpcAgentSessionOptions) {
     this.runtimeSession = options.runtimeSession;
@@ -1290,6 +1301,7 @@ export class PiRpcAgentSession implements AgentSession {
     const payload = convertPromptInput(prompt, { model: this.state.model });
     const turnId = randomUUID();
     this.activeTurnId = turnId;
+    this.lastInterruptedTurnId = null;
     this.activeClientMessageId = options?.clientMessageId ?? null;
     this.activeAssistantMessageId = null;
     this.activeTurnStarted = false;
@@ -1434,7 +1446,33 @@ export class PiRpcAgentSession implements AgentSession {
 
   async interrupt(): Promise<void> {
     const turnId = this.activeTurnId;
-    await this.runtimeSession.abort();
+    if (turnId) {
+      this.interruptingTurnId = turnId;
+      this.lastInterruptedTurnId = turnId;
+    }
+    try {
+      await this.runtimeSession.abort();
+    } catch (error) {
+      if (this.interruptingTurnId === turnId) {
+        this.interruptingTurnId = null;
+      }
+      if (this.interruptedTerminalError?.turnId === turnId) {
+        const terminalError = this.interruptedTerminalError;
+        this.interruptedTerminalError = null;
+        this.activeTurnId = null;
+        this.activeClientMessageId = null;
+        this.activeTurnStarted = false;
+        this.activeAssistantMessageId = null;
+        this.clearNoTurnBuffers();
+        this.emit({
+          type: "turn_failed",
+          provider: this.provider,
+          turnId,
+          error: terminalError.error,
+        });
+      }
+      throw error;
+    }
     if (turnId && this.activeTurnId === turnId) {
       this.activeTurnId = null;
       this.activeClientMessageId = null;
@@ -1447,6 +1485,12 @@ export class PiRpcAgentSession implements AgentSession {
         reason: "interrupted",
         turnId,
       });
+    }
+    if (this.interruptingTurnId === turnId) {
+      this.interruptingTurnId = null;
+    }
+    if (this.interruptedTerminalError?.turnId === turnId) {
+      this.interruptedTerminalError = null;
     }
   }
 
@@ -2246,6 +2290,20 @@ export class PiRpcAgentSession implements AgentSession {
   }
 
   private completeTurn(turnId: string | undefined, messages: PiAgentMessage[]): void {
+    if (turnId && this.interruptingTurnId === turnId && isPiAbortedTerminalResponse(messages)) {
+      this.interruptedTerminalError = {
+        turnId,
+        error: latestPiErrorMessage(messages) ?? "Pi turn failed",
+      };
+      return;
+    }
+    if (
+      isPiAbortedTerminalResponse(messages) &&
+      (turnId === this.lastInterruptedTurnId || (!turnId && this.lastInterruptedTurnId !== null))
+    ) {
+      this.lastInterruptedTurnId = null;
+      return;
+    }
     this.activeTurnId = null;
     this.activeClientMessageId = null;
     this.activeAssistantMessageId = null;
@@ -2318,7 +2376,11 @@ export class PiRpcAgentClient implements AgentClient {
       ...this.runtimeSettings?.env,
       ...launchContext?.env,
     };
-    const mcpConfig = await this.prepareMcpConfig(config.cwd, config.mcpServers, mcpEnv);
+    const mcpConfig = await this.prepareMcpConfig(
+      launchContext?.processCwd ?? config.cwd,
+      config.mcpServers,
+      mcpEnv,
+    );
     const paseoExtension = createPiPaseoExtensionFile(
       composeSystemPromptParts(config.systemPrompt, config.daemonAppendSystemPrompt),
     );
@@ -2326,6 +2388,7 @@ export class PiRpcAgentClient implements AgentClient {
     try {
       runtimeSession = await this.runtime.startSession({
         cwd: config.cwd,
+        ...(launchContext?.processCwd ? { processCwd: launchContext.processCwd } : {}),
         model: config.model,
         thinkingOptionId:
           normalizePiThinkingOption(config.thinkingOptionId) ?? DEFAULT_PI_THINKING_LEVEL,
@@ -2374,7 +2437,7 @@ export class PiRpcAgentClient implements AgentClient {
       ...launchContext?.env,
     };
     const mcpConfig = await this.prepareMcpConfig(
-      resumeConfig.cwd,
+      launchContext?.processCwd ?? resumeConfig.cwd,
       resumeConfig.config.mcpServers,
       mcpEnv,
     );
@@ -2495,14 +2558,14 @@ export class PiRpcAgentClient implements AgentClient {
   }
 
   private async prepareMcpConfig(
-    cwd: string,
+    probeCwd: string,
     servers: Record<string, McpServerConfig> | undefined,
     env: Record<string, string> | undefined,
   ): Promise<PiMcpConfigFile | null> {
     if (!servers || Object.keys(servers).length === 0) {
       return null;
     }
-    if (!(await this.detectMcpAdapter(cwd, env))) {
+    if (!(await this.detectMcpAdapter(probeCwd, env))) {
       return null;
     }
     return createPiMcpConfigFile(servers, { piGlobalConfigEnv: env });

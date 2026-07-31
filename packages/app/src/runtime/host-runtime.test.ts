@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+vi.hoisted(() => {
+  (globalThis as Record<string, unknown>).__DEV__ = false;
+});
 import type {
   DaemonClient,
   ConnectionState,
@@ -2302,6 +2305,43 @@ describe("HostRuntimeStore", () => {
     });
 
     useSessionStore.getState().clearSession(host.serverId);
+  });
+
+  it("does not legacy-drain queued messages when the daemon owns queue dispatch", async () => {
+    const host = makeHost({ serverId: "srv_daemon_owned_queue_drain" });
+    const fakeClient = new FakeDaemonClient();
+    const store = new HostRuntimeStore({
+      deps: {
+        createClient: () => fakeClient as unknown as DaemonClient,
+        connectToDaemon: async () => ({
+          client: fakeClient as unknown as DaemonClient,
+          serverId: host.serverId,
+          hostname: null,
+        }),
+        getClientId: async () => "cid_daemon_owned_queue_drain",
+      },
+    });
+    const sessionStore = useSessionStore.getState();
+    sessionStore.initializeSession(host.serverId, fakeClient as unknown as DaemonClient, 1);
+    sessionStore.updateSessionServerInfo(host.serverId, {
+      serverId: host.serverId,
+      hostname: null,
+      version: "0.1.200",
+      features: { agentMessageQueue: true },
+    });
+    sessionStore.setQueuedMessages(
+      host.serverId,
+      new Map([["agent", [{ id: "first", text: "daemon-owned", attachments: [] }]]]),
+    );
+
+    store.drainQueuedAgentMessage(host.serverId, "agent");
+    await Promise.resolve();
+
+    expect(fakeClient.sentAgentMessages).toEqual([]);
+    expect(useSessionStore.getState().sessions[host.serverId]?.queuedMessages.get("agent")).toEqual(
+      [{ id: "first", text: "daemon-owned", attachments: [] }],
+    );
+    sessionStore.clearSession(host.serverId);
   });
 
   it("serializes queued-message drains for the same agent", async () => {

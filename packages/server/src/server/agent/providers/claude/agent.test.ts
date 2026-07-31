@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
 import * as executableUtils from "../../../../executable-resolution/executable-resolution.js";
@@ -416,7 +416,6 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
       });
 
       expect(models.map((m) => m.id)).toEqual([
-        "claude-opus-5[1m]",
         "claude-opus-5",
         "claude-fable-5[1m]",
         "claude-fable-5",
@@ -439,7 +438,7 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
       }
 
       const defaultModel = models.find((m) => m.isDefault);
-      expect(defaultModel?.id).toBe("claude-opus-5[1m]");
+      expect(defaultModel?.id).toBe("claude-opus-5");
     } finally {
       await fs.rm(emptyConfigDir, { recursive: true, force: true });
     }
@@ -461,7 +460,7 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
         force: false,
       });
 
-      expect(models.find((model) => model.isDefault)?.id).toBe("claude-opus-5[1m]");
+      expect(models.find((model) => model.isDefault)?.id).toBe("claude-opus-5");
       expect(models.map((model) => model.id)).toContain("claude-fable-5[1m]");
     } finally {
       await fs.rm(emptyConfigDir, { recursive: true, force: true });
@@ -1283,6 +1282,7 @@ describe("ClaudeAgentSession context window usage", () => {
   interface QueryFactoryForTurnsOptions {
     getContextUsage?: ReturnType<typeof vi.fn>;
     model?: string;
+    onPrompt?: (message: unknown) => void;
   }
 
   async function createSessionForTest(): Promise<TestClaudeSession> {
@@ -1340,7 +1340,8 @@ describe("ClaudeAgentSession context window usage", () => {
       }
 
       void (async () => {
-        for await (const _ of prompt) {
+        for await (const promptMessage of prompt) {
+          options?.onPrompt?.(promptMessage);
           const turnMessages = turns[turnIndex] ?? [];
           turnIndex += 1;
           for (const message of turnMessages) {
@@ -1507,6 +1508,48 @@ describe("ClaudeAgentSession context window usage", () => {
       ...overrides,
     };
   }
+
+  test("steerTurn pushes a priority next user message into the existing input stream", async () => {
+    const capturedPrompts: SDKUserMessage[] = [];
+    const queryFactory = createQueryFactoryForTurns([], {
+      onPrompt: (message) => {
+        capturedPrompts.push(message as SDKUserMessage);
+      },
+    });
+    const client = new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({
+      provider: "claude",
+      cwd: process.cwd(),
+    });
+
+    try {
+      await session.startTurn("first prompt");
+      await vi.waitFor(() => {
+        expect(capturedPrompts).toHaveLength(1);
+      });
+
+      await expect(session.steerTurn?.("steered prompt")).resolves.toBeUndefined();
+
+      await vi.waitFor(() => {
+        expect(capturedPrompts).toHaveLength(2);
+      });
+      expect(capturedPrompts[1]).toMatchObject({
+        type: "user",
+        priority: "next",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "steered prompt" }],
+        },
+      });
+      expect(queryFactory).toHaveBeenCalledTimes(1);
+    } finally {
+      await session.close();
+    }
+  });
 
   test("passes persistSession through to the Claude SDK query options", async () => {
     const createResultTurn = (sessionId: string) => [

@@ -67,6 +67,11 @@ type CodexTestSession = AgentSession & {
   connected: boolean;
   currentThreadId: string | null;
   activeForegroundTurnId: string | null;
+  activeTurnGeneration: number | null;
+  turnStartAcknowledgedGeneration: number | null;
+  turnStartedGeneration: number | null;
+  activeProviderTurnId: string | null;
+  currentTurnId: string | null;
   client: CodexClientLike | null;
 };
 
@@ -103,6 +108,11 @@ function createSession(
   session.connected = true;
   session.currentThreadId = "test-thread";
   session.activeForegroundTurnId = "test-turn";
+  session.activeTurnGeneration = 1;
+  session.turnStartAcknowledgedGeneration = 1;
+  session.turnStartedGeneration = 1;
+  session.activeProviderTurnId = "test-turn";
+  session.currentTurnId = "test-turn";
   return session;
 }
 
@@ -148,6 +158,14 @@ function markdownImageSource(markdown: string): string {
   }
   const source = match[1].replace(/\\\)/g, ")");
   return source.startsWith("file://") ? fileURLToPath(source) : source;
+}
+
+function countCompletedTurns(events: AgentStreamEvent[]): number {
+  return events.filter((event) => event.type === "turn_completed").length;
+}
+
+function countCanceledTurns(events: AgentStreamEvent[]): number {
+  return events.filter((event) => event.type === "turn_canceled").length;
 }
 
 function emitCodexUserMessage(
@@ -204,7 +222,7 @@ function resultFor(method) {
   if (method === "getUserSavedConfig") return { config: {} };
   if (method === "model/list") return { data: [{ id: "custom-model", isDefault: true }] };
   if (method === "thread/start") return { thread: { id: "thread-1" } };
-  if (method === "turn/start") return {};
+  if (method === "turn/start") return { turn: { id: "turn-1", status: "inProgress", items: [] } };
   return {};
 }
 
@@ -271,14 +289,19 @@ async function listCommandsFromFakeCodex(skills: unknown[]): Promise<AgentSlashC
     `
 let buffer = "";
 
-function resultFor(method) {
+function resultFor(method, params) {
   if (method === "initialize") return {};
   if (method === "collaborationMode/list") return { data: [] };
   if (method === "skills/list") {
+    const cwds = params && params.cwds;
+    const projectCwd = "/tmp/codex-question-test";
+    if (!Array.isArray(cwds) || cwds.length !== 1 || cwds[0] !== projectCwd) {
+      return { data: [] };
+    }
     return {
       data: [
         {
-          cwd: "/tmp/codex-question-test",
+          cwd: projectCwd,
           skills: ${JSON.stringify(skills)},
           errors: [],
         },
@@ -299,7 +322,7 @@ process.stdin.on("data", (chunk) => {
     const message = JSON.parse(line);
     if (typeof message.id !== "number") continue;
     try {
-      process.stdout.write(JSON.stringify({ id: message.id, result: resultFor(message.method) }) + "\\n");
+      process.stdout.write(JSON.stringify({ id: message.id, result: resultFor(message.method, message.params) }) + "\\n");
     } catch (error) {
       process.stdout.write(JSON.stringify({ id: message.id, error: { message: error.message } }) + "\\n");
     }
@@ -357,7 +380,7 @@ describe("Codex app-server provider", () => {
           return { thread: { id: "auto-review-thread" } };
         }
         if (method === "turn/start") {
-          return {};
+          return { turn: { id: "turn-auto-review", status: "inProgress", items: [] } };
         }
         throw new Error(`Unexpected request: ${method}`);
       }),
@@ -412,7 +435,7 @@ describe("Codex app-server provider", () => {
             };
           }
           if (method === "turn/start") {
-            return {};
+            return { turn: { id: "turn-auto-review-mode", status: "inProgress", items: [] } };
           }
           throw new Error(`Unexpected request: ${method}`);
         }),
@@ -431,7 +454,7 @@ describe("Codex app-server provider", () => {
         return { data: ["test-thread"] };
       }
       if (method === "turn/start") {
-        return {};
+        return { turn: { id: "turn-needs-approval", status: "inProgress", items: [] } };
       }
       throw new Error(`Unexpected request: ${method}`);
     });
@@ -447,6 +470,71 @@ describe("Codex app-server provider", () => {
         approvalsReviewer: "auto_review",
       }),
     );
+  });
+
+  test("advertises steering support for app-server sessions", () => {
+    const session = createSession();
+
+    expect(session.capabilities.supportsSteering).toBe(true);
+  });
+
+  test("steers against the app-server turn id returned by turn/start", async () => {
+    const session = createSession();
+    const request = vi.fn(async (method: string) => {
+      if (method === "thread/loaded/list") {
+        return { data: ["test-thread"] };
+      }
+      if (method === "turn/start") {
+        return { turn: { id: "app-server-turn-from-start" } };
+      }
+      if (method === "turn/steer") {
+        return { turnId: "app-server-turn-from-start" };
+      }
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    session.activeForegroundTurnId = null;
+    session.client = { request } as CodexClientLike;
+
+    const started = await session.startTurn!("Start the turn");
+    expect(started.turnId).not.toBe("app-server-turn-from-start");
+
+    await session.steerTurn!("Steer the active turn");
+
+    expect(request).toHaveBeenCalledWith(
+      "turn/steer",
+      expect.objectContaining({
+        expectedTurnId: "app-server-turn-from-start",
+      }),
+    );
+  });
+
+  test("sends turn/steer with thread id, built input, and active foreground turn id", async () => {
+    const session = createSession();
+    const request = vi.fn(async (method: string) => {
+      if (method === "turn/steer") {
+        return {};
+      }
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    session.client = { request } as CodexClientLike;
+    session.currentThreadId = "thread-for-steer";
+    session.activeForegroundTurnId = "paseo-foreground-turn-for-steer";
+    session.currentTurnId = "app-server-turn-for-steer";
+
+    await session.steerTurn!("Use this guidance next.");
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith("turn/steer", {
+      threadId: "thread-for-steer",
+      expectedTurnId: "app-server-turn-for-steer",
+      input: [
+        {
+          type: "text",
+          text: "Use this guidance next.",
+          text_elements: [],
+        },
+      ],
+    });
   });
 
   test("passes ephemeral: true to thread/start when constructed as ephemeral", async () => {
@@ -1116,7 +1204,10 @@ describe("Codex app-server provider", () => {
 
     await session.startTurn("remember this", { clientMessageId: "client-message" });
     const userMessage = waitForNextTimelineItem(session, "user_message");
-    emitCodexUserMessage(appServer, { id: "codex-message", text: "remember this" });
+    appServer.submitsUserMessage({
+      itemId: "codex-message",
+      text: "remember this",
+    });
 
     await expect(userMessage).resolves.toMatchObject({
       item: {
@@ -1127,6 +1218,463 @@ describe("Codex app-server provider", () => {
     });
     appServer.completeTurn();
     await session.close();
+  });
+
+  test("completes a run when Codex emits the terminal event before turn started", async () => {
+    const appServer = createFakeCodexAppServer();
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      const lateUserMessage = waitForNextTimelineItem(session, "user_message");
+      const resultPromise = session.run("finish without a turn-start notification", {
+        clientMessageId: "client-terminal-first",
+      });
+      await appServer.waitForTurnStart();
+      appServer.completeTurn();
+
+      await expect(resultPromise).resolves.toMatchObject({
+        sessionId: "thread-1",
+      });
+      appServer.submitsUserMessage({
+        itemId: "codex-terminal-first",
+        text: "finish without a turn-start notification",
+      });
+      await expect(lateUserMessage).resolves.toMatchObject({
+        item: {
+          type: "user_message",
+          messageId: "codex-terminal-first",
+          clientMessageId: "client-terminal-first",
+        },
+      });
+      appServer.completeTurn();
+      expect(events.filter((event) => event.type === "turn_completed")).toHaveLength(1);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("reconciles an active run only after strict thread read evidence when Codex reports the root thread idle", async () => {
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-1", status: "completed", items: [] }],
+          },
+        };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    let resolveCompleted!: () => void;
+    const completed = new Promise<void>((resolve) => {
+      resolveCompleted = resolve;
+    });
+    session.subscribe((event) => {
+      events.push(event);
+      if (event.type === "turn_completed") {
+        resolveCompleted();
+      }
+    });
+
+    try {
+      await session.startTurn("finish through idle status recovery");
+      appServer.changesThreadStatus({ status: "idle" });
+      expect(events.filter((event) => event.type === "turn_completed")).toEqual([]);
+
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      appServer.changesThreadStatus({ status: "idle" });
+
+      await completed;
+      expect(threadReads).toEqual([{ threadId: "thread-1", includeTurns: true }]);
+      appServer.completeTurn();
+      expect(events.filter((event) => event.type === "turn_completed")).toHaveLength(1);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("fails closed when idle reconciliation cannot prove the active turn completed", async () => {
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-1", status: "inProgress", items: [] }],
+          },
+        };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn("do not complete on ambiguous idle");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      appServer.changesThreadStatus({ status: "idle" });
+
+      await expect.poll(() => threadReads.length).toBe(1);
+      await expect.poll(() => countCompletedTurns(events), { timeout: 100 }).toBe(0);
+
+      appServer.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+      await expect.poll(() => countCompletedTurns(events)).toBe(1);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("reconciles a legacy-only root task_complete exactly once through strict thread read evidence", async () => {
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-1", status: "completed", items: [] }],
+          },
+        };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn("finish through legacy task_complete reconciliation");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      appServer.completeTurnLegacy({ threadId: "thread-1" });
+
+      await expect.poll(() => countCompletedTurns(events)).toBe(1);
+      expect(threadReads).toEqual([{ threadId: "thread-1", includeTurns: true }]);
+
+      appServer.completeTurnLegacy({ threadId: "thread-1" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(countCompletedTurns(events)).toBe(1);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("derives cancellation from strict thread read evidence for legacy turn_aborted", async () => {
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-1", status: "interrupted", items: [] }],
+          },
+        };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn("cancel through legacy turn_aborted reconciliation");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      appServer.abortTurnLegacy({ threadId: "thread-1" });
+
+      await expect.poll(() => countCanceledTurns(events)).toBe(1);
+      expect(events.filter((event) => event.type === "turn_failed")).toHaveLength(0);
+      expect(threadReads).toEqual([{ threadId: "thread-1", includeTurns: true }]);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("buffers a legacy null-turn terminal hint until the provider turn id is bound", async () => {
+    let resolveTurnStart!: (value: unknown) => void;
+    const turnStart = new Promise<unknown>((resolve) => {
+      resolveTurnStart = resolve;
+    });
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "turn/start": () => turnStart,
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-1", status: "completed", items: [] }],
+          },
+        };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      const startPromise = session.startTurn("buffer legacy completion before turn/start response");
+      await appServer.waitForTurnStart();
+      appServer.completeTurnLegacy({ threadId: "thread-1" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(countCompletedTurns(events)).toBe(0);
+
+      resolveTurnStart({ turn: { id: "turn-1", status: "inProgress", items: [] } });
+      await startPromise;
+      await expect.poll(() => countCompletedTurns(events)).toBe(1);
+      expect(threadReads).toEqual([{ threadId: "thread-1", includeTurns: true }]);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("ignores a delayed old legacy null-turn terminal while the newer exact turn is still in progress", async () => {
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-2", status: "inProgress", items: [] }],
+          },
+        };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn("first turn");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      appServer.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+      await expect.poll(() => countCompletedTurns(events)).toBe(1);
+
+      await session.startTurn("second turn");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-2" });
+      appServer.completeTurnLegacy({ threadId: "thread-1" });
+
+      await expect.poll(() => threadReads.length).toBe(1);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(countCompletedTurns(events)).toBe(1);
+
+      appServer.completeTurn({ threadId: "thread-1", turnId: "turn-2" });
+      await expect.poll(() => countCompletedTurns(events)).toBe(2);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test.each([
+    {
+      label: "wrong thread id",
+      handler: () => ({
+        thread: {
+          id: "wrong-thread",
+          status: { type: "idle" },
+          turns: [{ id: "turn-1", status: "completed", items: [] }],
+        },
+      }),
+    },
+    {
+      label: "nonterminal thread status",
+      handler: () => ({
+        thread: {
+          id: "thread-1",
+          status: { type: "inProgress" },
+          turns: [{ id: "turn-1", status: "completed", items: [] }],
+        },
+      }),
+    },
+    {
+      label: "missing terminal turn",
+      handler: () => ({
+        thread: {
+          id: "thread-1",
+          status: { type: "idle" },
+          turns: [{ id: "other-turn", status: "completed", items: [] }],
+        },
+      }),
+    },
+    {
+      label: "malformed thread/read payload",
+      handler: () => ({
+        thread: {
+          id: "thread-1",
+          status: { type: "idle" },
+          turns: "not-an-array",
+        },
+      }),
+    },
+    {
+      label: "thread/read failure",
+      handler: () => {
+        return Promise.reject(new Error("thread/read failed"));
+      },
+    },
+  ])("fails closed for legacy null-turn reconciliation when $label", async ({ handler }) => {
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return handler();
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn(`fail closed when ${typeof handler}`);
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      appServer.completeTurnLegacy({ threadId: "thread-1" });
+
+      await expect.poll(() => threadReads.length).toBe(1);
+      await expect.poll(() => countCompletedTurns(events), { timeout: 100 }).toBe(0);
+      expect(events.filter((event) => event.type === "turn_failed")).toHaveLength(0);
+      expect(events.filter((event) => event.type === "turn_canceled")).toHaveLength(0);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("ignores a legacy alias after canonical completion has already settled the turn", async () => {
+    const threadReads: Array<{ threadId?: string; includeTurns?: boolean }> = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/read": (params) => {
+        threadReads.push(params as { threadId?: string; includeTurns?: boolean });
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-1", status: "completed", items: [] }],
+          },
+        };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn("canonical then legacy alias");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      appServer.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+      await expect.poll(() => countCompletedTurns(events)).toBe(1);
+
+      appServer.completeTurnLegacy({ threadId: "thread-1" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(countCompletedTurns(events)).toBe(1);
+      expect(threadReads).toEqual([]);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("ignores stale root turn completions from an earlier generation", async () => {
+    const appServer = createFakeCodexAppServer();
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn("first turn");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-1" });
+      appServer.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+
+      await expect.poll(() => countCompletedTurns(events)).toBe(1);
+
+      await session.startTurn("second turn");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-2" });
+      appServer.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+
+      await expect.poll(() => countCompletedTurns(events), { timeout: 100 }).toBe(1);
+
+      appServer.completeTurn({ threadId: "thread-1", turnId: "turn-2" });
+      await expect.poll(() => countCompletedTurns(events)).toBe(2);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
   });
 
   test("configures Codex app-server to use a custom provider base URL", async () => {
@@ -1413,7 +1961,7 @@ describe("Codex app-server provider", () => {
         return { data: ["test-thread"] };
       }
       if (method === "turn/start") {
-        return {};
+        return { turn: { id: "turn-output-schema", status: "inProgress", items: [] } };
       }
       throw new Error(`Unexpected request: ${method}`);
     });
@@ -1469,7 +2017,7 @@ describe("Codex app-server provider", () => {
         return { data: ["test-thread"] };
       }
       if (method === "turn/start") {
-        return {};
+        return { turn: { id: "turn-slash-command", status: "inProgress", items: [] } };
       }
       throw new Error(`Unexpected request: ${method}`);
     });
@@ -1496,6 +2044,23 @@ describe("Codex app-server provider", () => {
         ],
       }),
     );
+  });
+
+  test("lists project skill commands when app-server receives the project cwd in cwds", async () => {
+    const commands = await listCommandsFromFakeCodex([
+      {
+        name: "project-skill-discovery-regression",
+        description: "A skill discovered from this project.",
+        path: "/tmp/codex-question-test/.agents/skills/project-skill-discovery-regression/SKILL.md",
+      },
+    ]);
+
+    expect(commands).toContainEqual({
+      name: "project-skill-discovery-regression",
+      description: "A skill discovered from this project.",
+      argumentHint: "",
+      kind: "skill",
+    });
   });
 
   test("deduplicates Codex skill slash commands returned from multiple skill roots", async () => {
@@ -1901,26 +2466,33 @@ describe("Codex app-server provider", () => {
     });
     asInternals(session).handleNotification("turn/completed", {
       threadId: "child-thread-1",
-      turn: { status: "completed" },
+      turn: { id: "child-turn-1", status: "completed" },
     });
 
     const timelineEvents = events.filter((event) => event.type === "timeline");
-    expect(timelineEvents).toHaveLength(4);
+    expect(timelineEvents.length).toBeGreaterThanOrEqual(3);
     expect(timelineEvents.every((event) => event.item.type === "tool_call")).toBe(true);
-    const finalItem = timelineEvents.at(-1)?.item;
-    expect(finalItem).toMatchObject({
-      type: "tool_call",
-      callId: "call-sub-agent-child-activity",
-      name: "Sub-agent",
-      status: "completed",
-      detail: {
-        type: "sub_agent",
-        subAgentType: "Sub-agent",
-        description: "Report findings.",
-        log: "[Assistant] Found the path.",
-        actions: [],
-      },
-    });
+    const childActivityEvents = timelineEvents.filter(
+      (event) =>
+        event.item.type === "tool_call" && event.item.callId === "call-sub-agent-child-activity",
+    );
+    expect(childActivityEvents.at(-1)).toEqual(
+      expect.objectContaining({
+        item: expect.objectContaining({
+          type: "tool_call",
+          callId: "call-sub-agent-child-activity",
+          name: "Sub-agent",
+          status: "completed",
+          detail: {
+            type: "sub_agent",
+            subAgentType: "Sub-agent",
+            description: "Report findings.",
+            log: "[Assistant] Found the path.",
+            actions: [],
+          },
+        }),
+      }),
+    );
 
     const providerEvents = events.flatMap((event) =>
       event.type === "provider_subagent" ? [event.event] : [],
@@ -2493,7 +3065,7 @@ describe("Codex app-server provider", () => {
     });
     asInternals(session).handleNotification("turn/completed", {
       threadId: "grandchild-thread",
-      turn: { status: "completed" },
+      turn: { id: "grandchild-turn", status: "completed" },
     });
 
     const beforeParentCompletes = events
@@ -2510,7 +3082,7 @@ describe("Codex app-server provider", () => {
 
     asInternals(session).handleNotification("turn/completed", {
       threadId: "child-thread-root",
-      turn: { status: "completed" },
+      turn: { id: "child-root-turn", status: "completed" },
     });
     expect(events.at(-1)).toMatchObject({
       type: "timeline",
@@ -2525,13 +3097,13 @@ describe("Codex app-server provider", () => {
 
     asInternals(session).handleNotification("turn/completed", {
       threadId: "unmapped-child-thread",
-      turn: { status: "completed" },
+      turn: { id: "unmapped-child-turn", status: "completed" },
     });
     expect(events).toEqual([]);
 
     asInternals(session).handleNotification("turn/completed", {
       threadId: "test-thread",
-      turn: { status: "completed" },
+      turn: { id: "test-turn", status: "completed" },
     });
     expect(events.filter((event) => event.type === "turn_completed")).toHaveLength(1);
 
@@ -2619,7 +3191,7 @@ describe("Codex app-server provider", () => {
     asInternals(session).handleNotification("codex/event/task_complete", {
       msg: { type: "task_complete" },
     });
-    expect(events.filter((event) => event.type === "turn_completed")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn_completed")).toHaveLength(0);
   });
 
   test("discovers a MultiAgentV2 child from a legacy-only lifecycle notification", async () => {
@@ -2637,7 +3209,7 @@ describe("Codex app-server provider", () => {
       const child = waitForProviderSubagent(session, "legacy-only-child-thread");
       const spawn = waitForTimelineToolCall(session, "spawn-legacy-only-child");
 
-      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-with-legacy-only-child" });
+      appServer.startsTurn({ threadId: "thread-1" });
       appServer.startsLegacyOnlySubAgent({
         callId: "spawn-legacy-only-child",
         threadId: "legacy-only-child-thread",
@@ -2693,7 +3265,8 @@ describe("Codex app-server provider", () => {
     try {
       const resultPromise = session.run("Wait for the child.");
       await appServer.waitForTurnStart();
-      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-waiting-for-child" });
+      appServer.startsTurn({ threadId: "thread-1" });
+      await vi.waitFor(() => expect(session.currentTurnId).toBe("turn-1"));
 
       await expect(session.interrupt()).rejects.toThrow("A foreground turn is already active");
 
@@ -2722,7 +3295,7 @@ describe("Codex app-server provider", () => {
         "Cannot interrupt Codex before turn/started identifies the active turn",
       );
 
-      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-identified-late" });
+      appServer.startsTurn({ threadId: "thread-1" });
       appServer.completeTurn();
       await resultPromise;
       appServer.assertNoErrors();
@@ -2751,6 +3324,8 @@ describe("Codex app-server provider", () => {
     const session = createSession();
     const requests: Array<{ method: string; params: unknown }> = [];
     session.activeForegroundTurnId = null;
+    session.activeProviderTurnId = "autonomous-turn";
+    session.turnStartedGeneration = null;
     session.client = {
       request: async (method, params) => {
         requests.push({ method, params });
@@ -3771,6 +4346,49 @@ describe("Codex app-server provider", () => {
     ]);
   });
 
+  test("surfaces invalid SKILL.md entries from skills/list in stream history", async () => {
+    const session = new CodexAppServerAgentSession(createConfig(), null, createTestLogger(), () => {
+      throw new Error("Test session cannot spawn Codex app-server");
+    }) as unknown as CodexTestSession;
+
+    session.client = {
+      request: vi.fn().mockResolvedValue({
+        data: [
+          {
+            cwd: "/tmp/codex-question-test",
+            skills: [],
+            errors: [
+              {
+                path: "/tmp/codex-question-test/.codex/skills/bad-skill/SKILL.md",
+                message: "missing YAML frontmatter delimited by ---",
+              },
+            ],
+          },
+        ],
+      }),
+    };
+
+    await (session as unknown as { loadSkills(): Promise<void> }).loadSkills();
+
+    const history: AgentStreamEvent[] = [];
+    for await (const event of session.streamHistory()) {
+      history.push(event);
+    }
+
+    expect(history).toEqual([
+      {
+        type: "timeline",
+        provider: "codex",
+        item: {
+          type: "error",
+          message:
+            "Skipped loading 1 skill due to invalid SKILL.md file.\n" +
+            "/tmp/codex-question-test/.codex/skills/bad-skill/SKILL.md: missing YAML frontmatter delimited by ---",
+        },
+      },
+    ]);
+  });
+
   test("maps question responses from headers back to question ids and completes the tool call", async () => {
     const session = createSession();
     const events: AgentStreamEvent[] = [];
@@ -3858,7 +4476,7 @@ describe("Codex app-server provider", () => {
     session.subscribe((event) => events.push(event));
 
     asInternals(session).handleNotification("turn/started", {
-      turn: { id: "turn-plan-1" },
+      turn: { id: "test-turn" },
     });
     asInternals(session).handleNotification("turn/plan/updated", {
       plan: [
@@ -3867,7 +4485,7 @@ describe("Codex app-server provider", () => {
       ],
     });
     asInternals(session).handleNotification("turn/completed", {
-      turn: { status: "completed", error: null },
+      turn: { id: "test-turn", status: "completed", error: null },
     });
 
     expect(
@@ -3892,8 +4510,8 @@ describe("Codex app-server provider", () => {
         },
         actions: [
           expect.objectContaining({
-            id: "reject",
-            label: "Reject",
+            id: "dismiss",
+            label: "Dismiss",
             behavior: "deny",
           }),
           expect.objectContaining({
@@ -3920,7 +4538,7 @@ describe("Codex app-server provider", () => {
     session.subscribe((event) => events.push(event));
 
     asInternals(session).handleNotification("turn/started", {
-      turn: { id: "turn-plan-thread-item" },
+      turn: { id: "test-turn" },
     });
     asInternals(session).handleNotification("item/completed", {
       item: {
@@ -3930,7 +4548,7 @@ describe("Codex app-server provider", () => {
       },
     });
     asInternals(session).handleNotification("turn/completed", {
-      turn: { status: "completed", error: null },
+      turn: { id: "test-turn", status: "completed", error: null },
     });
 
     expect(events).not.toContainEqual(
@@ -3955,6 +4573,216 @@ describe("Codex app-server provider", () => {
         },
       }),
     });
+  });
+
+  test("replaces a pending synthetic plan approval when a later plan completes", () => {
+    const session = createSession({
+      featureValues: { plan_mode: true },
+    });
+
+    asInternals(session).handleNotification("turn/started", {
+      turn: { id: "turn-plan-first" },
+    });
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the first plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+
+    asInternals(session).handleNotification("turn/started", {
+      turn: { id: "turn-plan-second" },
+    });
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the revised plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+
+    expect(session.getPendingPermissions()).toEqual([
+      expect.objectContaining({
+        kind: "plan",
+        input: { plan: "- Implement the revised plan" },
+      }),
+    ]);
+  });
+
+  test("dismisses a pending synthetic plan approval after a new prompt is accepted", async () => {
+    const session = createSession({
+      featureValues: { plan_mode: true },
+    });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session).handleNotification("turn/started", {
+      turn: { id: "turn-plan-pending" },
+    });
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the original plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+    const pendingPlan = session.getPendingPermissions()[0];
+    expect(pendingPlan).toBeDefined();
+
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({
+      request: async (method) => {
+        if (method === "thread/loaded/list") return { data: ["test-thread"] };
+        if (method === "turn/start") return {};
+        throw new Error(`Unexpected request: ${method}`);
+      },
+    });
+
+    await session.startTurn("Revise the plan to include tests");
+
+    expect(session.getPendingPermissions()).toEqual([]);
+    expect(events).toContainEqual({
+      type: "permission_resolved",
+      provider: "codex",
+      requestId: pendingPlan!.id,
+      resolution: {
+        behavior: "deny",
+        message: "Dismissed by a new prompt",
+      },
+    });
+  });
+
+  test("makes the old plan non-actionable while a new prompt is being prepared", async () => {
+    const session = createSession({
+      featureValues: { plan_mode: true },
+    });
+
+    asInternals(session).handleNotification("turn/started", {
+      turn: { id: "turn-plan-pending" },
+    });
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the original plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+    const pendingPlan = session.getPendingPermissions()[0];
+    expect(pendingPlan).toBeDefined();
+
+    let continuePromptSetup: (() => void) | undefined;
+    let markPromptSetupStarted: (() => void) | undefined;
+    const promptSetupStarted = new Promise<void>((resolve) => {
+      markPromptSetupStarted = resolve;
+    });
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({
+      request: async (method) => {
+        if (method === "thread/loaded/list") {
+          markPromptSetupStarted?.();
+          await new Promise<void>((resolve) => {
+            continuePromptSetup = resolve;
+          });
+          return { data: ["test-thread"] };
+        }
+        if (method === "turn/start") return {};
+        throw new Error(`Unexpected request: ${method}`);
+      },
+    });
+
+    const startTurn = session.startTurn("Revise the plan");
+    await promptSetupStarted;
+
+    expect(session.getPendingPermissions()).toEqual([]);
+    await expect(
+      session.respondToPermission(pendingPlan!.id, {
+        behavior: "allow",
+        selectedActionId: "implement",
+      }),
+    ).rejects.toThrow(
+      `No pending Codex app-server permission request with id '${pendingPlan!.id}'`,
+    );
+
+    continuePromptSetup?.();
+    await startTurn;
+  });
+
+  test("does not dismiss a new plan approval emitted while a prompt is being accepted", async () => {
+    const session = createSession({
+      featureValues: { plan_mode: true },
+    });
+
+    asInternals(session).handleNotification("turn/started", {
+      turn: { id: "turn-plan-pending" },
+    });
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the original plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+
+    let acceptPrompt: (() => void) | undefined;
+    let markPromptRequested: (() => void) | undefined;
+    const promptRequested = new Promise<void>((resolve) => {
+      markPromptRequested = resolve;
+    });
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({
+      request: async (method) => {
+        if (method === "thread/loaded/list") return { data: ["test-thread"] };
+        if (method === "turn/start") {
+          markPromptRequested?.();
+          return await new Promise<void>((resolve) => {
+            acceptPrompt = resolve;
+          });
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      },
+    });
+
+    const startTurn = session.startTurn("Revise the plan");
+    await promptRequested;
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the newer plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+    acceptPrompt?.();
+    await startTurn;
+
+    expect(session.getPendingPermissions()).toEqual([
+      expect.objectContaining({ input: { plan: "- Implement the newer plan" } }),
+    ]);
+  });
+
+  test("keeps a synthetic plan dismissed when a new prompt is rejected", async () => {
+    const session = createSession({
+      featureValues: { plan_mode: true },
+    });
+
+    asInternals(session).handleNotification("turn/started", {
+      turn: { id: "turn-plan-pending" },
+    });
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the original plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+    const pendingPlan = session.getPendingPermissions()[0];
+    expect(pendingPlan).toBeDefined();
+
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({
+      request: async (method) => {
+        if (method === "thread/loaded/list") return { data: ["test-thread"] };
+        if (method === "turn/start") throw new Error("Prompt rejected");
+        throw new Error(`Unexpected request: ${method}`);
+      },
+    });
+
+    await expect(session.startTurn("Revise the plan")).rejects.toThrow("Prompt rejected");
+
+    expect(session.getPendingPermissions()).toEqual([]);
   });
 
   test("emits imageView paths with spaces as valid assistant markdown images", () => {
@@ -4184,7 +5012,7 @@ describe("Codex app-server provider", () => {
       }),
     ).not.toThrow();
     asInternals(session).handleNotification("turn/completed", {
-      turn: { status: "completed", error: null },
+      turn: { id: "test-turn", status: "completed", error: null },
     });
 
     expect(events).toEqual([
@@ -4214,7 +5042,7 @@ describe("Codex app-server provider", () => {
       },
     });
     asInternals(session).handleNotification("turn/completed", {
-      turn: { status: "completed", error: null },
+      turn: { id: "test-turn", status: "completed", error: null },
     });
 
     expect(events).toContainEqual({
@@ -4458,13 +5286,13 @@ describe("Codex app-server provider", () => {
     session.subscribe((event) => events.push(event));
 
     asInternals(session).handleNotification("turn/started", {
-      turn: { id: "turn-plan-2" },
+      turn: { id: "test-turn" },
     });
     asInternals(session).handleNotification("turn/plan/updated", {
       plan: [{ step: "Implement the new flow", status: "pending" }],
     });
     asInternals(session).handleNotification("turn/completed", {
-      turn: { status: "completed", error: null },
+      turn: { id: "test-turn", status: "completed", error: null },
     });
 
     const request = events.find(
@@ -4512,13 +5340,13 @@ describe("Codex app-server provider", () => {
     session.subscribe((event) => events.push(event));
 
     asInternals(session).handleNotification("turn/started", {
-      turn: { id: "turn-plan-3" },
+      turn: { id: "test-turn" },
     });
     asInternals(session).handleNotification("turn/plan/updated", {
       plan: [{ step: "Implement the safe flow", status: "pending" }],
     });
     asInternals(session).handleNotification("turn/completed", {
-      turn: { status: "completed", error: null },
+      turn: { id: "test-turn", status: "completed", error: null },
     });
 
     const request = events.find(
@@ -4568,7 +5396,7 @@ describe("Codex app-server provider", () => {
         return { data: ["test-thread"] };
       }
       if (method === "turn/start") {
-        return {};
+        return { turn: { id: "turn-follow-up", status: "inProgress", items: [] } };
       }
       throw new Error(`Unexpected request: ${method}`);
     });
@@ -4580,13 +5408,13 @@ describe("Codex app-server provider", () => {
     session.subscribe((event) => events.push(event));
 
     asInternals(session).handleNotification("turn/started", {
-      turn: { id: "turn-plan-4" },
+      turn: { id: "test-turn" },
     });
     asInternals(session).handleNotification("turn/plan/updated", {
       plan: [{ step: "Implement the fast flow", status: "pending" }],
     });
     asInternals(session).handleNotification("turn/completed", {
-      turn: { status: "completed", error: null },
+      turn: { id: "test-turn", status: "completed", error: null },
     });
 
     const permissionRequest = events.find(

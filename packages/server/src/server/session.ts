@@ -37,10 +37,15 @@ import { isStoredAgentProviderAvailable, toAgentPersistenceHandle } from "./pers
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent/agent-loading.js";
 import {
   formatSystemNotificationPrompt,
+  ownBackgroundAgentRunStart,
   sendPromptToAgent,
-  waitForAgentRunStartWithTimeout,
   unarchiveAgentState,
+  waitForAgentRunStartWithTimeout,
 } from "./agent/agent-prompt.js";
+import {
+  dispatchPromptWithReplayAdmission,
+  resolveReplayAdmissionForPrompt,
+} from "./agent-dispatch-orchestration.js";
 import {
   resolveCreateAgentTitles,
   resolveFirstAgentPromptTitle,
@@ -139,6 +144,10 @@ import {
 import { wrapSpokenInput } from "./voice-config.js";
 import { isVoicePermissionAllowed } from "./voice-permission-policy.js";
 import { VoiceSession } from "./session/voice/voice-session.js";
+import type {
+  AgentMessageQueueController,
+  EnqueueAgentMessageInput,
+} from "./agent-message-queue.js";
 import { CheckoutSession } from "./session/checkout/checkout-session.js";
 import {
   createWorkspaceGitObserverService,
@@ -405,6 +414,7 @@ export interface SessionOptions {
   onMessage: (msg: SessionOutboundMessage) => void;
   onMessageToSource?: (source: object, msg: SessionOutboundMessage) => void;
   onBinaryMessage?: (frame: Uint8Array) => void;
+  onBinaryMessageToSource?: (source: object, frame: Uint8Array) => Promise<void>;
   getTransportBufferedAmount?: () => number | null;
   onLifecycleIntent?: (intent: SessionLifecycleIntent) => void;
   onWorkspaceRecovered?: (workspace: PersistedWorkspaceRecord) => Promise<void>;
@@ -415,6 +425,7 @@ export interface SessionOptions {
   worktreesRoot?: string;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
+  agentMessageQueue?: AgentMessageQueueController;
   projectRegistry: ProjectRegistry;
   workspaceRegistry: WorkspaceRegistry;
   filesystem?: SessionFileSystem;
@@ -530,6 +541,24 @@ function sessionRequestId(message: SessionInboundMessage): string | null {
   return null;
 }
 
+const noopAgentMessageQueue: AgentMessageQueueController = {
+  async enqueue(_input: EnqueueAgentMessageInput) {
+    throw new Error("Agent message queue is unavailable");
+  },
+  async list() {
+    return [];
+  },
+  async cancel() {
+    return false;
+  },
+  async dispatchNow() {
+    throw new Error("Agent message queue is unavailable");
+  },
+  async clearAgent() {
+    return;
+  },
+};
+
 interface AgentTimelineProjectionSelection {
   timeline: AgentTimelineFetchResult;
   entries: TimelineProjectionEntry[];
@@ -568,6 +597,9 @@ export class Session {
     | ((source: object, msg: SessionOutboundMessage) => void)
     | null;
   private readonly onBinaryMessage: ((frame: Uint8Array) => void) | null;
+  private readonly onBinaryMessageToSource:
+    | ((source: object, frame: Uint8Array) => Promise<void>)
+    | null;
   private readonly getTransportBufferedAmount: () => number | null;
   private readonly onLifecycleIntent: ((intent: SessionLifecycleIntent) => void) | null;
   private readonly onWorkspaceRecovered:
@@ -579,6 +611,7 @@ export class Session {
 
   private agentManager: AgentManager;
   private readonly agentStorage: AgentStorage;
+  private readonly agentMessageQueue: AgentMessageQueueController;
   private readonly projectRegistry: ProjectRegistry;
   private readonly workspaceRegistry: WorkspaceRegistry;
   private readonly filesystem: SessionFileSystem;
@@ -637,6 +670,7 @@ export class Session {
   private readonly workspaceScripts: WorkspaceScriptsService;
   private readonly createAgentLifecycleDispatch: CreateAgentLifecycleDispatch;
 
+  // eslint-disable-next-line complexity
   constructor(options: SessionOptions) {
     const {
       clientId,
@@ -646,6 +680,7 @@ export class Session {
       onMessage,
       onMessageToSource,
       onBinaryMessage,
+      onBinaryMessageToSource,
       getTransportBufferedAmount,
       onLifecycleIntent,
       onWorkspaceRecovered,
@@ -656,6 +691,7 @@ export class Session {
       worktreesRoot,
       agentManager,
       agentStorage,
+      agentMessageQueue,
       projectRegistry,
       workspaceRegistry,
       filesystem,
@@ -698,6 +734,7 @@ export class Session {
     this.onMessage = onMessage;
     this.onMessageToSource = onMessageToSource ?? null;
     this.onBinaryMessage = onBinaryMessage ?? null;
+    this.onBinaryMessageToSource = onBinaryMessageToSource ?? null;
     this.getTransportBufferedAmount = getTransportBufferedAmount ?? (() => 0);
     this.onLifecycleIntent = onLifecycleIntent ?? null;
     this.onWorkspaceRecovered = onWorkspaceRecovered ?? null;
@@ -711,8 +748,8 @@ export class Session {
     });
     this.workspaceFilesSession = new WorkspaceFilesSession({
       host: {
-        emit: (msg) => this.emit(msg),
-        emitBinary: (frame) => this.emitBinary(frame),
+        emit: (msg, source) => this.emitForSource(msg, source),
+        emitBinary: (frame, source) => this.emitBinaryForFileTransfer(frame, source),
         hasBinaryChannel: () => this.onBinaryMessage !== null,
       },
       downloadTokenStore,
@@ -721,6 +758,7 @@ export class Session {
     });
     this.agentManager = agentManager;
     this.agentStorage = agentStorage;
+    this.agentMessageQueue = agentMessageQueue ?? noopAgentMessageQueue;
     this.projectRegistry = projectRegistry;
     this.workspaceRegistry = workspaceRegistry;
     this.filesystem = filesystem ?? nodeSessionFileSystem;
@@ -733,6 +771,7 @@ export class Session {
     });
     this.workspaceAutoName = workspaceAutoName;
     this.workspaceProvisioning = createWorkspaceProvisioningService({
+      serverId,
       workspaceRegistry: this.workspaceRegistry,
       projectRegistry: this.projectRegistry,
       workspaceGitService: this.workspaceGitService,
@@ -791,7 +830,7 @@ export class Session {
         listLiveAgents: () => this.agentManager.listAgents(),
         resolveAgentIdentifier: (identifier) => this.resolveAgentIdentifier(identifier),
         sendAgentMessage: async (agentId, text) => {
-          await sendPromptToAgent({
+          const dispatchResult = await sendPromptToAgent({
             agentManager: this.agentManager,
             agentStorage: this.agentStorage,
             agentId,
@@ -799,6 +838,15 @@ export class Session {
             unarchive: false,
             logger: this.sessionLogger,
           });
+          if (!dispatchResult.outOfBand && !dispatchResult.skippedReason) {
+            ownBackgroundAgentRunStart({
+              startAcknowledged: dispatchResult.startAcknowledged,
+              logger: this.sessionLogger,
+              context: { agentId, source: "chat_schedule_loop" },
+              timeoutMessage: "Scheduled agent message did not acknowledge start before timeout",
+              failureMessage: "Scheduled agent message failed before start acknowledgement",
+            });
+          }
         },
       },
       chatService,
@@ -1780,13 +1828,14 @@ export class Session {
       this.dispatchAgentRewindMessage(msg) ??
       this.dispatchAgentRelationshipMessage(msg) ??
       this.dispatchAgentTimelineMessage(msg, source) ??
+      this.dispatchAgentMessageQueueMessage(msg) ??
       this.dispatchHubExecutionMessage(msg) ??
       this.dispatchAgentLifecycleMessage(msg) ??
       this.dispatchAgentConfigMessage(msg) ??
       this.dispatchCheckoutMessage(msg) ??
       this.dispatchWorkspaceRecoveryMessage(msg) ??
       this.dispatchWorkspaceAndProjectMessage(msg) ??
-      this.dispatchWorkspaceFileMessage(msg) ??
+      this.dispatchWorkspaceFileMessage(msg, source) ??
       this.dispatchProviderMessage(msg) ??
       this.dispatchTerminalMessage(msg) ??
       this.dispatchChatScheduleLoopMessage(msg) ??
@@ -1892,6 +1941,21 @@ export class Session {
       }
       case "agent.fork_context.request":
         return this.handleAgentForkContextRequest(msg);
+      default:
+        return undefined;
+    }
+  }
+
+  private dispatchAgentMessageQueueMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "queue.agent_message.enqueue.request":
+        return this.handleQueueAgentMessageEnqueueRequest(msg);
+      case "queue.agent_message.list.request":
+        return this.handleQueueAgentMessageListRequest(msg);
+      case "queue.agent_message.cancel.request":
+        return this.handleQueueAgentMessageCancelRequest(msg);
+      case "queue.agent_message.dispatch.request":
+        return this.handleQueueAgentMessageDispatchRequest(msg);
       default:
         return undefined;
     }
@@ -2066,6 +2130,8 @@ export class Session {
     switch (msg.type) {
       case "fetch_workspaces_request":
         return this.handleFetchWorkspacesRequest(msg);
+      case "project.list.request":
+        return this.handleProjectListRequest(msg.requestId);
       case "paseo_worktree_list_request":
         return this.handlePaseoWorktreeListRequest(msg);
       case "paseo_worktree_archive_request":
@@ -2106,10 +2172,13 @@ export class Session {
     }
   }
 
-  private dispatchWorkspaceFileMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+  private dispatchWorkspaceFileMessage(
+    msg: SessionInboundMessage,
+    source?: object,
+  ): Promise<void> | undefined {
     switch (msg.type) {
       case "file_explorer_request":
-        return this.workspaceFilesSession.handleFileExplorerRequest(msg);
+        return this.workspaceFilesSession.handleFileExplorerRequest(msg, source);
       case "fs.file.subscribe.request":
         return this.workspaceFilesSession.handleFileSubscribeRequest(msg);
       case "fs.file.unsubscribe.request":
@@ -2335,12 +2404,14 @@ export class Session {
     // durable snapshot, otherwise an in-flight background write can recreate it.
     await this.agentManager.flush();
 
-    try {
-      await this.agentStorage.remove(agentId);
-      await this.agentManager.deleteAgentState(agentId);
-    } catch (error) {
-      this.sessionLogger.error({ err: error, agentId }, `Failed to fully delete agent ${agentId}`);
-    }
+    // Delete queued work first so a partial hard delete cannot leave messages
+    // that become runnable again after a restart. Each step is idempotent, so a
+    // failed later step can be retried without restoring already-deleted state.
+    await this.agentMessageQueue.clearAgent(agentId, { dropRevision: true });
+    await this.agentManager.deleteAgentState(agentId);
+    // Keep the record until last so a retry can still recover workspaceId after
+    // the live projection and committed timeline have already been removed.
+    await this.agentStorage.remove(agentId);
 
     this.emit({
       type: "agent_deleted",
@@ -2383,6 +2454,8 @@ export class Session {
       },
       agentId,
     );
+
+    await this.agentMessageQueue.clearAgent(agentId);
 
     if (this.agentUpdates.hasSubscription()) {
       const payload = await this.agentUpdates.emitStoredRecord(archivedRecord);
@@ -2621,7 +2694,7 @@ export class Session {
       // resolved name lands in the UI immediately.
       const workspaces = await this.workspaceRegistry.list();
       const affectedWorkspaceIds = workspaces
-        .filter((workspace) => workspace.projectId === projectId)
+        .filter((workspace) => workspace.projectId === existing.projectId)
         .map((workspace) => workspace.workspaceId);
       if (affectedWorkspaceIds.length > 0) {
         await this.emitWorkspaceUpdatesForWorkspaceIds(affectedWorkspaceIds);
@@ -2660,8 +2733,10 @@ export class Session {
     this.sessionLogger.info({ projectId, requestId }, "session: project.remove.request");
 
     try {
+      const project = await this.projectRegistry.get(projectId);
+      const resolvedProjectId = project?.projectId ?? projectId;
       const projectWorkspaces = (await this.workspaceRegistry.list()).filter(
-        (workspace) => workspace.projectId === projectId,
+        (workspace) => workspace.projectId === resolvedProjectId,
       );
       const activeWorkspaceIds = projectWorkspaces
         .filter((workspace) => !workspace.archivedAt)
@@ -2689,7 +2764,7 @@ export class Session {
           removedWorkspaceIds.push(workspaceId);
         }
 
-        await this.projectRegistry.remove(projectId);
+        await this.projectRegistry.remove(resolvedProjectId);
       } finally {
         if (activeWorkspaceIds.length > 0) {
           this.clearWorkspaceArchiving(activeWorkspaceIds);
@@ -2936,7 +3011,7 @@ export class Session {
     const prompt = buildAgentPrompt(promptText, images, attachments);
 
     try {
-      await sendPromptToAgent({
+      const dispatchResult = await sendPromptToAgent({
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         agentId,
@@ -2945,6 +3020,9 @@ export class Session {
         runOptions,
         logger: this.sessionLogger,
       });
+      if (!dispatchResult.outOfBand && !dispatchResult.skippedReason) {
+        await waitForAgentRunStartWithTimeout(dispatchResult.startAcknowledged);
+      }
       return { ok: true };
     } catch (error) {
       this.handleAgentRunError(agentId, error, "Failed to send agent message");
@@ -3041,11 +3119,15 @@ export class Session {
           env,
           provisionalTitle,
           firstAgentContext,
+          onAgentRegistered: (agentId) => {
+            createdAgentId = agentId;
+          },
           buildSessionConfig: (sessionConfig, gitOptions, legacyWorktreeName, ctx) =>
             this.buildAgentSessionConfig(sessionConfig, gitOptions, legacyWorktreeName, ctx),
         },
       );
       createdAgentId = snapshot.id;
+      await this.agentManager.hydrateTimelineFromProvider(snapshot.id);
       await this.agentUpdates.forwardLiveAgent(snapshot);
       if (resolvedIntent.createdDirectoryWorkspace && trimmedPrompt) {
         this.workspaceAutoName.scheduleForDirectory(
@@ -3094,6 +3176,7 @@ export class Session {
             requestId,
             error: wireError.message,
             errorCode: wireError.code,
+            ...(createdAgentId === null ? { agentCreated: false as const } : {}),
           },
         });
       }
@@ -4450,6 +4533,7 @@ export class Session {
   ): WorkspaceProjectDescriptorPayload {
     return {
       projectId: project.projectId,
+      ...(project.projectKey ? { projectKey: project.projectKey } : {}),
       projectDisplayName: resolveProjectDisplayName(project),
       projectCustomName: project.customName ?? null,
       projectRootPath: project.rootPath,
@@ -4507,6 +4591,7 @@ export class Session {
         : {}),
       workspaceGitService: this.workspaceGitService,
       workspaceProvisioning: this.workspaceProvisioning,
+      workspaceRegistry: this.workspaceRegistry,
     });
     void Promise.all([
       this.gitMutation.notifyGitMutation(input.cwd, "create-worktree"),
@@ -4919,6 +5004,29 @@ export class Session {
           requestType: request.type,
           error: message,
           code,
+        },
+      });
+    }
+  }
+
+  private async handleProjectListRequest(requestId: string): Promise<void> {
+    try {
+      const projects = (await this.projectRegistry.list())
+        .filter((project) => !project.archivedAt)
+        .map((project) => this.buildProjectDescriptor(project));
+      this.emit({
+        type: "project.list.response",
+        payload: { requestId, projects },
+      });
+    } catch (error) {
+      this.sessionLogger.error({ err: error }, "Failed to handle project.list.request");
+      this.emit({
+        type: "rpc_error",
+        payload: {
+          requestId,
+          requestType: "project.list.request",
+          error: error instanceof Error ? error.message : "Failed to list projects",
+          code: "project_list_failed",
         },
       });
     }
@@ -6032,6 +6140,7 @@ export class Session {
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         logger: this.sessionLogger,
+        allowMissingCwd: true,
       });
       const agentPayload = await this.buildAgentPayload(snapshot);
 
@@ -6294,84 +6403,236 @@ export class Session {
       const agentId = resolved.agentId;
 
       const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
+      const replayResolution = await resolveReplayAdmissionForPrompt({
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        agentId,
+        prompt,
+        messageId: msg.messageId,
+        logger: this.sessionLogger,
+      });
+      if (!replayResolution.admission) {
+        this.emitSendAgentMessageResponse(
+          msg.requestId,
+          agentId,
+          replayResolution.accepted,
+          replayResolution.error,
+        );
+        return;
+      }
+      const replayAdmission = replayResolution.admission;
+
       this.sessionLogger.trace(
         {
           agentId,
-          messageId: msg.messageId,
+          messageId: replayAdmission.messageId,
           textPrefix: msg.text.slice(0, 80),
         },
         "agent.session.send_agent_message",
       );
-      let dispatchResult: { outOfBand: boolean };
-      try {
-        dispatchResult = await sendPromptToAgent({
-          agentManager: this.agentManager,
-          agentStorage: this.agentStorage,
-          agentId,
-          prompt,
-          messageId: msg.messageId,
-          logger: this.sessionLogger,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.handleAgentRunError(agentId, error, "Failed to send agent message");
-        this.emit({
-          type: "send_agent_message_response",
-          payload: {
-            requestId: msg.requestId,
-            agentId,
-            accepted: false,
-            error: message,
-          },
-        });
-        return;
-      }
+      const dispatchResult = await dispatchPromptWithReplayAdmission({
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        agentId,
+        prompt,
+        replayAdmission,
+        logger: this.sessionLogger,
+        onDispatchFailure: (error) => {
+          this.handleAgentRunError(agentId, error, "Failed to send agent message");
+        },
+      });
+      this.emitSendAgentMessageResponse(
+        msg.requestId,
+        agentId,
+        dispatchResult.kind === "started" || dispatchResult.kind === "duplicate",
+        dispatchResult.kind === "started" || dispatchResult.kind === "duplicate"
+          ? null
+          : dispatchResult.error,
+      );
+    } catch (error) {
+      this.emitSendAgentMessageResponse(
+        msg.requestId,
+        resolved.agentId,
+        false,
+        errorToFriendlyMessage(error),
+      );
+    }
+  }
 
-      if (dispatchResult.outOfBand) {
-        this.emit({
-          type: "send_agent_message_response",
-          payload: {
-            requestId: msg.requestId,
-            agentId,
-            accepted: true,
-            error: null,
-          },
-        });
-        return;
-      }
+  private emitSendAgentMessageResponse(
+    requestId: string,
+    agentId: string,
+    accepted: boolean,
+    error: string | null,
+  ): void {
+    this.emit({
+      type: "send_agent_message_response",
+      payload: { requestId, agentId, accepted, error },
+    });
+  }
 
-      try {
-        await waitForAgentRunStartWithTimeout(this.agentManager, agentId);
-      } catch (error) {
-        this.emit({
-          type: "send_agent_message_response",
-          payload: {
-            requestId: msg.requestId,
-            agentId,
-            accepted: false,
-            error: errorToFriendlyMessage(error),
-          },
-        });
-        return;
-      }
-
+  private async handleQueueAgentMessageEnqueueRequest(
+    msg: Extract<SessionInboundMessage, { type: "queue.agent_message.enqueue.request" }>,
+  ): Promise<void> {
+    const resolved = await this.resolveAgentIdentifier(msg.agentId);
+    if (!resolved.ok) {
       this.emit({
-        type: "send_agent_message_response",
+        type: "queue.agent_message.enqueue.response",
         payload: {
           requestId: msg.requestId,
-          agentId,
+          agentId: msg.agentId,
+          accepted: false,
+          message: null,
+          error: resolved.error,
+        },
+      });
+      return;
+    }
+
+    try {
+      const message = await this.agentMessageQueue.enqueue({
+        agentId: resolved.agentId,
+        text: msg.text,
+        messageId: msg.messageId,
+        images: msg.images,
+        attachments: msg.attachments,
+        createdByClientId: this.clientId,
+      });
+      this.emit({
+        type: "queue.agent_message.enqueue.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: resolved.agentId,
+          accepted: true,
+          message,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "queue.agent_message.enqueue.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: resolved.agentId,
+          accepted: false,
+          message: null,
+          error: getErrorMessageOr(error, "Failed to queue agent message"),
+        },
+      });
+    }
+  }
+
+  private async handleQueueAgentMessageListRequest(
+    msg: Extract<SessionInboundMessage, { type: "queue.agent_message.list.request" }>,
+  ): Promise<void> {
+    try {
+      let agentId: string | undefined;
+      if (msg.agentId) {
+        const resolved = await this.resolveAgentIdentifier(msg.agentId);
+        if (!resolved.ok) {
+          this.emit({
+            type: "queue.agent_message.list.response",
+            payload: {
+              requestId: msg.requestId,
+              queues: [],
+              error: resolved.error,
+            },
+          });
+          return;
+        }
+        agentId = resolved.agentId;
+      }
+      const queues = await this.agentMessageQueue.list(agentId);
+      this.emit({
+        type: "queue.agent_message.list.response",
+        payload: {
+          requestId: msg.requestId,
+          queues,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "queue.agent_message.list.response",
+        payload: {
+          requestId: msg.requestId,
+          queues: [],
+          error: getErrorMessageOr(error, "Failed to list queued agent messages"),
+        },
+      });
+    }
+  }
+
+  private async handleQueueAgentMessageCancelRequest(
+    msg: Extract<SessionInboundMessage, { type: "queue.agent_message.cancel.request" }>,
+  ): Promise<void> {
+    const resolved = await this.resolveAgentIdentifier(msg.agentId);
+    if (!resolved.ok) {
+      this.emit({
+        type: "queue.agent_message.cancel.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: msg.agentId,
+          queuedMessageId: msg.queuedMessageId,
+          accepted: false,
+          error: resolved.error,
+        },
+      });
+      return;
+    }
+
+    const removed = await this.agentMessageQueue.cancel(resolved.agentId, msg.queuedMessageId);
+    this.emit({
+      type: "queue.agent_message.cancel.response",
+      payload: {
+        requestId: msg.requestId,
+        agentId: resolved.agentId,
+        queuedMessageId: msg.queuedMessageId,
+        accepted: removed,
+        error: removed ? null : `Queued message not found: ${msg.queuedMessageId}`,
+      },
+    });
+  }
+
+  private async handleQueueAgentMessageDispatchRequest(
+    msg: Extract<SessionInboundMessage, { type: "queue.agent_message.dispatch.request" }>,
+  ): Promise<void> {
+    const resolved = await this.resolveAgentIdentifier(msg.agentId);
+    if (!resolved.ok) {
+      this.emit({
+        type: "queue.agent_message.dispatch.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: msg.agentId,
+          queuedMessageId: msg.queuedMessageId,
+          accepted: false,
+          error: resolved.error,
+        },
+      });
+      return;
+    }
+
+    try {
+      await this.agentMessageQueue.dispatchNow(resolved.agentId, msg.queuedMessageId);
+      this.emit({
+        type: "queue.agent_message.dispatch.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: resolved.agentId,
+          queuedMessageId: msg.queuedMessageId,
           accepted: true,
           error: null,
         },
       });
     } catch (error) {
       this.emit({
-        type: "send_agent_message_response",
+        type: "queue.agent_message.dispatch.response",
         payload: {
           requestId: msg.requestId,
           agentId: resolved.agentId,
+          queuedMessageId: msg.queuedMessageId,
           accepted: false,
-          error: errorToFriendlyMessage(error),
+          error: getErrorMessageOr(error, "Failed to dispatch queued agent message"),
         },
       });
     }
@@ -6530,6 +6791,22 @@ export class Session {
     } catch (error) {
       this.sessionLogger.error({ err: error }, "Failed to emit binary frame");
     }
+  }
+
+  private async emitBinaryForFileTransfer(frame: Uint8Array, source?: object): Promise<void> {
+    if (source && this.onBinaryMessageToSource) {
+      await this.onBinaryMessageToSource(source, frame);
+      return;
+    }
+    this.emitBinary(frame);
+  }
+
+  private emitForSource(msg: SessionOutboundMessage, source?: object): void {
+    if (source && this.onMessageToSource) {
+      this.onMessageToSource(source, msg);
+      return;
+    }
+    this.emit(msg);
   }
 
   /**

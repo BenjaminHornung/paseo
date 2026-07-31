@@ -38,7 +38,10 @@ export function addRunOptions(cmd: Command): Command {
         "Model to use (e.g., claude-sonnet-4-20250514, claude-3-5-haiku-20241022)",
       )
       .option("--thinking <id>", "Thinking option ID to use for this run")
-      .option("--mode <mode>", "Provider-specific mode (e.g., plan, default, bypass)")
+      .option(
+        "--mode <mode>",
+        "Provider-specific mode ID; omit for the provider default (see `paseo provider ls`)",
+      )
       .option("--new-workspace <local|worktree>", "Create a separate local or worktree workspace")
       .addOption(new Option("--worktree <name>", "Legacy workspace isolation alias").hideHelp())
       .option(
@@ -456,6 +459,52 @@ function parseRunEnv(envFlags: string[] | undefined): Record<string, string> {
   });
 }
 
+interface PreparedRunInputs {
+  cwd: string;
+  thinkingOptionId: string | undefined;
+  images: ReturnType<typeof loadRunImages>;
+  requestEnv: Record<string, string> | undefined;
+  requestLabels: Record<string, string> | undefined;
+  callerAgentId: string | undefined;
+}
+
+function prepareRunInputs(options: AgentRunOptions): PreparedRunInputs {
+  const cwd = options.cwd ?? process.cwd();
+  const thinkingOptionId = options.thinking?.trim();
+  if (options.thinking !== undefined && !thinkingOptionId) {
+    throw {
+      code: "INVALID_THINKING_OPTION",
+      message: "--thinking cannot be empty",
+      details:
+        'Provide a thinking option ID. Use "paseo provider models <provider> --thinking" to list valid IDs.',
+    } satisfies CommandError;
+  }
+
+  try {
+    const images = loadRunImages(options.image);
+    const labels = parseRunLabels(options.label);
+    const env = parseRunEnv(options.env);
+    return {
+      cwd,
+      thinkingOptionId,
+      images,
+      requestEnv: Object.keys(env).length > 0 ? env : undefined,
+      requestLabels: Object.keys(labels).length > 0 ? labels : undefined,
+      callerAgentId: resolveRunCallerAgentId(),
+    };
+  } catch (err) {
+    if (err && typeof err === "object" && "code" in err) {
+      throw err;
+    }
+
+    const message = err instanceof Error ? err.message : String(err);
+    throw {
+      code: "AGENT_CREATE_FAILED",
+      message: `Failed to create agent: ${message}`,
+    } satisfies CommandError;
+  }
+}
+
 function parseKeyValueFlags(
   flags: string[] | undefined,
   options: {
@@ -532,34 +581,71 @@ export async function resolveExistingRunWorkspace(
   } satisfies CommandError;
 }
 
+interface RunWorkspacePreflight {
+  workspace?: RunWorkspace;
+  modeCatalogCwd?: string;
+}
+
+interface ResolvedRunWorkspace {
+  workspace: RunWorkspace;
+  /** Present only when this command created a fresh workspace record. */
+  rollbackWorkspaceId?: string;
+}
+
+// Resolve workspace context that is available without creating anything. This
+// gives cwd-scoped provider catalogs the real workspace directory while keeping
+// invalid modes atomic for runs that need a new workspace.
+async function resolveRunWorkspacePreflight(
+  client: ConnectedDaemonClient,
+  options: AgentRunOptions,
+  cwd: string,
+  callerAgentId: string | undefined,
+): Promise<RunWorkspacePreflight> {
+  const requestedIsolation = resolveNewWorkspaceKind(options);
+  const explicit = requestedIsolation ? undefined : options.workspace?.trim();
+  if (explicit) {
+    console.error(`Using workspace ${explicit}`);
+    const workspace = await resolveExistingRunWorkspace(client, explicit);
+    return { workspace, modeCatalogCwd: workspace.cwd };
+  }
+
+  if (!requestedIsolation && callerAgentId) {
+    // The daemon resolves the caller's workspace. The CLI's source cwd is not
+    // guaranteed to be that workspace's cwd, so do not use it for a catalog
+    // decision that could reject a valid provider mode.
+    return { workspace: { cwd } };
+  }
+
+  const ambientWorkspaceId = requestedIsolation
+    ? undefined
+    : process.env.PASEO_WORKSPACE_ID?.trim();
+  if (ambientWorkspaceId) {
+    console.error(`Using workspace ${ambientWorkspaceId}`);
+    const workspace = await resolveExistingRunWorkspace(client, ambientWorkspaceId);
+    return { workspace, modeCatalogCwd: workspace.cwd };
+  }
+
+  // A worktree may check out --base with a provider catalog that differs from
+  // the source checkout. Let createAgent validate against the actual created
+  // workspace, then roll that workspace back if validation rejects it.
+  if (requestedIsolation === "worktree") {
+    return {};
+  }
+
+  return { modeCatalogCwd: cwd };
+}
+
 // Workspace policy for `paseo run`. Precedence:
 //   1. --workspace <id>            -> run in that existing workspace
 //   2. $PASEO_AGENT_ID             -> daemon resolves the caller's workspace
 //   3. $PASEO_WORKSPACE_ID         -> exported by workspace terminals
-//   4. --new-workspace <kind>      -> mint a new workspace explicitly
+//   4. --new-workspace <kind>      -> mint a new workspace with explicit isolation
 //   5. bare run                    -> mint a new local-backed workspace for cwd
-async function resolveRunWorkspace(
+async function createRunWorkspace(
   client: ConnectedDaemonClient,
   options: AgentRunOptions,
   cwd: string,
 ): Promise<RunWorkspace> {
-  const newWorkspace = resolveNewWorkspaceKind(options);
-  const explicit = newWorkspace ? undefined : options.workspace?.trim();
-  if (explicit) {
-    console.error(`Using workspace ${explicit}`);
-    return resolveExistingRunWorkspace(client, explicit);
-  }
-
-  if (!newWorkspace && resolveRunCallerAgentId()) {
-    return { cwd };
-  }
-
-  const ambientWorkspaceId = newWorkspace ? undefined : process.env.PASEO_WORKSPACE_ID?.trim();
-  if (ambientWorkspaceId) {
-    console.error(`Using workspace ${ambientWorkspaceId}`);
-    return resolveExistingRunWorkspace(client, ambientWorkspaceId);
-  }
-
   // TODO: thread the run `prompt` as firstAgentContext so workspace-level
   // title/branch generation picks up the task description (U8/U6 deferred).
   const source = buildRunWorkspaceSource(options, cwd);
@@ -578,7 +664,133 @@ async function resolveRunWorkspace(
   console.error(
     "Tip: pass --workspace <id> (or set PASEO_WORKSPACE_ID) to run in an existing workspace.",
   );
-  return { id: result.workspace.id, cwd: result.workspace.workspaceDirectory ?? cwd };
+  return {
+    id: result.workspace.id,
+    cwd: result.workspace.workspaceDirectory ?? cwd,
+  };
+}
+
+async function preflightExplicitProviderMode(
+  client: Pick<ConnectedDaemonClient, "listProviderModes">,
+  provider: string,
+  mode: string | undefined,
+  cwd: string,
+): Promise<void> {
+  // `default` is a provider-neutral server-side alias, not necessarily a
+  // literal catalog ID (for example, Codex may only report `auto` and
+  // `full-access`). Preserve it for the daemon to resolve.
+  if (mode === undefined || mode === "default") {
+    return;
+  }
+
+  let result: Awaited<ReturnType<ConnectedDaemonClient["listProviderModes"]>>;
+  try {
+    result = await client.listProviderModes(provider, { cwd });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw {
+      code: "PROVIDER_ERROR",
+      message: `Failed to fetch modes for ${provider}: ${message}`,
+    } satisfies CommandError;
+  }
+
+  if (result.error) {
+    throw {
+      code: "PROVIDER_ERROR",
+      message: `Failed to fetch modes for ${provider}: ${result.error}`,
+    } satisfies CommandError;
+  }
+
+  // Older daemons may not return a catalog. Preserve the server's existing
+  // pass-through behavior when availability is genuinely unknown.
+  if (result.modes === undefined) {
+    return;
+  }
+
+  if (!result.modes.some((availableMode) => availableMode.id === mode)) {
+    const availableModes = result.modes.map((availableMode) => availableMode.id).join(", ");
+    throw {
+      code: "INVALID_MODE",
+      message: `Invalid mode '${mode}' for provider '${provider}'. Available modes: ${availableModes || "(none)"}`,
+    } satisfies CommandError;
+  }
+}
+
+async function resolveRunWorkspace(
+  client: ConnectedDaemonClient,
+  options: AgentRunOptions,
+  cwd: string,
+  callerAgentId: string | undefined,
+  provider: string,
+  mode: string | undefined,
+): Promise<ResolvedRunWorkspace> {
+  const preflight = await resolveRunWorkspacePreflight(client, options, cwd, callerAgentId);
+  if (preflight.modeCatalogCwd !== undefined) {
+    await preflightExplicitProviderMode(client, provider, mode, preflight.modeCatalogCwd);
+  }
+
+  if (preflight.workspace) {
+    return { workspace: preflight.workspace };
+  }
+
+  const workspace = await createRunWorkspace(client, options, cwd);
+  if (!workspace.id) {
+    throw {
+      code: "WORKSPACE_CREATE_FAILED",
+      message: "Workspace creation did not return an id",
+    } satisfies CommandError;
+  }
+  return { workspace, rollbackWorkspaceId: workspace.id };
+}
+
+async function rollbackCreatedRunWorkspace(
+  client: Pick<ConnectedDaemonClient, "archiveWorkspace">,
+  workspaceId: string,
+): Promise<string | null> {
+  try {
+    const result = await client.archiveWorkspace(workspaceId);
+    if (result.error) {
+      return result.error;
+    }
+    if (!result.archivedAt) {
+      return "Workspace archive did not return an archive timestamp";
+    }
+    console.error(`Rolled back workspace ${workspaceId} after agent creation failed.`);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+function toRunCommandError(error: unknown, cleanupError?: string | null): CommandError {
+  if (isAgentCreateRejectedError(error)) {
+    return {
+      code: "AGENT_CREATE_FAILED",
+      message: "Failed to create agent: " + error.message,
+      ...(cleanupError ? { details: { workspaceRollback: cleanupError } } : {}),
+    };
+  }
+
+  if (error && typeof error === "object" && "code" in error && "message" in error) {
+    const commandError = error as CommandError;
+    if (!cleanupError) {
+      return commandError;
+    }
+    return {
+      ...commandError,
+      details: {
+        ...(commandError.details !== undefined ? { original: commandError.details } : {}),
+        workspaceRollback: cleanupError,
+      },
+    };
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    code: "AGENT_CREATE_FAILED",
+    message: `Failed to create agent: ${message}`,
+    ...(cleanupError ? { details: { workspaceRollback: cleanupError } } : {}),
+  };
 }
 
 export async function runRunCommand(
@@ -595,31 +807,27 @@ export async function runRunCommand(
   const resolvedProviderModel = resolveProviderAndModel(options);
   const resolvedTitle = options.title ?? options.name;
 
+  // Complete deterministic local work before connecting to a provider mode
+  // catalog, which may take up to its remote timeout.
+  const { cwd, thinkingOptionId, images, requestEnv, requestLabels, callerAgentId } =
+    prepareRunInputs(options);
+
   const client = await connectToDaemonOrThrow(options.host, host);
+  let rollbackWorkspaceId: string | undefined;
+  let agentCreateRequestStarted = false;
 
   try {
-    // Resolve working directory
-    const cwd = options.cwd ?? process.cwd();
-    const thinkingOptionId = options.thinking?.trim();
-    if (options.thinking !== undefined && !thinkingOptionId) {
-      const error: CommandError = {
-        code: "INVALID_THINKING_OPTION",
-        message: "--thinking cannot be empty",
-        details:
-          'Provide a thinking option ID. Use "paseo provider models <provider> --thinking" to list valid IDs.',
-      };
-      throw error;
-    }
-
-    const images = loadRunImages(options.image);
-
-    const labels = parseRunLabels(options.label);
-    const env = parseRunEnv(options.env);
-    const requestEnv = Object.keys(env).length > 0 ? env : undefined;
-
-    const workspace = await resolveRunWorkspace(client, options, cwd);
+    const resolvedWorkspace = await resolveRunWorkspace(
+      client,
+      options,
+      cwd,
+      callerAgentId,
+      resolvedProviderModel.provider,
+      options.mode,
+    );
+    const workspace = resolvedWorkspace.workspace;
+    rollbackWorkspaceId = resolvedWorkspace.rollbackWorkspaceId;
     const workspaceId = workspace.id;
-    const callerAgentId = resolveRunCallerAgentId();
     const runCwd = workspace.cwd;
 
     if (outputSchema) {
@@ -627,6 +835,7 @@ export async function runRunCommand(
 
       const callStructuredTurn = async (structuredPrompt: string): Promise<string> => {
         if (!structuredAgent) {
+          agentCreateRequestStarted = true;
           structuredAgent = await client.createAgent({
             provider: resolvedProviderModel.provider,
             cwd: runCwd,
@@ -640,8 +849,9 @@ export async function runRunCommand(
             outputSchema,
             images,
             env: requestEnv,
-            labels: Object.keys(labels).length > 0 ? labels : undefined,
+            labels: requestLabels,
           });
+          rollbackWorkspaceId = undefined;
         } else {
           await client.sendMessage(structuredAgent.id, structuredPrompt);
         }
@@ -688,8 +898,6 @@ export async function runRunCommand(
         throw error;
       }
 
-      await client.close();
-
       return {
         type: "single",
         data: toRunResult(structuredAgent, "completed"),
@@ -698,6 +906,7 @@ export async function runRunCommand(
     }
 
     // Create the agent
+    agentCreateRequestStarted = true;
     const agent = await client.createAgent({
       provider: resolvedProviderModel.provider,
       cwd: runCwd,
@@ -710,14 +919,13 @@ export async function runRunCommand(
       initialPrompt: prompt,
       images,
       env: requestEnv,
-      labels: Object.keys(labels).length > 0 ? labels : undefined,
+      labels: requestLabels,
     });
+    rollbackWorkspaceId = undefined;
 
     // Default run behavior is foreground: wait for completion unless background execution is set.
     if (!runsInBackground(options)) {
       const state = await client.waitForFinish(agent.id, waitTimeoutMs);
-      await client.close();
-
       const finalAgent = state.final ?? agent;
       const status: AgentRunResult["status"] = state.status === "idle" ? "completed" : state.status;
 
@@ -728,27 +936,45 @@ export async function runRunCommand(
       };
     }
 
-    await client.close();
-
     return {
       type: "single",
       data: toRunResult(agent),
       schema: agentRunSchema,
     };
   } catch (err) {
-    await client.close().catch(() => {});
-
-    if (err && typeof err === "object" && "code" in err) {
-      throw err;
+    let cleanupError: string | null = null;
+    const createdWorkspaceId = rollbackWorkspaceId;
+    const canRollbackWorkspace =
+      createdWorkspaceId !== undefined &&
+      (!agentCreateRequestStarted || isAgentCreateRejectedError(err));
+    if (canRollbackWorkspace) {
+      cleanupError = await rollbackCreatedRunWorkspace(client, createdWorkspaceId);
+      if (cleanupError) {
+        console.error(
+          `Warning: failed to roll back workspace ${rollbackWorkspaceId}: ${cleanupError}`,
+        );
+      }
+    } else if (rollbackWorkspaceId) {
+      console.error(
+        `Warning: retained workspace ${rollbackWorkspaceId} because agent creation outcome is unknown.`,
+      );
     }
-
-    const message = err instanceof Error ? err.message : String(err);
-    const error: CommandError = {
-      code: "AGENT_CREATE_FAILED",
-      message: `Failed to create agent: ${message}`,
-    };
-    throw error;
+    throw toRunCommandError(err, cleanupError);
+  } finally {
+    await client.close().catch(() => {});
   }
+}
+
+function isAgentCreateRejectedError(
+  error: unknown,
+): error is Error & { code: "AGENT_CREATE_REJECTED"; requestId: string } {
+  if (!(error instanceof Error)) return false;
+  const rejectedError = error as Error & { code?: unknown; requestId?: unknown };
+  return (
+    rejectedError.code === "AGENT_CREATE_REJECTED" &&
+    typeof rejectedError.requestId === "string" &&
+    rejectedError.requestId.length > 0
+  );
 }
 
 export function resolveRunCallerAgentId(

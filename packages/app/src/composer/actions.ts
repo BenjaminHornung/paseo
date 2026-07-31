@@ -1,9 +1,11 @@
 import type { ForgeSearchItem } from "@getpaseo/protocol/messages";
+import equal from "fast-deep-equal";
 import type {
   AttachmentMetadata,
   ComposerAttachment,
   UserComposerAttachment,
 } from "@/attachments/types";
+import type { WorkspaceAttachmentRemovalResult } from "@/composer/attachments/workspace";
 import {
   isWorkspaceAttachment,
   userAttachmentsOnly,
@@ -17,6 +19,7 @@ import {
   buildOptimisticUserMessage,
   generateMessageId,
   type StreamItem,
+  type UserMessageDeliveryHint,
   type UserMessageItem,
 } from "@/types/stream";
 import type { PickedImageAttachmentInput } from "@/hooks/image-attachment-picker";
@@ -84,6 +87,51 @@ export interface QueueWriter {
   ) => void;
 }
 
+export interface QueuedComposerActionController {
+  isPending(messageId: string): boolean;
+  tryAcquire(messageId: string): boolean;
+  release(messageId: string): void;
+}
+
+export function createQueuedComposerActionController(input: {
+  onChange: (pending: ReadonlySet<string>) => void;
+}): QueuedComposerActionController {
+  const locked = new Set<string>();
+  const publish = () => input.onChange(new Set(locked));
+  return {
+    isPending: (messageId) => locked.has(messageId),
+    tryAcquire(messageId) {
+      if (locked.has(messageId)) {
+        return false;
+      }
+      locked.add(messageId);
+      publish();
+      return true;
+    },
+    release(messageId) {
+      if (!locked.delete(messageId)) {
+        return;
+      }
+      publish();
+    },
+  };
+}
+
+export async function runQueuedComposerControlledAction<T>(input: {
+  messageId: string;
+  controller: QueuedComposerActionController;
+  run: () => Promise<T>;
+}): Promise<{ status: "blocked" } | { status: "completed"; result: T }> {
+  if (!input.controller.tryAcquire(input.messageId)) {
+    return { status: "blocked" };
+  }
+  try {
+    return { status: "completed", result: await input.run() };
+  } finally {
+    input.controller.release(input.messageId);
+  }
+}
+
 export async function pickAndPersistImages(input: {
   pickImages: () => Promise<PickedImageAttachmentInput[] | null>;
   persister: Pick<AttachmentPersister, "persistFromBlob" | "persistFromFileUri">;
@@ -139,6 +187,72 @@ export function removeComposerAttachmentAtIndex<T extends ComposerAttachment>(in
   return input.attachments.filter((_, i) => i !== input.index);
 }
 
+export function isSameComposerAttachment(
+  left: ComposerAttachment | undefined,
+  right: ComposerAttachment | undefined,
+): boolean {
+  if (!left || !right || left.kind !== right.kind) {
+    return false;
+  }
+  switch (left.kind) {
+    case "image":
+      return (
+        right.kind === "image" &&
+        left.metadata.id === right.metadata.id &&
+        left.metadata.storageKey === right.metadata.storageKey
+      );
+    case "file":
+      return (
+        right.kind === "file" &&
+        left.attachment.id === right.attachment.id &&
+        left.attachment.path === right.attachment.path
+      );
+    case "agent_attachment":
+      return right.kind === "agent_attachment" && equal(left.attachment, right.attachment);
+    case "forge_issue":
+    case "forge_change_request":
+    case "github_issue":
+    case "github_pr":
+      return "item" in right && equal(left.item, right.item);
+    default:
+      return equal(left, right);
+  }
+}
+
+export function removeComposerNormalAttachmentIfCurrent(input: {
+  currentAttachments: readonly ComposerAttachment[];
+  expectedAttachment: UserComposerAttachment | undefined;
+  index: number;
+  deleteAttachments: AttachmentPersister["deleteAttachments"];
+}): {
+  status: "removed" | "noop";
+  nextAttachments: ComposerAttachment[];
+  nextUserAttachments: UserComposerAttachment[];
+} {
+  const current = input.currentAttachments[input.index];
+  if (
+    !input.expectedAttachment ||
+    !current ||
+    !isSameComposerAttachment(current, input.expectedAttachment)
+  ) {
+    return {
+      status: "noop",
+      nextAttachments: [...input.currentAttachments],
+      nextUserAttachments: userAttachmentsOnly(input.currentAttachments),
+    };
+  }
+  const nextAttachments = removeComposerAttachmentAtIndex({
+    attachments: [...input.currentAttachments],
+    index: input.index,
+    deleteAttachments: input.deleteAttachments,
+  });
+  return {
+    status: "removed",
+    nextAttachments,
+    nextUserAttachments: userAttachmentsOnly(nextAttachments),
+  };
+}
+
 export interface CancelComposerAgentInput {
   client: ComposerCancelClient | null;
   agentId: string;
@@ -170,6 +284,7 @@ export interface DispatchComposerAgentMessageInput {
     images: AttachmentMetadata[],
   ) => Promise<Array<{ data: string; mimeType: string }> | undefined>;
   stream: AgentStreamWriter;
+  deliveryHint?: UserMessageDeliveryHint;
 }
 
 export async function dispatchComposerAgentMessage(
@@ -185,6 +300,7 @@ export async function dispatchComposerAgentMessage(
     timestamp: new Date(),
     images: wirePayload.images,
     attachments: wirePayload.attachments,
+    deliveryHint: input.deliveryHint,
   });
   const rollbackOptimisticMessage = appendUserMessageToStream(
     input.agentId,
@@ -237,10 +353,21 @@ export interface QueueComposerMessageInput {
   text: string;
   attachments: ComposerAttachment[];
   queue: QueueWriter;
+  messageId?: string;
 }
 
 export interface QueueComposerMessageResult {
   queued: QueuedComposerMessage | null;
+}
+
+export interface QueueComposerServerMessageInput {
+  agentId: string;
+  text: string;
+  attachments: ComposerAttachment[];
+  queue: QueueWriter;
+  messageId?: string;
+  registerIntent: (message: QueuedComposerMessage) => void;
+  send: (message: QueuedComposerMessage) => Promise<void>;
 }
 
 export function queueComposerMessage(input: QueueComposerMessageInput): QueueComposerMessageResult {
@@ -249,16 +376,38 @@ export function queueComposerMessage(input: QueueComposerMessageInput): QueueCom
     return { queued: null };
   }
   const item: QueuedComposerMessage = {
-    id: generateMessageId(),
+    id: input.messageId ?? generateMessageId(),
     text: trimmed,
     attachments: input.attachments,
   };
   input.queue.write((prev) => {
     const next = new Map(prev);
-    next.set(input.agentId, [...(prev.get(input.agentId) ?? []), item]);
+    const current = prev.get(input.agentId) ?? [];
+    const existingIndex = current.findIndex((queued) => queued.id === item.id);
+    if (existingIndex >= 0) {
+      const replacement = [...current];
+      replacement.splice(existingIndex, 1, item);
+      next.set(input.agentId, replacement);
+    } else {
+      next.set(input.agentId, [...current, item]);
+    }
     return next;
   });
   return { queued: item };
+}
+
+export function queueComposerServerMessage(
+  input: QueueComposerServerMessageInput,
+): QueueComposerMessageResult & { submit?: () => Promise<void> } {
+  const result = queueComposerMessage(input);
+  if (!result.queued) {
+    return result;
+  }
+  input.registerIntent(result.queued);
+  return {
+    ...result,
+    submit: async () => await input.send(result.queued as QueuedComposerMessage),
+  };
 }
 
 export interface EditQueuedComposerMessageInput {
@@ -272,11 +421,26 @@ export interface EditQueuedComposerMessageResult {
   attachments: UserComposerAttachment[];
 }
 
+export function getQueuedComposerMessageEditDraft(input: {
+  messages: readonly QueuedComposerMessage[];
+  messageId: string;
+}): EditQueuedComposerMessageResult | null {
+  const item = input.messages.find((q) => q.id === input.messageId);
+  if (!item) return null;
+  return {
+    text: item.text,
+    attachments: buildRecoverableQueuedComposerDraftAttachments(item.attachments),
+  };
+}
+
 export function editQueuedComposerMessage(
   input: EditQueuedComposerMessageInput,
 ): EditQueuedComposerMessageResult | null {
-  const item = input.queue.read(input.agentId).find((q) => q.id === input.messageId);
-  if (!item) return null;
+  const result = getQueuedComposerMessageEditDraft({
+    messages: input.queue.read(input.agentId),
+    messageId: input.messageId,
+  });
+  if (!result) return null;
   input.queue.write((prev) => {
     const next = new Map(prev);
     next.set(
@@ -285,10 +449,7 @@ export function editQueuedComposerMessage(
     );
     return next;
   });
-  return {
-    text: item.text,
-    attachments: userAttachmentsOnly(item.attachments),
-  };
+  return result;
 }
 
 export interface SendQueuedComposerMessageNowInput {
@@ -303,6 +464,267 @@ export type SendQueuedComposerMessageNowResult =
   | { status: "missing" }
   | { status: "submitted" }
   | { status: "failed"; errorMessage: string };
+
+export interface RemoveQueuedComposerMessageInput {
+  agentId: string;
+  messageId: string;
+  queue: QueueWriter;
+  cancelMessage?: (input: { agentId: string; messageId: string }) => Promise<void>;
+  requireRemoteCancel?: boolean;
+  failedToRemoveMessage?: string;
+}
+
+export type RemoveQueuedComposerMessageResult =
+  | { status: "missing" }
+  | { status: "removed" }
+  | { status: "failed"; errorMessage: string };
+
+export function buildRecoverableQueuedComposerDraftAttachments(
+  attachments: readonly ComposerAttachment[],
+): UserComposerAttachment[] {
+  const recovered: UserComposerAttachment[] = [];
+
+  for (const attachment of attachments) {
+    if (
+      attachment.kind === "image" ||
+      attachment.kind === "file" ||
+      attachment.kind === "agent_attachment" ||
+      attachment.kind === "forge_issue" ||
+      attachment.kind === "forge_change_request" ||
+      attachment.kind === "github_issue" ||
+      attachment.kind === "github_pr"
+    ) {
+      recovered.push(attachment);
+      continue;
+    }
+
+    const wirePayload = splitComposerAttachmentsForSubmit([attachment]);
+    for (const image of wirePayload.images) {
+      recovered.push({ kind: "image", metadata: image });
+    }
+    for (const agentAttachment of wirePayload.attachments) {
+      recovered.push({ kind: "agent_attachment", attachment: agentAttachment });
+    }
+  }
+
+  return recovered;
+}
+
+export function applyQueuedComposerEditDraftIfUnchanged(input: {
+  startedGeneration: number;
+  getCurrentGeneration: () => number;
+  draft: EditQueuedComposerMessageResult;
+  setUserInput: (text: string) => void;
+  setAttachments: (attachments: UserComposerAttachment[]) => void;
+}): boolean {
+  if (input.getCurrentGeneration() !== input.startedGeneration) {
+    return false;
+  }
+  input.setUserInput(input.draft.text);
+  input.setAttachments(input.draft.attachments);
+  return true;
+}
+
+export function preserveQueuedComposerMessage(input: {
+  agentId: string;
+  queue: QueueWriter;
+  message: QueuedComposerMessage;
+}): void {
+  queueComposerMessage({
+    agentId: input.agentId,
+    text: input.message.text,
+    attachments: input.message.attachments,
+    queue: input.queue,
+    messageId: input.message.id,
+  });
+}
+
+export function recoverQueuedComposerEditCancellation(input: {
+  agentId: string;
+  queue: QueueWriter;
+  message: QueuedComposerMessage;
+  startedGeneration: number;
+  getCurrentGeneration: () => number;
+  draft: EditQueuedComposerMessageResult;
+  setUserInput: (text: string) => void;
+  setAttachments: (attachments: UserComposerAttachment[]) => void;
+  registerRecoverableIntent: (message: QueuedComposerMessage) => void;
+}): "restored" | "requeued" {
+  const restored = applyQueuedComposerEditDraftIfUnchanged({
+    startedGeneration: input.startedGeneration,
+    getCurrentGeneration: input.getCurrentGeneration,
+    draft: input.draft,
+    setUserInput: input.setUserInput,
+    setAttachments: input.setAttachments,
+  });
+  if (restored) {
+    return "restored";
+  }
+  input.registerRecoverableIntent(input.message);
+  preserveQueuedComposerMessage({
+    agentId: input.agentId,
+    queue: input.queue,
+    message: input.message,
+  });
+  return "requeued";
+}
+
+export function removeComposerAttachmentWithWorkspaceSupport(input: {
+  selectedAttachments: readonly ComposerAttachment[];
+  index: number;
+  markGithubAttachmentRemoved: (attachment: ComposerAttachment | undefined) => void;
+  removeWorkspaceAttachment: (input: {
+    selectedAttachments: readonly ComposerAttachment[];
+    index: number;
+  }) => WorkspaceAttachmentRemovalResult;
+  removeNormalAttachment: () => "removed" | "noop";
+  bumpGeneration: () => void;
+}): "removed-workspace" | "removed-user" | "noop" {
+  const selected = input.selectedAttachments[input.index];
+  if (!selected) {
+    return "noop";
+  }
+  input.markGithubAttachmentRemoved(selected);
+  const workspaceRemoval = input.removeWorkspaceAttachment({
+    selectedAttachments: input.selectedAttachments,
+    index: input.index,
+  });
+  if (workspaceRemoval === "removed") {
+    input.bumpGeneration();
+    return "removed-workspace";
+  }
+  if (workspaceRemoval === "noop") {
+    return "noop";
+  }
+  const normalRemoval = input.removeNormalAttachment();
+  if (normalRemoval === "noop") {
+    return "noop";
+  }
+  input.bumpGeneration();
+  return "removed-user";
+}
+
+export function clearOwnedQueuedComposerMirror(input: {
+  agentId: string;
+  queue: QueueWriter;
+  message: QueuedComposerMessage;
+}): boolean {
+  let removed = false;
+  input.queue.write((prev) => {
+    const current = prev.get(input.agentId) ?? [];
+    const nextMessages: QueuedComposerMessage[] = [];
+    let didRemove = false;
+    for (const queued of current) {
+      if (!didRemove && queued.id === input.message.id && equal(queued, input.message)) {
+        didRemove = true;
+        removed = true;
+        continue;
+      }
+      nextMessages.push(queued);
+    }
+    if (!didRemove) {
+      return prev;
+    }
+    const next = new Map(prev);
+    next.set(input.agentId, nextMessages);
+    return next;
+  });
+  return removed;
+}
+
+export async function orchestrateQueuedComposerServerEditCancellation(input: {
+  agentId: string;
+  messageId: string;
+  message: QueuedComposerMessage;
+  queue: QueueWriter;
+  startedGeneration: number;
+  getCurrentGeneration: () => number;
+  draft: EditQueuedComposerMessageResult;
+  setUserInput: (text: string) => void;
+  setAttachments: (attachments: UserComposerAttachment[]) => void;
+  registerIntent: (message: QueuedComposerMessage) => object | null;
+  clearIntentIfCurrent: (messageId: string, token: object | null) => boolean;
+  enqueueCompensation: (messageId: string) => void;
+  cancelMessage: (agentId: string, messageId: string) => Promise<void>;
+  onError: (error: unknown) => void;
+}): Promise<"restored" | "requeued" | "failed"> {
+  const ownershipToken = input.registerIntent(input.message);
+  try {
+    await input.cancelMessage(input.agentId, input.messageId);
+    const recovery = recoverQueuedComposerEditCancellation({
+      agentId: input.agentId,
+      queue: input.queue,
+      message: input.message,
+      startedGeneration: input.startedGeneration,
+      getCurrentGeneration: input.getCurrentGeneration,
+      draft: input.draft,
+      setUserInput: input.setUserInput,
+      setAttachments: input.setAttachments,
+      registerRecoverableIntent: input.registerIntent,
+    });
+    if (recovery === "restored") {
+      const cleared = input.clearIntentIfCurrent(input.messageId, ownershipToken);
+      if (cleared) {
+        clearOwnedQueuedComposerMirror({
+          agentId: input.agentId,
+          queue: input.queue,
+          message: input.message,
+        });
+      }
+      return "restored";
+    }
+    input.enqueueCompensation(input.messageId);
+    return "requeued";
+  } catch (error) {
+    input.enqueueCompensation(input.messageId);
+    input.onError(error);
+    return "failed";
+  }
+}
+
+export async function removeQueuedComposerMessage(
+  input: RemoveQueuedComposerMessageInput,
+): Promise<RemoveQueuedComposerMessageResult> {
+  const item = input.queue.read(input.agentId).find((message) => message.id === input.messageId);
+  if (!item) {
+    return { status: "missing" };
+  }
+
+  if (input.cancelMessage) {
+    try {
+      await input.cancelMessage({
+        agentId: input.agentId,
+        messageId: input.messageId,
+      });
+      return { status: "removed" };
+    } catch (error) {
+      return {
+        status: "failed",
+        errorMessage:
+          error instanceof Error
+            ? error.message
+            : (input.failedToRemoveMessage ?? i18n.t("common.actions.remove")),
+      };
+    }
+  }
+
+  if (input.requireRemoteCancel) {
+    return {
+      status: "failed",
+      errorMessage: input.failedToRemoveMessage ?? i18n.t("common.actions.remove"),
+    };
+  }
+
+  input.queue.write((prev) => {
+    const next = new Map(prev);
+    next.set(
+      input.agentId,
+      (prev.get(input.agentId) ?? []).filter((message) => message.id !== input.messageId),
+    );
+    return next;
+  });
+  return { status: "removed" };
+}
 
 export async function sendQueuedComposerMessageNow(
   input: SendQueuedComposerMessageNowInput,
@@ -349,6 +771,13 @@ export function openComposerAttachment(input: OpenComposerAttachmentInput): void
     return;
   }
   if (input.attachment.kind === "file" || input.attachment.kind === "workspace_file") {
+    return;
+  }
+  if (input.attachment.kind === "agent_attachment") {
+    const attachment = input.attachment.attachment;
+    if ((attachment.type === "github_pr" || attachment.type === "github_issue") && attachment.url) {
+      input.openExternalUrl(attachment.url);
+    }
     return;
   }
   if (isWorkspaceAttachment(input.attachment)) {

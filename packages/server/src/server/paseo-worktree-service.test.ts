@@ -23,6 +23,7 @@ import { readPaseoWorktreeMetadata } from "../utils/worktree-metadata.js";
 import { createWorktree, getPaseoWorktreesRoot } from "../utils/worktree.js";
 import { isPlatform } from "../test-utils/platform.js";
 import { areEquivalentPaths, createRealpathAwarePathMatcher } from "../utils/path.js";
+import { deriveProjectKey } from "./project-key.js";
 
 const cleanupPaths: string[] = [];
 
@@ -73,7 +74,16 @@ test("creates a worktree and registers it in the source workspace project withou
   expect(result.workspace.baseBranch).toBe("main");
   expect(result.workspace.title).toBe("Feature One");
   expect(deps.workspaceGitService.getSnapshot).not.toHaveBeenCalled();
-  expect(deps.projects.get(sourceProject.projectId)).toEqual(sourceProject);
+  expect(deps.projects.get(sourceProject.projectId)).toEqual({
+    ...sourceProject,
+    projectKey: deriveProjectKey({
+      rootPath: result.repoRoot,
+      remoteUrl: null,
+      worktreeRoot: null,
+      mainRepoRoot: null,
+    }),
+    updatedAt: expect.any(String),
+  });
   expect(events).toEqual([`workspace:${result.workspace.workspaceId}`]);
 });
 
@@ -223,6 +233,142 @@ test("creates a worktree workspace at the selected project subdirectory", async 
     worktreeRoot: result.worktree.worktreePath,
     kind: "worktree",
   });
+});
+
+test("infers subdirectory from the source workspace when the app sends the repo root as cwd", async () => {
+  const { repoDir, tempDir } = createGitRepo();
+  cleanupPaths.push(tempDir);
+  const subdirectory = path.join(repoDir, "packages", "app");
+  mkdirSync(subdirectory, { recursive: true });
+  writeFileSync(path.join(subdirectory, "package.json"), "{}\n");
+  commitAll(repoDir, "add subproject");
+  const deps = createDeps();
+  const project = createPersistedProjectRecordForTest({
+    projectId: "prj_subdir-inference",
+    rootPath: repoDir,
+    displayName: "root repo",
+  });
+  const sourceWorkspace = createPersistedWorkspaceRecordForTest({
+    workspaceId: "ws-subdir-checkout",
+    projectId: project.projectId,
+    cwd: subdirectory,
+    kind: "local_checkout",
+    displayName: "develop",
+  });
+  deps.projects.set(project.projectId, project);
+  deps.workspaces.set(sourceWorkspace.workspaceId, sourceWorkspace);
+
+  const result = await createPaseoWorktree(
+    {
+      cwd: repoDir,
+      projectId: project.projectId,
+      worktreeSlug: "infer-subdir",
+      runSetup: false,
+      paseoHome: path.join(tempDir, ".paseo"),
+    },
+    deps,
+  );
+
+  expect(result.workspace.cwd).toBe(path.join(result.worktree.worktreePath, "packages", "app"));
+  expect(result.workspace.projectId).toBe(project.projectId);
+});
+
+test("uses the most recently updated source workspace when multiple workspaces match", async () => {
+  const { repoDir, tempDir } = createGitRepo();
+  cleanupPaths.push(tempDir);
+  const olderSubdirectory = path.join(repoDir, "packages", "older-app");
+  const newerSubdirectory = path.join(repoDir, "packages", "newer-app");
+  mkdirSync(olderSubdirectory, { recursive: true });
+  mkdirSync(newerSubdirectory, { recursive: true });
+  writeFileSync(path.join(olderSubdirectory, "package.json"), "{}\n");
+  writeFileSync(path.join(newerSubdirectory, "package.json"), "{}\n");
+  commitAll(repoDir, "add subprojects");
+  const deps = createDeps();
+  const project = createPersistedProjectRecordForTest({
+    projectId: "prj_recent-subdir-inference",
+    rootPath: repoDir,
+    displayName: "root repo",
+  });
+  const newerWorkspace = {
+    ...createPersistedWorkspaceRecordForTest({
+      workspaceId: "ws-newer-subdir-checkout",
+      projectId: project.projectId,
+      cwd: newerSubdirectory,
+      kind: "local_checkout",
+      displayName: "newer",
+    }),
+    updatedAt: "2026-04-23T00:00:00.000Z",
+  };
+  const olderWorkspace = {
+    ...createPersistedWorkspaceRecordForTest({
+      workspaceId: "ws-older-subdir-checkout",
+      projectId: project.projectId,
+      cwd: olderSubdirectory,
+      kind: "local_checkout",
+      displayName: "older",
+    }),
+    updatedAt: "2026-04-22T00:00:00.000Z",
+  };
+  deps.projects.set(project.projectId, project);
+  deps.workspaces.set(newerWorkspace.workspaceId, newerWorkspace);
+  deps.workspaces.set(olderWorkspace.workspaceId, olderWorkspace);
+
+  const result = await createPaseoWorktree(
+    {
+      cwd: repoDir,
+      projectId: project.projectId,
+      worktreeSlug: "infer-recent-subdir",
+      runSetup: false,
+      paseoHome: path.join(tempDir, ".paseo"),
+    },
+    deps,
+  );
+
+  expect(result.workspace.cwd).toBe(
+    path.join(result.worktree.worktreePath, "packages", "newer-app"),
+  );
+});
+
+test("uses the input cwd when the workspace registry dependency is omitted", async () => {
+  const { repoDir, tempDir } = createGitRepo();
+  cleanupPaths.push(tempDir);
+  const subdirectory = path.join(repoDir, "packages", "app");
+  mkdirSync(subdirectory, { recursive: true });
+  writeFileSync(path.join(subdirectory, "package.json"), "{}\n");
+  commitAll(repoDir, "add subproject");
+  const deps = createDeps();
+  const project = createPersistedProjectRecordForTest({
+    projectId: "prj_no-workspace-registry",
+    rootPath: repoDir,
+    displayName: "root repo",
+  });
+  const sourceWorkspace = createPersistedWorkspaceRecordForTest({
+    workspaceId: "ws-no-registry-subdir-checkout",
+    projectId: project.projectId,
+    cwd: subdirectory,
+    kind: "local_checkout",
+    displayName: "develop",
+  });
+  deps.projects.set(project.projectId, project);
+  deps.workspaces.set(sourceWorkspace.workspaceId, sourceWorkspace);
+  const depsWithoutWorkspaceRegistry: CreatePaseoWorktreeDeps = {
+    github: deps.github,
+    workspaceGitService: deps.workspaceGitService,
+    workspaceProvisioning: deps.workspaceProvisioning,
+  };
+
+  const result = await createPaseoWorktree(
+    {
+      cwd: repoDir,
+      projectId: project.projectId,
+      worktreeSlug: "no-workspace-registry",
+      runSetup: false,
+      paseoHome: path.join(tempDir, ".paseo"),
+    },
+    depsWithoutWorkspaceRegistry,
+  );
+
+  expect(result.workspace.cwd).toBe(result.worktree.worktreePath);
 });
 
 test("seeds an uncommitted exact-project config into the mapped worktree directory", async () => {
@@ -436,7 +582,16 @@ test("an explicit project FK remains unchanged when its worktree comes from anot
   );
 
   expect(result.workspace.projectId).toBe(project.projectId);
-  expect(deps.projects.get(project.projectId)).toEqual(project);
+  expect(deps.projects.get(project.projectId)).toEqual({
+    ...project,
+    projectKey: deriveProjectKey({
+      rootPath: project.rootPath,
+      remoteUrl: null,
+      worktreeRoot: null,
+      mainRepoRoot: null,
+    }),
+    updatedAt: expect.any(String),
+  });
 });
 
 // POSIX-only: Windows git worktree paths need separate canonicalization coverage.
@@ -998,6 +1153,7 @@ test.skipIf(isPlatform("win32"))(
 interface TestDeps extends CreatePaseoWorktreeDeps {
   projects: Map<string, PersistedProjectRecord>;
   workspaces: Map<string, PersistedWorkspaceRecord>;
+  workspaceRegistry: WorkspaceRegistry;
 }
 
 function createDeps(options?: {
@@ -1075,6 +1231,7 @@ function createDeps(options?: {
     workspaces,
     workspaceGitService,
     workspaceProvisioning,
+    workspaceRegistry,
   };
 }
 

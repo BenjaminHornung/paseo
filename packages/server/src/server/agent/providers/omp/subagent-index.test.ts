@@ -114,4 +114,54 @@ describe("OMP provider subagent mapper", () => {
       })[0],
     ).toMatchObject({ event: { id: "child-1", status: "canceled" } });
   });
+
+  test("tracks running children and reconciles only changed snapshots", () => {
+    const index = new OmpSubagentIndex();
+    const parent = {};
+    const runningSnapshot = {
+      id: "child-2",
+      agent: "audit",
+      description: "Audit the API",
+      status: "running" as const,
+      parentToolCallId: "task-9",
+    };
+
+    expect(index.hasRunning(parent)).toBe(false);
+    expect(index.reconcileSnapshots(parent, [runningSnapshot])).toMatchObject([
+      { event: { id: "child-2", status: "running" } },
+    ]);
+    expect(index.hasRunning(parent)).toBe(true);
+    expect(index.reconcileSnapshots(parent, [runningSnapshot])).toEqual([]);
+
+    expect(
+      index.reconcileSnapshots(parent, [{ ...runningSnapshot, status: "completed" }]),
+    ).toMatchObject([{ event: { id: "child-2", status: "completed" } }]);
+    expect(index.hasRunning(parent)).toBe(false);
+  });
+
+  test("does not resurrect a terminal child from stale running observations", () => {
+    const index = new OmpSubagentIndex();
+    const parent = {};
+    index.handleLifecycle(parent, {
+      id: "child-3",
+      agent: "worker",
+      status: "started",
+      index: 0,
+    });
+    index.terminalizeRunning(parent);
+
+    expect(
+      index.handleProgress(parent, {
+        id: "child-3",
+        agent: "worker",
+        task: "slow work",
+        index: 0,
+        progress: { id: "child-3", status: "running" },
+      }),
+    ).toEqual([]);
+    expect(
+      index.reconcileSnapshots(parent, [{ id: "child-3", agent: "worker", status: "pending" }]),
+    ).toEqual([]);
+    expect(index.hasRunning(parent)).toBe(false);
+  });
 });

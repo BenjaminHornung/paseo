@@ -34,7 +34,7 @@ class FakeWebSocket {
   }
 
   message(data: string): void {
-    this.onmessage?.(data);
+    this.onmessage?.({ data });
   }
 }
 
@@ -95,6 +95,9 @@ async function connectClient(): Promise<{ client: PaseoClient; ws: FakeWebSocket
     type: "hello",
     clientType: "cli",
     protocolVersion: 1,
+    capabilities: {
+      agent_message_queue_events: true,
+    },
   });
   expect(hello.clientId).toEqual(expect.stringMatching(/^paseo-sdk-/));
   ws.message(
@@ -153,6 +156,7 @@ function createAgent(input: Partial<PaseoAgent> = {}): PaseoAgent {
       supportsRewindBoth: false,
       supportsRewindConversation: false,
       supportsRewindFiles: false,
+      supportsSteering: false,
       supportsToolInvocations: true,
     },
     currentModeId: null,

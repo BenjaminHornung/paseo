@@ -114,7 +114,12 @@ export type UserComposerAttachment =
       kind: "github_pr";
       item: ForgeSearchItem;
       owner?: typeof NEW_WORKSPACE_PICKER_ATTACHMENT_OWNER;
-    };
+    }
+  // COMPAT(agentMessageQueue): durable queue mirrors agent attachments as a
+  // lossless wrapper kind so queued non-image attachments survive reconnect and
+  // restart. Upstream's specific kinds require composer-only fields (reviewDraftKey,
+  // ForgeSearchItem conversion) that the queue payload does not carry.
+  | { kind: "agent_attachment"; attachment: AgentAttachment };
 
 export type WorkspaceComposerAttachment =
   | {

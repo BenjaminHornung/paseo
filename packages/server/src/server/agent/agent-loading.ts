@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import type { AgentProvider } from "./agent-sdk-types.js";
 import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
+import { MissingAgentCwdError, pathIsExistingDirectory } from "./agent-cwd.js";
 import {
   buildConfigOverrides,
   buildSessionConfig,
@@ -26,7 +27,7 @@ export type AgentLoaderManager = Pick<
   | "hydrateTimelineFromProvider"
   | "resumeAgentFromPersistence"
 > &
-  Partial<Pick<AgentManager, "touchAgentActivity" | "waitForAgentClose">>;
+  Partial<Pick<AgentManager, "waitForAgentClose">>;
 
 export interface EnsureAgentLoadedDeps {
   agentManager: AgentLoaderManager;
@@ -34,6 +35,8 @@ export interface EnsureAgentLoadedDeps {
   validProviders?: Iterable<AgentProvider>;
   broadcastTimeline?: boolean;
   logger: Logger;
+  /** Timeline/log recovery only. Send/continue and new work must remain strict. */
+  allowMissingCwd?: boolean;
 }
 
 export async function ensureUnarchivedAgentLoaded(
@@ -71,8 +74,7 @@ export async function ensureAgentLoaded(
     return inflight.promise;
   }
 
-  const existing =
-    deps.agentManager.touchAgentActivity?.(agentId) ?? deps.agentManager.getAgent(agentId);
+  const existing = deps.agentManager.getAgent(agentId);
   if (existing) {
     return existing;
   }
@@ -103,6 +105,7 @@ export async function ensureAgentLoaded(
     }
 
     const handle = toAgentPersistenceHandle(validProviders, record.persistence);
+    const cwdMissing = Boolean(record.cwd) && !(await pathIsExistingDirectory(record.cwd));
 
     let snapshot: ManagedAgent;
     if (handle) {
@@ -110,11 +113,17 @@ export async function ensureAgentLoaded(
         handle,
         buildConfigOverrides(record),
         agentId,
-        extractTimestamps(record),
+        {
+          ...extractTimestamps(record),
+          allowMissingCwd: deps.allowMissingCwd === true,
+        },
         record.archivedAt ? { purpose: "history" } : undefined,
       );
       deps.logger.info({ agentId, provider: record.provider }, "Agent resumed from persistence");
     } else {
+      if (cwdMissing) {
+        throw new MissingAgentCwdError(agentId, record.cwd);
+      }
       const config = buildSessionConfig(record, {
         validProviders,
       });
@@ -129,9 +138,20 @@ export async function ensureAgentLoaded(
       deps.logger.info({ agentId, provider: record.provider }, "Agent created from stored config");
     }
 
-    await deps.agentManager.hydrateTimelineFromProvider(agentId, {
-      broadcast: () => pendingOptions.broadcastTimeline,
-    });
+    try {
+      await deps.agentManager.hydrateTimelineFromProvider(agentId, {
+        broadcast: () => pendingOptions.broadcastTimeline,
+      });
+    } catch (error) {
+      if (deps.allowMissingCwd && cwdMissing) {
+        deps.logger.warn(
+          { err: error, agentId, cwd: record.cwd },
+          "Timeline hydrate failed after missing-cwd resume; serving recovered session state",
+        );
+      } else {
+        throw error;
+      }
+    }
     return deps.agentManager.getAgent(agentId) ?? snapshot;
   })();
 

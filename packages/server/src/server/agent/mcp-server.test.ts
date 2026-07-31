@@ -2564,6 +2564,7 @@ describe("create_agent MCP tool", () => {
       providerSnapshotManager: createOpenCodeManager().manager,
       projectRegistry: {
         get: async (projectId) => (projectId === project.projectId ? project : null),
+        list: async () => [project],
       },
       createPaseoWorktree,
       logger,
@@ -3664,6 +3665,129 @@ describe("send_agent_prompt MCP tool", () => {
       "child-agent",
       expect.objectContaining({ waitForActive: true }),
     );
+  });
+
+  it("wraps agent-to-agent sends in a sender-identity envelope with the auto-reply contract", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    const parentAgent = {
+      id: "parent-agent",
+      cwd: existingCwd,
+      workspaceId: "wks_parent",
+      provider: "codex",
+      currentModeId: "full-access",
+    } as ManagedAgent;
+    const childAgent = {
+      id: "child-agent",
+      cwd: existingCwd,
+      lifecycle: "running",
+      currentModeId: null,
+      availableModes: [],
+      config: { title: "Child" },
+    } as ManagedAgent;
+    spies.agentManager.getAgent.mockImplementation((agentId: string) => {
+      if (agentId === "parent-agent") return parentAgent;
+      if (agentId === "child-agent") return childAgent;
+      return null;
+    });
+    spies.agentStorage.get.mockImplementation(async (agentId: string) =>
+      agentId === "parent-agent"
+        ? createStoredRecord({ id: "parent-agent", title: "Reviewer" })
+        : null,
+    );
+
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      callerAgentId: "parent-agent",
+      logger,
+    });
+
+    const tool = registeredTool(server, "send_agent_prompt");
+    await invokeToolWithParsedInput(tool, {
+      agentId: "child-agent",
+      prompt: "Please review the auth changes.",
+    });
+
+    expect(spies.agentManager.streamAgent).toHaveBeenCalledTimes(1);
+    const dispatched = spies.agentManager.streamAgent.mock.calls[0][1] as string;
+    expect(dispatched).toContain('<paseo-agent-message from="parent-agent" from_title="Reviewer">');
+    expect(dispatched).toContain("Please review the auth changes.");
+    expect(dispatched).toContain(
+      "automatically delivered back to agent parent-agent as your reply",
+    );
+  });
+
+  it("states manual reply for fire-and-forget agent-to-agent sends", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    const parentAgent = {
+      id: "parent-agent",
+      cwd: existingCwd,
+      workspaceId: "wks_parent",
+      provider: "codex",
+      currentModeId: "full-access",
+    } as ManagedAgent;
+    const childAgent = {
+      id: "child-agent",
+      cwd: existingCwd,
+      lifecycle: "idle",
+      currentModeId: null,
+      availableModes: [],
+      config: { title: "Child" },
+    } as ManagedAgent;
+    spies.agentManager.getAgent.mockImplementation((agentId: string) => {
+      if (agentId === "parent-agent") return parentAgent;
+      if (agentId === "child-agent") return childAgent;
+      return null;
+    });
+
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      callerAgentId: "parent-agent",
+      logger,
+    });
+
+    const tool = registeredTool(server, "send_agent_prompt");
+    await invokeToolWithParsedInput(tool, {
+      agentId: "child-agent",
+      prompt: "fyi",
+      notifyOnFinish: false,
+    });
+
+    const dispatched = spies.agentManager.streamAgent.mock.calls[0][1] as string;
+    expect(dispatched).toContain('<paseo-agent-message from="parent-agent"');
+    expect(dispatched).toContain("Your reply is not automatically delivered");
+  });
+
+  it("leaves human/app sends without a caller agent untouched", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue({
+      id: "child-agent",
+      cwd: existingCwd,
+      lifecycle: "idle",
+      currentModeId: null,
+      availableModes: [],
+      config: { title: "Child" },
+    } as ManagedAgent);
+
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      logger,
+    });
+
+    const tool = registeredTool(server, "send_agent_prompt");
+    await invokeToolWithParsedInput(tool, {
+      agentId: "child-agent",
+      prompt: "Follow up",
+      background: false,
+    });
+
+    expect(spies.agentManager.streamAgent).toHaveBeenCalledTimes(1);
+    expect(spies.agentManager.streamAgent.mock.calls[0][1]).toBe("Follow up");
   });
 });
 
@@ -5694,5 +5818,48 @@ describe("agent snapshot MCP serialization", () => {
     expect(content).not.toContain("[User] u2");
     expect(content).not.toContain("second answer");
     expect(content).not.toContain("first answer");
+  });
+});
+
+describe("agent MCP server instructions", () => {
+  const logger = createTestLogger();
+
+  it("surfaces composed instructions to the connected client", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createClaudeOnlyManager(),
+      instructions: "You are running inside Paseo. Your agentId is agent-child.",
+      logger,
+    });
+    const client = await connectInMemoryMcpClient(server);
+
+    try {
+      expect(client.getInstructions()).toBe(
+        "You are running inside Paseo. Your agentId is agent-child.",
+      );
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("omits instructions when none are composed", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createClaudeOnlyManager(),
+      logger,
+    });
+    const client = await connectInMemoryMcpClient(server);
+
+    try {
+      expect(client.getInstructions()).toBeUndefined();
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 });

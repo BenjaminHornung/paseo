@@ -1,6 +1,11 @@
 import { afterEach, expect, expectTypeOf, test, vi } from "vitest";
 import { z } from "zod";
-import { DaemonClient, type DaemonTransport, type Logger } from "./daemon-client";
+import {
+  AgentCreateRejectedError,
+  DaemonClient,
+  type DaemonTransport,
+  type Logger,
+} from "./daemon-client";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 import { BROWSER_AUTOMATION_COMMAND_NAMES } from "@getpaseo/protocol/browser-automation/rpc-schemas";
 import {
@@ -669,12 +674,227 @@ test("advertises client capabilities in hello", async () => {
       provider_subagents: true,
       reasoning_merge_enum: true,
       terminal_reflowable_snapshot: true,
+      agent_message_queue_events: true,
       browser_host: {
         supportedCommands: ["list_tabs"],
         hostKind: "desktop app",
       },
     },
   });
+});
+
+test("roundtrips queued message content and correlates the namespaced response", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "queue_message_id_test",
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const image = { data: "aW1hZ2U=", mimeType: "image/png" };
+  const attachment = {
+    type: "github_pr" as const,
+    mimeType: "application/github-pr" as const,
+    number: 1826,
+    title: "Durable message queue",
+    url: "https://github.com/getpaseo/paseo/pull/1826",
+  };
+  const queuePromise = client.queueAgentMessage("agent-1", "hello", {
+    messageId: "message-id-explicit",
+    images: [image],
+    attachments: [attachment],
+  });
+  const request = parseSentFrame(mock.sent[0]);
+  expect(request).toEqual({
+    type: "queue.agent_message.enqueue.request",
+    requestId: expect.any(String),
+    agentId: "agent-1",
+    text: "hello",
+    messageId: "message-id-explicit",
+    images: [image],
+    attachments: [attachment],
+  });
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "queue.agent_message.enqueue.response",
+      payload: {
+        requestId: "different-request-id",
+        agentId: "agent-1",
+        accepted: true,
+        error: null,
+        message: {
+          id: "wrong-message-id",
+          agentId: "agent-1",
+          text: "wrong response",
+          createdAt: "2026-07-23T00:00:00.000Z",
+          images: [],
+          attachments: [],
+          imageCount: 0,
+          attachmentCount: 0,
+        },
+      },
+    }),
+  );
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "queue.agent_message.enqueue.response",
+      payload: {
+        requestId: request.requestId,
+        agentId: "agent-1",
+        accepted: true,
+        error: null,
+        message: {
+          id: "message-id-explicit",
+          agentId: "agent-1",
+          text: "hello",
+          createdAt: "2026-07-23T00:00:00.000Z",
+          images: [image],
+          attachments: [attachment],
+          imageCount: 1,
+          attachmentCount: 1,
+        },
+      },
+    }),
+  );
+
+  await expect(queuePromise).resolves.toEqual({
+    id: "message-id-explicit",
+    agentId: "agent-1",
+    text: "hello",
+    createdAt: "2026-07-23T00:00:00.000Z",
+    images: [image],
+    attachments: [attachment],
+    imageCount: 1,
+    attachmentCount: 1,
+  });
+});
+
+test("lists queued messages with fail-closed agent scoping and response errors", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "queue_list_test",
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  await expect(client.listQueuedAgentMessages("")).rejects.toThrow("agentId must not be blank");
+  await expect(client.listQueuedAgentMessages("  \t ")).rejects.toThrow(
+    "agentId must not be blank",
+  );
+  expect(mock.sent).toEqual([]);
+
+  const scopedPromise = client.listQueuedAgentMessages("agent-1");
+  const scopedRequest = parseSentFrame(mock.sent[0]);
+  expect(scopedRequest).toEqual({
+    type: "queue.agent_message.list.request",
+    requestId: expect.any(String),
+    agentId: "agent-1",
+  });
+  const queues = [{ agentId: "agent-1", revision: 3, messages: [] }];
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "queue.agent_message.list.response",
+      payload: { requestId: scopedRequest.requestId, queues, error: null },
+    }),
+  );
+  await expect(scopedPromise).resolves.toEqual(queues);
+
+  const allPromise = client.listQueuedAgentMessages();
+  const allRequest = parseSentFrame(mock.sent[1]);
+  expect(allRequest).toEqual({
+    type: "queue.agent_message.list.request",
+    requestId: expect.any(String),
+  });
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "queue.agent_message.list.response",
+      payload: { requestId: allRequest.requestId, queues: [], error: "list failed" },
+    }),
+  );
+  await expect(allPromise).rejects.toThrow("list failed");
+
+  const blankErrorPromise = client.listQueuedAgentMessages("agent-1");
+  const blankErrorRequest = parseSentFrame(mock.sent[2]);
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "queue.agent_message.list.response",
+      payload: { requestId: blankErrorRequest.requestId, queues: [], error: "" },
+    }),
+  );
+  await expect(blankErrorPromise).rejects.toThrow("listQueuedAgentMessages rejected");
+});
+
+test("handles queued message cancellation and dispatch acceptance", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "queue_actions_test",
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const respond = (request: Record<string, unknown>, accepted: boolean, error: string | null) => {
+    mock.triggerMessage(
+      wrapSessionMessage({
+        type: String(request.type).replace(/\.request$/, ".response"),
+        payload: {
+          requestId: request.requestId,
+          agentId: request.agentId,
+          queuedMessageId: request.queuedMessageId,
+          accepted,
+          error,
+        },
+      }),
+    );
+  };
+
+  const cancelPromise = client.cancelQueuedAgentMessage("agent-1", "queued-1");
+  const cancelRequest = parseSentFrame(mock.sent[0]);
+  expect(cancelRequest).toEqual({
+    type: "queue.agent_message.cancel.request",
+    requestId: expect.any(String),
+    agentId: "agent-1",
+    queuedMessageId: "queued-1",
+  });
+  respond(cancelRequest, true, null);
+  await expect(cancelPromise).resolves.toBeUndefined();
+
+  const rejectedCancelPromise = client.cancelQueuedAgentMessage("agent-1", "queued-2");
+  respond(parseSentFrame(mock.sent[1]), false, "cancel denied");
+  await expect(rejectedCancelPromise).rejects.toThrow("cancel denied");
+
+  const dispatchPromise = client.dispatchQueuedAgentMessage("agent-1", "queued-3");
+  const dispatchRequest = parseSentFrame(mock.sent[2]);
+  expect(dispatchRequest).toEqual({
+    type: "queue.agent_message.dispatch.request",
+    requestId: expect.any(String),
+    agentId: "agent-1",
+    queuedMessageId: "queued-3",
+  });
+  respond(dispatchRequest, true, null);
+  await expect(dispatchPromise).resolves.toBeUndefined();
+
+  const rejectedDispatchPromise = client.dispatchQueuedAgentMessage("agent-1", "queued-4");
+  respond(parseSentFrame(mock.sent[3]), false, "dispatch denied");
+  await expect(rejectedDispatchPromise).rejects.toThrow("dispatch denied");
 });
 
 test("allows callers to disable default client capabilities", async () => {
@@ -1725,6 +1945,7 @@ test("readFile hides legacy base64 behind bytes", async () => {
           mimeType: "image/png",
           size: 5,
           modifiedAt: "2026-05-02T00:00:00.000Z",
+          revision: "text-rev-1",
         },
         error: null,
         requestId: "req-file",
@@ -1739,6 +1960,7 @@ test("readFile hides legacy base64 behind bytes", async () => {
     path: "logo.png",
     kind: "image",
     modifiedAt: "2026-05-02T00:00:00.000Z",
+    revision: "text-rev-1",
   });
   expect(new TextDecoder().decode(result.bytes)).toBe("hello");
 });
@@ -1783,6 +2005,7 @@ test("readFile resolves from binary file frames when the daemon supports them", 
         size: 5,
         encoding: "binary",
         modifiedAt: "2026-05-02T00:00:00.000Z",
+        revision: "binary-rev-1",
       },
     }),
   );
@@ -1807,6 +2030,7 @@ test("readFile resolves from binary file frames when the daemon supports them", 
     path: "logo.png",
     kind: "image",
     modifiedAt: "2026-05-02T00:00:00.000Z",
+    revision: "binary-rev-1",
   });
   expect(new TextDecoder().decode(result.bytes)).toBe("hello");
 });
@@ -2038,7 +2262,51 @@ test("sends create_agent_request with workspace and caller identity", async () =
     }),
   );
 
-  await expect(createPromise).rejects.toThrow("compat test sentinel");
+  await expect(createPromise).rejects.toEqual(new Error("compat test sentinel"));
+});
+
+test("classifies only explicitly uncreated agent failures as definitive rejections", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const createPromise = client.createAgent({
+    provider: "codex",
+    cwd: "/tmp/project",
+    title: "Rejected agent",
+  });
+  const request = parseSentFrame(mock.sent[0]);
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "status",
+      payload: {
+        status: "agent_create_failed",
+        requestId: request.requestId,
+        error: "definitive rejection",
+        agentCreated: false,
+      },
+    }),
+  );
+
+  await expect(createPromise).rejects.toMatchObject({
+    name: "AgentCreateRejectedError",
+    code: "AGENT_CREATE_REJECTED",
+    message: "definitive rejection",
+    requestId: request.requestId,
+  } satisfies Partial<AgentCreateRejectedError>);
 });
 
 test("sends worktree target and autoArchive in create_agent_request", async () => {

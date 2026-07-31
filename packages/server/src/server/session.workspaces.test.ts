@@ -46,6 +46,7 @@ import type { GeneratedWorkspaceName } from "./worktree-branch-name-generator.js
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import type { ForgeService } from "../services/forge-service.js";
 import { createNoopWorkspaceGitService } from "./test-utils/workspace-git-service-stub.js";
+import { deriveProjectKey } from "./project-key.js";
 import {
   asSessionLogger,
   asAgentManager,
@@ -819,6 +820,7 @@ test("create_agent_request keeps requested child cwd when grouped under an exist
     const session = asTestSession(
       new Session({
         clientId: "test-client",
+        serverId: "test-server",
         scopes: ["*"],
         appVersion: null,
         onMessage: (message) => emitted.push(message),
@@ -870,10 +872,21 @@ test("create_agent_request keeps requested child cwd when grouped under an exist
 
     const [createdAgent] = agentManager.listAgents();
     expect(createdAgent?.cwd).toBe(child);
+    const createdWorkspace = await workspaceRegistry.get(createdAgent!.workspaceId!);
+    expect(createdWorkspace).not.toBeNull();
+    await expect(projectRegistry.get(createdWorkspace!.projectId)).resolves.toMatchObject({
+      projectKey: deriveProjectKey({
+        rootPath: child,
+        remoteUrl: null,
+        worktreeRoot: null,
+        mainRepoRoot: null,
+        serverId: "test-server",
+      }),
+    });
     await expect(
       session.buildProjectPlacementForWorkspaceId(createdAgent!.workspaceId!),
     ).resolves.toMatchObject({
-      projectKey: expect.stringMatching(/^prj_[0-9a-f]{16}$/),
+      projectKey: createdWorkspace!.projectId,
       checkout: { cwd: child },
     });
     expect(findByType(emitted, "status")?.payload).toMatchObject({
@@ -1167,6 +1180,128 @@ test("create_agent_request does not title an existing workspace from the agent p
     });
   } finally {
     vi.useRealTimers();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("create_agent_request hydrates the provider timeline after creating an agent", async () => {
+  const workdir = mkdtempSync(path.join(tmpdir(), "paseo-hydrate-timeline-"));
+  try {
+    const cwd = path.join(workdir, "repo");
+    mkdirSync(cwd, { recursive: true });
+
+    const logger = {
+      child: () => logger,
+      trace: vi.fn(),
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const agentStorage = new AgentStorage(path.join(workdir, "agents"), asSessionLogger(logger));
+    const agentManager = new AgentManager({
+      clients: { codex: new CreateAgentTestClient() },
+      registry: agentStorage,
+      logger: asSessionLogger(logger),
+      idFactory: () => "00000000-0000-4000-8000-000000000553",
+    });
+    const projectRegistry = new FileBackedProjectRegistry(
+      path.join(workdir, "projects.json"),
+      asSessionLogger(logger),
+    );
+    const workspaceRegistry = new FileBackedWorkspaceRegistry(
+      path.join(workdir, "workspaces.json"),
+      asSessionLogger(logger),
+    );
+
+    await projectRegistry.upsert(
+      createPersistedProjectRecord({
+        projectId: "proj-hydrate",
+        rootPath: cwd,
+        kind: "git",
+        displayName: "repo",
+        createdAt: "2026-05-07T00:00:00.000Z",
+        updatedAt: "2026-05-07T00:00:00.000Z",
+      }),
+    );
+    await workspaceRegistry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-hydrate",
+        projectId: "proj-hydrate",
+        cwd,
+        kind: "local_checkout",
+        displayName: "repo",
+        title: null,
+        createdAt: "2026-05-07T00:00:00.000Z",
+        updatedAt: "2026-05-07T00:00:00.000Z",
+      }),
+    );
+
+    const hydrateSpy = vi
+      .spyOn(agentManager, "hydrateTimelineFromProvider")
+      .mockResolvedValue(undefined);
+
+    const session = asTestSession(
+      new Session({
+        clientId: "test-client",
+        scopes: ["*"],
+        appVersion: null,
+        onMessage: vi.fn(),
+        logger: asSessionLogger(logger),
+        downloadTokenStore: asDownloadTokenStore(),
+        pushTokenStore: asPushTokenStore(),
+        paseoHome: path.join(workdir, "paseo-home"),
+        agentManager,
+        agentStorage,
+        projectRegistry,
+        workspaceRegistry,
+        chatService: asChatService(),
+        scheduleService: asScheduleService(),
+        loopService: asLoopService(),
+        checkoutDiffManager: asCheckoutDiffManager({
+          subscribe: async () => ({
+            initial: { cwd, files: [], error: null },
+            unsubscribe: () => {},
+          }),
+          scheduleRefreshForCwd: () => {},
+          onWorkspaceStateMayHaveChanged: () => {},
+          invalidateForge: () => {},
+          getMetrics: () => ({
+            checkoutDiffTargetCount: 0,
+            checkoutDiffSubscriptionCount: 0,
+            checkoutDiffWatcherCount: 0,
+            checkoutDiffFallbackRefreshTargetCount: 0,
+          }),
+          dispose: () => {},
+        }),
+        workspaceGitService: createNoopWorkspaceGitService(),
+        daemonConfigStore: asDaemonConfigStore({
+          get: () => ({ mcp: { injectIntoAgents: false }, providers: {} }),
+          onChange: () => () => {},
+        }),
+        mcpBaseUrl: null,
+        stt: null,
+        tts: null,
+        generateWorkspaceName: async () => ({ title: "Generated", branch: null }),
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+        terminalManager: null,
+      }),
+    );
+
+    await session.handleMessage({
+      type: "create_agent_request",
+      requestId: "req-hydrate-timeline",
+      workspaceId: "ws-hydrate",
+      config: { provider: "codex", cwd },
+      initialPrompt: "Fix a bug",
+      attachments: [],
+    });
+
+    const [createdAgent] = agentManager.listAgents();
+    expect(createdAgent).toBeDefined();
+    expect(hydrateSpy).toHaveBeenCalledWith(createdAgent!.id);
+    hydrateSpy.mockRestore();
+  } finally {
     rmSync(workdir, { recursive: true, force: true });
   }
 });
@@ -3405,6 +3540,7 @@ test("project.remove.request archives active workspaces and removes the project 
   });
   const project = createPersistedProjectRecord({
     projectId: "proj-remove-with-workspace",
+    projectKey: "remote:github.com/acme/remove-with-workspace",
     rootPath: REPO_CWD,
     kind: "git",
     displayName: "repo",
@@ -3710,7 +3846,15 @@ test("create paseo worktree response preserves an explicit non-Git project", asy
   expect(response?.payload.workspace?.id).toMatch(/^wks_[0-9a-f]{16}$/);
   expect(response?.payload.workspace?.workspaceDirectory).toContain(path.join("worktree-123"));
   expect(workspaces.has(response?.payload.workspace?.id ?? "")).toBe(true);
-  expect(projects.get(explicitProject.projectId)).toEqual(explicitProject);
+  expect(projects.get(explicitProject.projectId)).toEqual({
+    ...explicitProject,
+    projectKey: deriveProjectKey({
+      rootPath: explicitProject.rootPath,
+      remoteUrl: null,
+      worktreeRoot: null,
+      mainRepoRoot: null,
+    }),
+  });
 });
 
 test("workspace updates stay scoped to the matching cwd", async () => {
@@ -7387,7 +7531,8 @@ test("project.rename.request stores customName and emits an updated workspace de
   );
 
   const project = createPersistedProjectRecord({
-    projectId: "remote:github.com/acme/repo",
+    projectId: "prj_rename",
+    projectKey: "remote:github.com/acme/repo",
     rootPath: REPO_CWD,
     kind: "git",
     displayName: "acme/repo",

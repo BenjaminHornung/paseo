@@ -28,34 +28,40 @@ export const ProviderRuntimeSettingsSchema = z.object({
   disallowedTools: z.array(z.string()).optional(),
 });
 
-const ProviderProfileThinkingOptionSchema = z.object({
-  id: z.string(),
-  label: z.string(),
-  description: z.string().optional(),
-  isDefault: z.boolean().optional(),
-});
+const ProviderProfileThinkingOptionSchema = z
+  .object({
+    id: z.string(),
+    label: z.string(),
+    description: z.string().optional(),
+    isDefault: z.boolean().optional(),
+  })
+  .passthrough();
 
-export const ProviderProfileModelSchema = z.object({
-  id: z.string().min(1),
-  label: z.string().min(1),
-  description: z.string().optional(),
-  isDefault: z.boolean().optional(),
-  thinkingOptions: z.array(ProviderProfileThinkingOptionSchema).optional(),
-});
+export const ProviderProfileModelSchema = z
+  .object({
+    id: z.string().min(1),
+    label: z.string().min(1),
+    description: z.string().optional(),
+    isDefault: z.boolean().optional(),
+    thinkingOptions: z.array(ProviderProfileThinkingOptionSchema).optional(),
+  })
+  .passthrough();
 
-export const ProviderOverrideSchema = z.object({
-  extends: z.string().optional(),
-  label: z.string().optional(),
-  description: z.string().optional(),
-  command: z.array(z.string().min(1)).min(1).optional(),
-  env: z.record(z.string(), z.string()).optional(),
-  params: z.record(z.string(), z.unknown()).optional(),
-  models: z.array(ProviderProfileModelSchema).optional(),
-  additionalModels: z.array(ProviderProfileModelSchema).optional(),
-  disallowedTools: z.array(z.string()).optional(),
-  enabled: z.boolean().optional(),
-  order: z.number().optional(),
-});
+export const ProviderOverrideSchema = z
+  .object({
+    extends: z.string().optional(),
+    label: z.string().optional(),
+    description: z.string().optional(),
+    command: z.array(z.string().min(1)).min(1).optional(),
+    env: z.record(z.string(), z.string()).optional(),
+    params: z.record(z.string(), z.unknown()).optional(),
+    models: z.array(ProviderProfileModelSchema).optional(),
+    additionalModels: z.array(ProviderProfileModelSchema).optional(),
+    disallowedTools: z.array(z.string()).optional(),
+    enabled: z.boolean().optional(),
+    order: z.number().optional(),
+  })
+  .passthrough();
 
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 const PROVIDER_ID_PATTERN = /^[a-z][a-z0-9-]*$/;
