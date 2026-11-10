@@ -1,6 +1,8 @@
 import { pathToFileURL } from "node:url";
+import { configureDesktopDistributionEnvironment } from "../distribution.js";
 
 export async function main(): Promise<void> {
+  configureDesktopDistributionEnvironment({ executablePath: process.execPath, env: process.env });
   const [argvMode, entryPath, ...args] = process.argv.slice(2);
   if (argvMode !== "bare" && argvMode !== "node-script") {
     throw new Error(`Unsupported node entrypoint argv mode: ${argvMode ?? "<missing>"}`);

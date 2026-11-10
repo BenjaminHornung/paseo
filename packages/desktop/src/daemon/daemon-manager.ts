@@ -58,6 +58,7 @@ import {
   readLegacySkillSelection,
 } from "../integrations/legacy-skill-selection.js";
 import { tailFile } from "../diagnostics/tail-file.js";
+import { resolveDesktopDistribution } from "../distribution.js";
 
 const DAEMON_LOG_FILENAME = "daemon.log";
 let ownedLaunch: { home: string; instance: DaemonInstance } | null = null;
@@ -270,9 +271,28 @@ function normalizeVersion(version: string | null): string | null {
 
 function shouldRestartForVersion(current: DesktopDaemonStatus): boolean {
   if (!current.ownedByDesktop) return false;
-  const appVersion = normalizeVersion(resolveDesktopAppVersion());
+  const appVersion = normalizeVersion(resolveBundledDaemonVersion());
   const daemonVersion = normalizeVersion(current.version);
   return Boolean(appVersion && daemonVersion && appVersion !== daemonVersion);
+}
+
+function resolveBundledDaemonVersion(): string {
+  if (resolveDesktopDistribution(process.execPath).id !== "advanced") {
+    return resolveDesktopAppVersion();
+  }
+  const metadata: unknown = JSON.parse(
+    readFileSync(path.join(app.getAppPath(), "package.json"), "utf8"),
+  );
+  if (
+    metadata &&
+    typeof metadata === "object" &&
+    "paseoUpstreamVersion" in metadata &&
+    typeof metadata.paseoUpstreamVersion === "string" &&
+    metadata.paseoUpstreamVersion.length > 0
+  ) {
+    return metadata.paseoUpstreamVersion;
+  }
+  throw new Error("Paseo Advanced package is missing its bundled upstream version.");
 }
 
 function assertBuiltInDaemonManagementEnabled(settings: DesktopSettings): void {

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { resolveDesktopDistribution } from "../../distribution.js";
 
 export function resolveCliInstallSourcePath(input: {
   platform: NodeJS.Platform;
@@ -38,7 +39,8 @@ export function resolveCliShimPath(input: {
 }): string {
   if (!input.isPackaged) return input.resolveWorkspaceCli();
 
-  const filename = input.platform === "win32" ? "paseo.cmd" : "paseo";
+  const distribution = resolveDesktopDistribution(input.executablePath);
+  const filename = input.platform === "win32" ? `${distribution.cliName}.cmd` : "paseo";
   if (input.platform === "darwin") {
     const bundle = input.executablePath.replace(/\/Contents\/MacOS\/.+$/, "");
     return path.join(bundle, "Contents", "Resources", "bin", filename);

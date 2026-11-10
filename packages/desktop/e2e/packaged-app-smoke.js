@@ -9,7 +9,8 @@ const { extractFile } = require("@electron/asar");
 const { WebSocket } = require("ws");
 const assert = require("node:assert/strict");
 
-const EXECUTABLE_NAME = "Paseo";
+const EXECUTABLE_NAME = process.env.PASEO_DESKTOP_SMOKE_EXECUTABLE_NAME?.trim() || "Paseo";
+const WINDOWS_CLI_SHIM_NAME = process.env.PASEO_DESKTOP_SMOKE_CLI_SHIM_NAME?.trim() || "paseo.cmd";
 const SMOKE_TIMEOUT_MS = 60_000;
 const EXIT_TIMEOUT_MS = 10_000;
 const TERMINAL_CAPTURE_ATTEMPTS = 20;
@@ -83,7 +84,7 @@ function getCliShimPath(appPath) {
   }
 
   if (process.platform === "win32") {
-    return path.join(appPath, "resources", "bin", "paseo.cmd");
+    return path.join(appPath, "resources", "bin", WINDOWS_CLI_SHIM_NAME);
   }
 
   return path.join(appPath, "resources", "bin", "paseo");
@@ -950,6 +951,35 @@ async function smokePackagedDesktopApp({
       deadline,
     });
     console.log("Packaged desktop smoke: renderer-started desktop daemon reported running");
+    if (EXECUTABLE_NAME === "PaseoAdvanced") {
+      const metadata = JSON.parse(
+        extractFile(path.join(appPath, "resources", "app.asar"), "package.json").toString(),
+      );
+      const runtimeInfo = await page.evaluate(() =>
+        window.paseoDesktop.invoke("desktop_get_runtime_info"),
+      );
+      assert.equal(
+        runtimeInfo.appVersion,
+        metadata.version,
+        "Advanced must report its own version",
+      );
+      assert.match(runtimeInfo.appVersion, /^1\./);
+      assert.equal(
+        status.version,
+        metadata.paseoUpstreamVersion,
+        "Bundled source version stays exact",
+      );
+      const sameDaemon = await page.evaluate(() =>
+        window.paseoDesktop.invoke("start_desktop_daemon"),
+      );
+      assert.equal(
+        sameDaemon.pid,
+        status.pid,
+        "Own 1.x version must not restart the bundled daemon",
+      );
+      await page.goto("paseo://app/settings/about");
+      await page.getByText(`v${metadata.version}`, { exact: true }).waitFor({ timeout: 15_000 });
+    }
     await assertBuiltinPluginsStarted(listen);
     console.log("Packaged desktop smoke: every built-in plugin started");
     await smokeCliShim({ appPath, env });

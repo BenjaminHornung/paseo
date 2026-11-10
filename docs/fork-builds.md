@@ -1,0 +1,139 @@
+# Paseo Advanced Windows builds
+
+The `Paseo Advanced Windows artifacts` workflow builds unsigned Windows x64 downloads in
+`BenjaminHornung/paseo` on pushes to `main` and `feature/**`, or manual dispatch.
+It uses the committed npm lockfile and upstream's desktop build and packaged-app
+smoke. Other upstream platform and release workflows remain intact.
+
+## Download and update
+
+1. Open the successful **Paseo Advanced Windows artifacts** run for the desired commit in
+   [GitHub Actions](https://github.com/BenjaminHornung/paseo/actions/workflows/fork-windows.yml).
+2. Download `paseo-advanced-windows-x64-<commit>`. Extract the outer Actions ZIP to find
+   the NSIS installer, application ZIP, `SHA256SUMS.txt` and `build-info.json`.
+3. Compare the run commit with `build-info.json` and check the installer/application
+   ZIP with `Get-FileHash -Algorithm SHA256` before choosing an install time.
+
+These artifacts are unsigned. Windows may show an unknown-publisher prompt.
+The pipeline never installs them, replaces a running renderer, publishes a release,
+sets secrets or uses a paid runner. Installing is a separate user action.
+Advanced uses a different Windows installer identity and can coexist with upstream:
+
+| Item                     | Upstream           | This Windows fork          |
+| ------------------------ | ------------------ | -------------------------- |
+| Product                  | Paseo              | Paseo Advanced             |
+| Installer application ID | `sh.paseo.desktop` | `sh.paseo.advanced`        |
+| Executable               | `Paseo.exe`        | `PaseoAdvanced.exe`        |
+| Optional installed CLI   | `paseo.cmd`        | `paseo-advanced.cmd`       |
+| Desktop profile          | `%APPDATA%/Paseo`  | `%APPDATA%/Paseo Advanced` |
+| Default daemon home      | `~/.paseo`         | `~/.paseo-advanced`        |
+| Default daemon TCP port  | `6767`             | `6777`                     |
+| OS agent-link protocol   | `paseo://`         | `paseo-advanced://`        |
+
+The renderer's internal `paseo://app` origin remains unchanged; it is separate
+from OS protocol registration. Existing explicit home/listen overrides and daemon
+configuration still win over defaults. No original profiles or credentials are copied.
+The Advanced CLI opens its own executable, including from a portable ZIP, and its
+optional PATH installation uses a distinct command. Profiles, single-instance locks
+and daemon ownership are separate by default. Other platform packaging keeps the
+upstream identity; this renamed distribution currently targets Windows only.
+
+The desktop version maps upstream `0.MINOR.PATCH` to `1.MINOR.PATCH`, initially
+`1.15.4`, and is shown in the app's About settings. Package metadata records the
+exact upstream version separately; server/client/plugin source packages keep their
+upstream versions. Daemon restart decisions compare the bundled upstream version,
+so the branding change cannot trigger a version-mismatch restart loop. The config
+stops with a clear error if upstream moves beyond major zero, requiring a new mapping.
+The bundled updater points to `BenjaminHornung/paseo`, not `getpaseo/paseo`.
+This workflow does not publish updater manifests or enable automatic fork releases;
+updates from these Actions artifacts are manual.
+
+Artifacts expire after 14 days. Re-run a build to obtain fresh downloads.
+The `fork-windows-smoke-<commit>` artifact contains isolated packaged-runtime evidence.
+Package smoke does not establish acceptance against the user's running controller.
+
+## Permanent automation acceptance
+
+An installer or composer receipt alone is not proof of autonomous orchestration.
+The compatible controller/plugin must use the new daemon's actual public background-work
+and native terminal-session metadata, with a capability preflight before starting writers.
+An older standalone daemon or older controller SDK cannot acquire these capabilities
+merely by connecting a newer renderer. The controller/plugin is delivered separately;
+no controller state or credentials belong in these public build artifacts.
+
+The integrated acceptance gate is one isolated real prepared-composer task through
+routing, worker changes, process settlement, configured checks, independent review,
+main notification and COMPLETE, without operator attestation or a maintenance chat.
+One active-work/missing-capability boundary must wait with an actionable reason.
+This gate is pending until explicitly recorded with the compatible controller revision
+and packaged runtime evidence; the Windows package smoke is a separate gate.
+
+## Sync upstream and rebuild
+
+Use a dedicated fork checkout. Keep local edits committed or preserved before sync.
+
+```powershell
+git fetch origin
+git fetch upstream main
+git switch -c feature/upstream-YYYY-MM-DD origin/main
+git merge upstream/main
+git push -u origin HEAD
+gh pr create --repo BenjaminHornung/paseo --base main --head feature/upstream-YYYY-MM-DD
+```
+
+Configure `upstream` once as `https://github.com/getpaseo/paseo.git` if absent.
+Resolve future merge conflicts by retaining the fork receipt wiring and workflow.
+Check the feature-branch build and PR checks before reviewing the fork PR.
+This integration is delivered as a feature branch and PR; merging `main` is separate.
+Before a future merge, inspect the inherited workflow triggers: this upstream sync
+changes website/protocol/package paths and would trigger **Deploy Website** on
+`main`. Docker main pushes build without publishing; version tags can publish.
+No main merge or tag is needed to download the feature-branch Windows artifacts.
+An approved merge to fork `main` also starts a fresh Windows build; never push to upstream.
+
+## Composer receipt contract
+
+Only agents with `labels.orchestratorPreparation` use the public
+`paseo-orchestrator` / `orchestrator.prepare-input` RPC before native message send.
+The RPC and native send share the exact agent ID, generated message ID and text.
+It must return `{ recorded: true }` or `{ enabled: false }`; an unavailable RPC,
+rejection or uncertain receipt fails the submit and rolls back its optimistic row.
+Receipt state is not revoked on ambiguous native send failures.
+
+The normal composer and automatic queue drain share this dispatch. Native images,
+structured attachments, steering, send retry and titles retain upstream behavior.
+Blank text and text over 12,000 characters bypass the bounded classifier and send
+natively; they do not grant controller work through a recorded receipt.
+The RPC uses the existing trusted-local-client boundary, not cryptographic proof
+of human authorship. The running controller/plugin is managed separately.
+
+Upstream 0.15.4 exposes `agent.turn.before` after the provider turn starts; it is
+non-waiting and lacks text, message ID and submitting-client identity. Its composer
+API edits/focuses drafts but provides no submit callback. Neither can replace this
+pre-send receipt. Public `PaseoAgent.backgroundWork` supports `list`, `subscribe`
+and `stop` for provider-reported live work; stopping requires provider support and
+a valid stop token. It does not authenticate input or persist work inventory.
+
+## Integration and verification
+
+Initial fork main: `1a1ff8828f002fce08e239bae3d46aff75e22f52`.
+Integrated upstream main: `63ea3e55618ab0849cf0a45d5fee02f509b58c73`.
+This is upstream `main`, not the v0.15.4 release tag; its package metadata still
+reads 0.15.4. The final refresh added #9275 after the initial main snapshot #9207.
+The fork had no unique commits and was fast-forwarded on the feature branch.
+The installed desktop archive was read-only verified as 0.15.2 and was not changed;
+the running daemon was not restarted or replaced. Fork client/plugin SDKs and
+bundled server are 0.15.4.
+
+The focused composer regression file failed without the fix (four behavioral
+failures) and passed with it. An additional inclusive-maximum regression catches
+changing `<= 12000` to `< 12000`. Full workspace typecheck and targeted lint passed locally.
+The real normal-composer E2E checks a held preflight, no native send before release,
+the actual outgoing native file payload and the canonical message identity. Its
+prepared-label wiring fault failed the receipt assertion and was restored.
+Desktop isolation/CLI/lifecycle checks passed 20 tests; misclassifying the Advanced
+executable failed the home, link-routing and CLI-path assertions.
+CI compiles the renderer, desktop main process and bundled server stack and runs
+upstream's actual packaged Windows smoke before uploading downloads. The Advanced
+smoke also checks the native 1.x version, exact upstream daemon version, daemon PID
+reuse on a second start, and the visible version in About settings.

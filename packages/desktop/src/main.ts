@@ -110,12 +110,20 @@ import {
   type AgentDeepLinkTarget,
 } from "@getpaseo/protocol/agent-deep-link";
 import { AgentNavigationInbox, parseAgentDeepLinkFromArgv } from "./agent-navigation.js";
+import {
+  configureDesktopDistributionEnvironment,
+  normalizeDesktopAgentLink,
+  resolveDesktopDistribution,
+} from "./distribution.js";
+
+const desktopDistribution = resolveDesktopDistribution(process.execPath);
+configureDesktopDistributionEnvironment({ executablePath: process.execPath, env: process.env });
 
 const DEV_SERVER_URL = process.env.EXPO_DEV_URL ?? "http://localhost:8081";
 const APP_SCHEME = "paseo";
 const PASEO_DEBUG = process.env.PASEO_DEBUG === "1";
 const DISABLE_SINGLE_INSTANCE_LOCK = process.env.PASEO_DISABLE_SINGLE_INSTANCE_LOCK === "1";
-const APP_NAME = process.env.PASEO_TEST_APP_NAME?.trim() || "Paseo";
+const APP_NAME = process.env.PASEO_TEST_APP_NAME?.trim() || desktopDistribution.productName;
 const DESKTOP_WINDOW_CHROME_MODE = resolveDesktopWindowChromeMode({
   platform: process.platform,
   override: process.env.PASEO_DESKTOP_WINDOW_CONTROLS,
@@ -135,6 +143,9 @@ const bootstrapComplete = new Promise<void>((resolve) => {
 let bootstrapIsComplete = false;
 
 app.setName(APP_NAME);
+if (desktopDistribution.id === "advanced" && process.platform === "win32") {
+  app.setAppUserModelId("sh.paseo.advanced");
+}
 log.info("[desktop] app startup", {
   version: app.getVersion(),
   platform: process.platform,
@@ -304,6 +315,8 @@ const forcedUserDataDir = process.env.PASEO_ELECTRON_USER_DATA_DIR?.trim();
 if (forcedUserDataDir) {
   app.setPath("userData", forcedUserDataDir);
   log.info("[dev-user-data] forced userData dir:", forcedUserDataDir);
+} else if (desktopDistribution.id === "advanced" && app.isPackaged) {
+  app.setPath("userData", path.join(app.getPath("appData"), desktopDistribution.productName));
 } else if (!app.isPackaged) {
   try {
     const topLevel = execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -360,7 +373,9 @@ let pendingOpenProjectPath = parseOpenProjectPathFromArgv({
   argv: process.argv,
   isDefaultApp: process.defaultApp,
 });
-let pendingAgentNavigation = parseAgentDeepLinkFromArgv(process.argv);
+let pendingAgentNavigation = parseAgentDeepLinkFromArgv(
+  process.argv.map((arg) => normalizeDesktopAgentLink(arg, desktopDistribution)),
+);
 
 // Each window pulls its own pending open-project path on mount, keyed by
 // webContents id, so deep-linked windows (second-instance launches, the
@@ -834,7 +849,7 @@ desktopWindowOwner = createDesktopWindowOwner<AgentDeepLinkTarget>({
 // ---------------------------------------------------------------------------
 
 function receiveAgentDeepLink(input: string): void {
-  const target = parseAgentDeepLink(input);
+  const target = parseAgentDeepLink(normalizeDesktopAgentLink(input, desktopDistribution));
   if (!target) {
     return;
   }
@@ -877,7 +892,9 @@ function setupSingleInstanceLock(): boolean {
   }
 
   app.on("second-instance", (_event, commandLine) => {
-    const agentTarget = parseAgentDeepLinkFromArgv(commandLine);
+    const agentTarget = parseAgentDeepLinkFromArgv(
+      commandLine.map((arg) => normalizeDesktopAgentLink(arg, desktopDistribution)),
+    );
     if (agentTarget) {
       void bootstrapComplete
         .then(() => desktopWindowOwner.openOrFocusAgent(agentTarget))

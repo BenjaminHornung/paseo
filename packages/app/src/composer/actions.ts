@@ -46,6 +46,7 @@ export interface AttachmentPersister {
 }
 
 export interface ComposerSendClient {
+  invokePluginRpc?: (pluginId: string, method: string, input: unknown) => Promise<unknown>;
   sendAgentMessage: (
     agentId: string,
     text: string,
@@ -195,6 +196,7 @@ export interface DispatchComposerAgentMessageInput {
     images: AttachmentMetadata[],
   ) => Promise<Array<{ data: string; mimeType: string }> | undefined>;
   submission: MessageSubmissionWriter;
+  orchestratorReceipt?: boolean;
   activeTurnBehavior?: ActiveTurnBehavior;
   activeTurnId?: string;
 }
@@ -219,6 +221,29 @@ export async function dispatchComposerAgentMessage(
   input.submission.begin(input.agentId, userMessage);
   try {
     const imagesData = await input.encodeImages(wirePayload.images);
+    // The controller classifies bounded text only; image/file-only sends stay native.
+    const needsOrchestratorReceipt =
+      input.orchestratorReceipt && input.text.trim().length > 0 && input.text.length <= 12000;
+    if (needsOrchestratorReceipt) {
+      if (!input.client.invokePluginRpc) {
+        throw new Error("ORCHESTRATOR_INPUT_RPC_UNAVAILABLE");
+      }
+      const receipt = await input.client.invokePluginRpc(
+        "paseo-orchestrator",
+        "orchestrator.prepare-input",
+        { agentId: input.agentId, messageId: clientMessageId, text: input.text },
+      );
+      const recorded =
+        receipt &&
+        typeof receipt === "object" &&
+        "recorded" in receipt &&
+        receipt.recorded === true;
+      const disabled =
+        receipt && typeof receipt === "object" && "enabled" in receipt && receipt.enabled === false;
+      if (!recorded && !disabled) {
+        throw new Error("ORCHESTRATOR_INPUT_RECEIPT_UNCERTAIN");
+      }
+    }
     await input.client.sendAgentMessage(input.agentId, input.text, {
       messageId: clientMessageId,
       ...(input.activeTurnBehavior ? { activeTurnBehavior: input.activeTurnBehavior } : {}),

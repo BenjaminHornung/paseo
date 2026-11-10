@@ -1,0 +1,117 @@
+name: Paseo Advanced Windows artifacts
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ONNXRUNTIME_NODE_INSTALL: skip
+  CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+jobs:
+  windows:
+    if: github.repository == 'BenjaminHornung/paseo'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install locked dependencies
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Resolve Advanced desktop and upstream versions
+        shell: pwsh
+        run: |
+          $metadata = (& node -p 'JSON.stringify(require("./packages/desktop/electron-builder.advanced.cjs").extraMetadata)') | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "FORK_DESKTOP_VERSION=$($metadata.version)" >> $env:GITHUB_ENV
+          "UPSTREAM_VERSION=$($metadata.paseoUpstreamVersion)" >> $env:GITHUB_ENV
+
+      - name: Build app dependencies
+        run: npm run build:app-deps
+
+      - name: Verify composer receipts and native attachments
+        run: npm run test --workspace=@getpaseo/app -- src/composer/actions.test.ts --bail=1
+
+      - name: Typecheck app
+        run: npm run typecheck --workspace=@getpaseo/app
+
+      - name: Verify desktop distribution and CLI isolation
+        working-directory: packages/desktop
+        run: node ../../node_modules/vitest/vitest.mjs run src/distribution.test.ts src/daemon/node-entrypoint-runner.test.ts src/integrations/cli-install/path.test.ts src/daemon/daemon-manager.test.ts --bail=1
+
+      - name: Check fork source style
+        run: |
+          npm run lint
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run format:check
+
+      - name: Build and smoke unsigned Windows x64 installer and ZIP
+        run: npm run build:desktop -- --publish never --win --x64 --config electron-builder.advanced.cjs
+        env:
+          EP_GH_IGNORE_TIME: "true"
+          PASEO_DESKTOP_SMOKE: "1"
+          PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
+          PASEO_DESKTOP_SMOKE_EXECUTABLE_NAME: PaseoAdvanced
+          PASEO_DESKTOP_SMOKE_CLI_SHIM_NAME: paseo-advanced.cmd
+
+      - name: Record artifact checksums and build provenance
+        shell: pwsh
+        run: |
+          $release = Join-Path $env:GITHUB_WORKSPACE 'packages/desktop/release'
+          $installers = @(Get-ChildItem -LiteralPath $release -Filter '*.exe' -File)
+          $archives = @(Get-ChildItem -LiteralPath $release -Filter '*.zip' -File)
+          if ($installers.Count -ne 1 -or $archives.Count -ne 1) {
+            throw 'Expected exactly one Windows x64 installer and one ZIP.'
+          }
+          $files = @($installers) + @($archives)
+          $files | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content -LiteralPath (Join-Path $release 'SHA256SUMS.txt') -Encoding utf8
+          [ordered]@{
+            repository = $env:GITHUB_REPOSITORY
+            commit = $env:GITHUB_SHA
+            ref = $env:GITHUB_REF
+            productName = 'Paseo Advanced'
+            version = $env:FORK_DESKTOP_VERSION
+            upstreamVersion = $env:UPSTREAM_VERSION
+            run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            architecture = 'x64'
+            signed = $false
+            published = $false
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $release 'build-info.json') -Encoding utf8
+
+      - name: Upload Windows downloads
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: paseo-advanced-windows-x64-${{ github.sha }}
+          path: |
+            packages/desktop/release/*.exe
+            packages/desktop/release/*.zip
+            packages/desktop/release/SHA256SUMS.txt
+            packages/desktop/release/build-info.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload packaged smoke evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fork-windows-smoke-${{ github.sha }}
+          path: ${{ runner.temp }}/desktop-smoke
+          if-no-files-found: ignore
+          retention-days: 14

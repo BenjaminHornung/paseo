@@ -1,6 +1,7 @@
 import { useHardwareKeyboardPresent } from "@/keyboard";
 import { useAddHost } from "@/hosts/add-host";
 import { useCallback, useMemo, useRef, useState } from "react";
+import { useFetchQuery } from "@/data/query";
 import type { ComponentType, ReactNode } from "react";
 import {
   Alert,
@@ -89,7 +90,7 @@ import { BrowserDataSection } from "@/desktop/browser/settings/browser-data-sect
 import { IntegrationsSection } from "@/desktop/components/integrations-section";
 import { isElectronRuntime } from "@/desktop/host";
 import { useDesktopAppUpdater } from "@/desktop/updates/use-desktop-app-updater";
-import { formatVersionWithPrefix } from "@/desktop/updates/desktop-updates";
+import { formatVersionWithPrefix, getDesktopRuntimeInfo } from "@/desktop/updates/desktop-updates";
 import { resolveAppVersion } from "@/utils/app-version";
 import { openChangelog } from "@/changelog";
 import { useAppDiagnosticStore } from "@/diagnostics/store";
@@ -476,6 +477,15 @@ interface AboutSectionProps {
 
 function AboutSection({ appVersion, appVersionText, isDesktopApp }: AboutSectionProps) {
   const { t } = useTranslation();
+  const runtimeInfo = useFetchQuery({
+    queryKey: ["desktop-runtime-info"],
+    queryFn: getDesktopRuntimeInfo,
+    enabled: isDesktopApp,
+    dataShape: "value",
+    immutableWhen: () => true,
+  });
+  const desktopVersion = runtimeInfo.data?.appVersion;
+  const displayVersion = desktopVersion ? formatVersionWithPrefix(desktopVersion) : appVersionText;
   return (
     <>
       <SettingsSection title={t("settings.about.title")}>
@@ -485,7 +495,7 @@ function AboutSection({ appVersion, appVersionText, isDesktopApp }: AboutSection
               <Text style={settingsStyles.rowTitle}>{t("settings.about.appVersion")}</Text>
               <Text style={settingsStyles.rowHint}>{t("settings.about.thisDevice")}</Text>
             </View>
-            <Text style={styles.aboutValue}>{appVersionText}</Text>
+            <Text style={styles.aboutValue}>{displayVersion}</Text>
           </View>
           <WhatsNewRow />
           {isDesktopApp ? <DesktopAppUpdateRow /> : null}

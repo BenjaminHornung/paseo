@@ -419,6 +419,84 @@ describe("pickAndPersistImages", () => {
 });
 
 describe("dispatchComposerAgentMessage", () => {
+  it.each([undefined, {}, { recorded: false }])(
+    "does not send prepared text without a confirmed orchestrator receipt: %s",
+    async (receipt) => {
+      const client = createFakeSendClient();
+      const stream = createFakeStream();
+      const invokePluginRpc = receipt === undefined ? undefined : vi.fn(async () => receipt);
+
+      await expect(
+        dispatchComposerAgentMessage({
+          client: { ...client, invokePluginRpc },
+          agentId: "agent",
+          text: "implement this",
+          attachments: [],
+          encodeImages: passthroughEncodeImages,
+          submission: stream,
+          orchestratorReceipt: true,
+        }),
+      ).rejects.toThrow(/ORCHESTRATOR_INPUT_/);
+
+      expect(client.calls).toHaveLength(0);
+      expect(stream.tail.get("agent") ?? []).toEqual([]);
+    },
+  );
+
+  it("preserves native sends when orchestration is disabled for the prepared main", async () => {
+    const client = createFakeSendClient();
+    await dispatchComposerAgentMessage({
+      client: { ...client, invokePluginRpc: async () => ({ enabled: false }) },
+      agentId: "agent",
+      text: "ordinary instruction",
+      attachments: [],
+      encodeImages: passthroughEncodeImages,
+      submission: createFakeStream(),
+      orchestratorReceipt: true,
+    });
+    expect(client.calls).toHaveLength(1);
+  });
+
+  it("records text at the inclusive 12000-character RPC limit", async () => {
+    const client = createFakeSendClient();
+    const invokePluginRpc = vi.fn(async () => ({ recorded: true }));
+    const text = "x".repeat(12000);
+    await dispatchComposerAgentMessage({
+      client: { ...client, invokePluginRpc },
+      agentId: "agent",
+      text,
+      attachments: [],
+      encodeImages: passthroughEncodeImages,
+      submission: createFakeStream(),
+      orchestratorReceipt: true,
+    });
+    expect(invokePluginRpc).toHaveBeenCalledWith(
+      "paseo-orchestrator",
+      "orchestrator.prepare-input",
+      { agentId: "agent", messageId: client.calls[0]?.options.messageId, text },
+    );
+  });
+
+  it.each(["", "x".repeat(12001)])(
+    "preserves native attachment sends outside the bounded text classifier (case %#)",
+    async (text) => {
+      const client = createFakeSendClient();
+      const invokePluginRpc = vi.fn(async () => ({ recorded: true }));
+      await dispatchComposerAgentMessage({
+        client: { ...client, invokePluginRpc },
+        agentId: "agent",
+        text,
+        attachments: [{ kind: "image", metadata: imageWithId("image") }],
+        encodeImages: passthroughEncodeImages,
+        submission: createFakeStream(),
+        orchestratorReceipt: true,
+      });
+      expect(invokePluginRpc).not.toHaveBeenCalled();
+      expect(client.calls[0]?.text).toBe(text);
+      expect(client.calls[0]?.options.images).toEqual([{ data: "image", mimeType: "image/png" }]);
+    },
+  );
+
   it("forwards the configured active-turn intent without provider capability checks", async () => {
     const client = createFakeSendClient();
     const stream = createFakeStream();
@@ -547,11 +625,15 @@ describe("dispatchComposerAgentMessage", () => {
 
   it("sends text + image data + structured attachments and appends user_message to the tail when head is empty", async () => {
     const client = createFakeSendClient();
+    const invokePluginRpc = vi.fn(async () => {
+      expect(client.calls).toHaveLength(0);
+      return { recorded: true };
+    });
     const stream = createFakeStream();
     const image = imageWithId("img-2");
 
     await dispatchComposerAgentMessage({
-      client,
+      client: { ...client, invokePluginRpc },
       agentId: "agent",
       text: "send attachments",
       attachments: [
@@ -560,12 +642,18 @@ describe("dispatchComposerAgentMessage", () => {
       ],
       encodeImages: passthroughEncodeImages,
       submission: stream,
+      orchestratorReceipt: true,
     });
 
     expect(client.calls).toHaveLength(1);
     const [call] = client.calls;
     expect(call.agentId).toBe("agent");
     expect(call.text).toBe("send attachments");
+    expect(invokePluginRpc).toHaveBeenCalledWith(
+      "paseo-orchestrator",
+      "orchestrator.prepare-input",
+      { agentId: "agent", messageId: call.options.messageId, text: call.text },
+    );
     expect(call.options.images).toEqual([{ data: image.id, mimeType: image.mimeType }]);
     expect(call.options.attachments).toEqual([
       {

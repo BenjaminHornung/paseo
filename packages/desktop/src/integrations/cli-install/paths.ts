@@ -3,13 +3,15 @@ import { createRequire } from "node:module";
 import { resolveCliShimPath } from "./path.js";
 import os from "node:os";
 import { app } from "electron";
+import { resolveDesktopDistribution } from "../../distribution.js";
 
 export function getLocalBinDir(): string {
   return path.join(os.homedir(), ".local", "bin");
 }
 
 export function getCliTargetPath(): string {
-  const filename = process.platform === "win32" ? "paseo.cmd" : "paseo";
+  const distribution = resolveDesktopDistribution(process.execPath);
+  const filename = process.platform === "win32" ? `${distribution.cliName}.cmd` : "paseo";
   return path.join(getLocalBinDir(), filename);
 }
 

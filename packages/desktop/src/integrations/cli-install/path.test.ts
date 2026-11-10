@@ -4,6 +4,19 @@ import path from "node:path";
 import { resolveCliInstallSourcePath, resolveCliShimPath } from "./path";
 
 describe("cli-install-path", () => {
+  it("keeps the Advanced bundled CLI separate from the upstream command", () => {
+    const executablePath = path.join("install", "PaseoAdvanced.exe");
+    expect(
+      resolveCliShimPath({
+        platform: "win32",
+        isPackaged: true,
+        executablePath,
+        resolveWorkspaceCli: () => {
+          throw new Error("Expected the bundled CLI");
+        },
+      }),
+    ).toBe(path.join("install", "resources", "bin", "paseo-advanced.cmd"));
+  });
   it("uses the bundled shim for packaged macOS installs", () => {
     expect(
       resolveCliInstallSourcePath({

@@ -5,6 +5,10 @@ import { spawnProcess } from "@getpaseo/server/process";
 import { buildAgentDeepLink, type AgentDeepLinkTarget } from "@getpaseo/protocol/agent-deep-link";
 
 function findDesktopApp(): string | null {
+  const desktopExecutable = process.env.PASEO_DESKTOP_EXECUTABLE;
+  if (desktopExecutable) {
+    return existsSync(desktopExecutable) ? desktopExecutable : null;
+  }
   if (process.platform === "darwin") {
     const candidates = [
       "/Applications/Paseo.app",

@@ -1696,6 +1696,10 @@ function ComposerContentImpl({
         }),
         encodeImages,
         submission: createMessageSubmissionWriter(serverId),
+        orchestratorReceipt: Boolean(
+          useSessionStore.getState().sessions[serverId]?.agents.get(targetAgentId)?.labels
+            .orchestratorPreparation,
+        ),
         activeTurnBehavior,
         activeTurnId:
           activeTurnBehavior === "steer"
