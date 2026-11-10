@@ -45,6 +45,10 @@ module.exports = {
   win: {
     ...upstream.win,
     artifactName: "Paseo-Advanced-${version}-${arch}.${ext}",
+    target: [
+      { target: "nsis", arch: ["x64"] },
+      { target: "zip", arch: ["x64"] },
+    ],
     extraResources: [{ from: "bin/paseo-advanced.cmd", to: "bin/paseo-advanced.cmd" }],
   },
   nsis: {
