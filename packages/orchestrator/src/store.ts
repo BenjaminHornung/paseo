@@ -1,4 +1,5 @@
 import { DatabaseSync, backup } from "node:sqlite";
+import lockfile from "proper-lockfile";
 import { mkdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -97,19 +98,50 @@ function scopesOverlap(left: string[], right: string[]): boolean {
   return left.some((a) => right.some((b) => pathInScope(a, b) || pathInScope(b, a)));
 }
 
+function lockStoreInitialization(filename: string): () => void {
+  const deadline = Date.now() + 5000;
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    try {
+      return lockfile.lockSync(`${path.resolve(filename)}.initialization`, {
+        realpath: false,
+        stale: 120000,
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ELOCKED") throw error;
+      if (Date.now() >= deadline) throw Error("CONTROLLER_STATE_BUSY", { cause: error });
+      Atomics.wait(wait, 0, 0, 50);
+    }
+  }
+}
+
 export class Store {
   readonly db: DatabaseSync;
   constructor(filename: string) {
     if (filename !== ":memory:")
       mkdirSync(path.dirname(path.resolve(filename)), { recursive: true });
-    this.db = new DatabaseSync(filename);
+    // First RPCs use separate processes. Serialize the WAL transition and the
+    // complete version check/migration sequence, including fresh database creation.
+    const release = filename === ":memory:" ? undefined : lockStoreInitialization(filename);
+    try {
+      this.db = new DatabaseSync(filename);
+      try {
+        this.initializeSchema(filename);
+      } catch (error) {
+        this.db.close();
+        throw error;
+      }
+    } finally {
+      release?.();
+    }
+  }
+  private initializeSchema(filename: string): void {
     this.db.exec(
       "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
     );
     const version = (this.db.prepare("PRAGMA user_version").get() as { user_version: number })
       .user_version;
     if (version !== 0 && ![2, 3, 4, 5, 6, 7, 8, 9].includes(version)) {
-      this.db.close();
       throw Error("Unsupported database version; no automatic migration");
     }
     if (version !== 0 && version !== 9)

@@ -212,3 +212,8 @@ CI compiles the renderer, desktop main process and bundled server stack and runs
 upstream's actual packaged Windows smoke before uploading downloads. The Advanced
 smoke also checks the native 1.x version, exact upstream daemon version, daemon PID
 reuse on a second start, and the visible version in About settings.
+
+Concurrent first controller connections share a per-database initialization lock
+across WAL setup and schema initialization. The real eight-connection startup
+regression fails without it with SQLite locks and duplicate-table errors; it passes
+with the lock. Existing schema SQL and versions are preserved.
