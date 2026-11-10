@@ -1033,8 +1033,36 @@ async function smokePackagedDesktopApp({
       const skipSetup = page.getByRole("button", { name: "Skip setup", exact: true });
       await skipSetup.click({ timeout: 15_000 });
       await skipSetup.waitFor({ state: "hidden", timeout: 15_000 });
-      await page.goto("paseo://app/settings/about");
+      // Use the existing settings controls: a full custom-protocol reload restores
+      // the desktop startup destination instead of navigating inside this shell.
+      await page.locator('[data-testid="sidebar-settings"]:visible').first().click();
+      await page.waitForURL(/\/settings\/general$/, { timeout: 15_000 });
+      await page
+        .getByTestId("settings-sidebar")
+        .getByRole("button", { name: "About", exact: true })
+        .click();
+      await page.waitForURL(/\/settings\/about$/, { timeout: 15_000 });
       await page.getByText(`v${metadata.version}`, { exact: true }).waitFor({ timeout: 15_000 });
+      const artifactDir = process.env.PASEO_DESKTOP_SMOKE_ARTIFACT_DIR?.trim();
+      if (artifactDir) {
+        fs.mkdirSync(artifactDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(artifactDir, "advanced-about.json"),
+          JSON.stringify(
+            {
+              url: page.url(),
+              visibleVersion: `v${metadata.version}`,
+              upstreamVersion: metadata.paseoUpstreamVersion,
+            },
+            null,
+            2,
+          ),
+        );
+        await page.screenshot({
+          path: path.join(artifactDir, "advanced-about.png"),
+          fullPage: true,
+        });
+      }
     }
     await assertBuiltinPluginsStarted(listen, daemonHome);
     console.log("Packaged desktop smoke: every built-in plugin started");
