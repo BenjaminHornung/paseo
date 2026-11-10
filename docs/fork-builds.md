@@ -188,8 +188,10 @@ a valid stop token. It does not authenticate input or persist work inventory.
 ## Integration and verification
 
 Initial fork main: `1a1ff8828f002fce08e239bae3d46aff75e22f52`.
-Integrated upstream main: `e7432cb2a5968ecec5dbc3a9d66a218fbbdc306b`.
-This includes the 0.16.0-beta.1 release reconciliation and the following lockfile fix.
+Integrated upstream main: `f68480482197d1b415a41d6197072d275d926bfa`.
+This includes the 0.16.0-beta.1 release reconciliation, lockfile fix and subsequent
+plugin update-recovery test isolation. The last runtime change is still
+`e7432cb2a5968ecec5dbc3a9d66a218fbbdc306b`; the later commit changes one test file.
 The initial sync used main through `63ea3e55618ab0849cf0a45d5fee02f509b58c73`, already
 containing the beta's background-task and plugin features. The final refresh adds
 release metadata, changelog presentation and tests. The original fork main had no unique

@@ -1777,6 +1777,7 @@ describe("Codex app-server provider", () => {
           name: "shell",
           status: "completed",
           error: null,
+          metadata: { nativeThreadId: "thread-1", parentCallId: "silent-merge" },
           detail: {
             type: "shell",
             command: "gh pr merge 2030 --squash",
@@ -1821,6 +1822,7 @@ describe("Codex app-server provider", () => {
           name: "shell",
           status: "completed",
           error: null,
+          metadata: { nativeThreadId: "thread-1", parentCallId: "legacy-silent-merge" },
           detail: {
             type: "shell",
             command: "gh pr merge 2030 --squash",
