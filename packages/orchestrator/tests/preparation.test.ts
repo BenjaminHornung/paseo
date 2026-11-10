@@ -6,8 +6,10 @@ import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import type { PreparationInput } from "../paseo-plugin/shared/preparation.ts";
 
-const root = realpathSync(process.cwd());
-const fixture = mkdtempSync(path.join(root, ".preparation-"));
+const fixtureRoot = realpathSync(process.cwd());
+// The modelled eligible project is independent of the checkout/build location.
+const projectDirectory = "C:/IFI_SourceCode/preparation-fixture";
+const fixture = mkdtempSync(path.join(fixtureRoot, ".preparation-"));
 interface TestRuntime {
   prepareExisting(
     agentId: string,
@@ -27,7 +29,7 @@ afterEach(() => {
 });
 const previousRoot = process.env.PASEO_ORCHESTRATOR_ROOT;
 const previousNode = process.env.PASEO_ORCHESTRATOR_NODE;
-process.env.PASEO_ORCHESTRATOR_ROOT = root;
+process.env.PASEO_ORCHESTRATOR_ROOT = fixtureRoot;
 process.env.PASEO_ORCHESTRATOR_NODE = process.execPath;
 // Directory plugins use extensionless author imports. Exercise that same build
 // resolution in the existing Node test suite, without opening any provider.
@@ -35,7 +37,7 @@ await build({
   stdin: {
     contents:
       'export { prepareOrchestratorSession } from "./paseo-plugin/server/preparation.ts"; export { AutomationRuntime } from "./paseo-plugin/server/automation.ts";',
-    resolveDir: root,
+    resolveDir: fixtureRoot,
     sourcefile: "preparation-test-entry.ts",
   },
   outfile: path.join(fixture, "preparation.mjs"),
@@ -54,7 +56,7 @@ await build({
         }));
         builder.onLoad({ filter: /.*/, namespace: "preparation-test" }, () => ({
           contents: `
-        export const controllerRoot = ${JSON.stringify(root)};
+        export const controllerRoot = ${JSON.stringify(fixtureRoot)};
         export const controllerNodeExecutable = process.execPath;
         export function controllerEntrypoint() { throw Error("REAL_RUNNER_FORBIDDEN"); }
         export const controller = (input) => globalThis.__PASEO_PREPARATION_CONTROLLER__(input);
@@ -81,7 +83,7 @@ after(() => {
   if (previousNode === undefined) delete process.env.PASEO_ORCHESTRATOR_NODE;
   else process.env.PASEO_ORCHESTRATOR_NODE = previousNode;
   const resolved = realpathSync(fixture);
-  assert.equal(path.dirname(resolved), root);
+  assert.equal(path.dirname(resolved), fixtureRoot);
   assert.ok(path.basename(resolved).startsWith(".preparation-"));
   rmSync(resolved, { recursive: true, force: true });
 });
@@ -105,7 +107,7 @@ function existingMain() {
     model: request.model,
     effectiveThinkingOptionId: request.reasoning,
     currentModeId: request.modeId,
-    cwd: root,
+    cwd: projectDirectory,
     workspaceId: request.workspaceId,
     title: "Preserve this conversation",
     status: "idle",
@@ -150,12 +152,14 @@ function existingMain() {
   };
   const paseo = {
     projects: {
-      list: async () => ({ projects: [{ projectId: "project", projectRootPath: root }] }),
+      list: async () => ({
+        projects: [{ projectId: "project", projectRootPath: projectDirectory }],
+      }),
     },
     workspaces: {
       ref: () => ({
         projectId: "project",
-        directory: root,
+        directory: projectDirectory,
         refresh: async () => {},
         agents: { create },
       }),
