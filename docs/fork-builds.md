@@ -68,6 +68,26 @@ The initial configuration uses orchestration V3 with API access and dispatch dis
 zero budgets and unverified routes. Complete the settings in the new Advanced profile
 before enabling real routing; the package never grants a new API allowance.
 
+The shipped plugin bundles its workspace SDK dependencies at build time. It needs no
+checkout, plugin-local `node_modules` or dependency installation on the user's machine.
+The Windows build smoke copies the packaged distribution outside the checkout before
+starting it and requires the bundled plugin and its controller settings RPC to work there.
+It also cold-starts the Advanced CLI in an isolated user profile without `PASEO_HOME`
+or `--home`, exercising the default `.paseo-advanced` home. An inherited `PASEO_HOME`
+still explicitly selects that home; from an upstream Paseo terminal use
+`paseo-advanced.cmd --home C:/Users/<user>/.paseo-advanced ...` or clear that override
+in the calling process. This does not change the user's global environment.
+
+For an existing Advanced `bfa2fe1a2` installation, the successful run also provides
+`paseo-advanced-plugin-repair-<commit>`. Check its `pluginFileSha256` values against
+the three files in `paseo-plugin/` and confirm its controller `compiledInputSha256`
+matches the installed `resources/orchestrator/dist/build-info.json`. Copy only those
+three files into `resources/orchestrator/paseo-plugin/`, preserving the existing
+data/configuration, then run the Advanced CLI with its explicit home:
+`plugin reload paseo-orchestrator`, followed by `plugin ls --json` and require `running`.
+This repairs the bundled plugin without replacing the renderer or restarting the
+daemon. The full installer/ZIP includes the same fix for new installations.
+
 Git and PowerShell 7 must already be available on PATH. The package resolves their
 actual installed paths and runs the controller using its own Electron Node runtime
 (Node >=24 with `node:sqlite`). Pi remains optional. Its Advanced-specific launcher

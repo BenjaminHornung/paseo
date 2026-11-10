@@ -660,11 +660,14 @@ async function smokeCliShim({ appPath, env }) {
 }
 
 async function smokeColdCliDaemonStart({ appPath }) {
-  const home = createTempDir("paseo-smoke-cli-daemon-home-");
+  const userHome = createTempDir("paseo-smoke-cli-daemon-home-");
+  const advanced = EXECUTABLE_NAME === "PaseoAdvanced";
+  const home = advanced ? path.join(userHome, ".paseo-advanced") : userHome;
+  fs.mkdirSync(home, { recursive: true });
   const pidPath = path.join(home, "paseo.pid");
   const port = await reserveLocalTcpPort();
   const listen = `127.0.0.1:${port}`;
-  const env = createDefaultDaemonEnv({ HOME: home, USERPROFILE: home });
+  const env = createDefaultDaemonEnv({ HOME: userHome, USERPROFILE: userHome });
   configureIsolatedDaemonHome(home, listen);
   if (EXECUTABLE_NAME === "PaseoAdvanced") {
     const config = JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8"));
@@ -678,7 +681,7 @@ async function smokeColdCliDaemonStart({ appPath }) {
     await runCliShimCommand({
       appPath,
       env,
-      args: ["daemon", "start", "--home", home],
+      args: ["daemon", "start", ...(advanced ? [] : ["--home", home])],
       label: "Bundled CLI shim cold daemon start",
     });
 
@@ -708,13 +711,13 @@ async function smokeColdCliDaemonStart({ appPath }) {
       await runCliShimCommand({
         appPath,
         env,
-        args: ["daemon", "stop", "--home", home, "--force"],
+        args: ["daemon", "stop", ...(advanced ? [] : ["--home", home]), "--force"],
         label: "Bundled CLI shim cold daemon stop",
       }).catch((error) => {
         console.warn(`Packaged desktop smoke: failed to stop cold CLI daemon: ${error}`);
       });
     }
-    await removeTempDir(home);
+    await removeTempDir(userHome);
   }
 }
 

@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 
 const { smokePackagedDesktopApp } = require("../e2e/packaged-app-smoke.js");
 
@@ -137,7 +138,27 @@ async function smokeUnpackedAppIfRequested(appOutDir) {
     return;
   }
 
-  await smokePackagedDesktopApp({
-    appPath: appOutDir,
-  });
+  if (process.env.PASEO_DESKTOP_SMOKE_EXECUTABLE_NAME !== "PaseoAdvanced") {
+    await smokePackagedDesktopApp({ appPath: appOutDir });
+    return;
+  }
+
+  // The release directory is inside the checkout, whose node_modules can hide
+  // missing plugin dependencies. Exercise exactly the distributed files from
+  // an unrelated installation root, as on the user's machine.
+  const isolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "paseo-advanced-package-"));
+  const resolvedRoot = path.resolve(isolatedRoot);
+  if (
+    path.dirname(resolvedRoot) !== path.resolve(os.tmpdir()) ||
+    !path.basename(resolvedRoot).startsWith("paseo-advanced-package-")
+  )
+    throw new Error("Refusing to use an unexpected package smoke directory");
+  const installedPath = path.join(isolatedRoot, "Paseo Advanced");
+  try {
+    await fs.promises.cp(appOutDir, installedPath, { recursive: true });
+    console.log(`Packaged desktop smoke: relocated distribution to ${installedPath}`);
+    await smokePackagedDesktopApp({ appPath: installedPath });
+  } finally {
+    await fs.promises.rm(resolvedRoot, { recursive: true, force: true, maxRetries: 5 });
+  }
 }

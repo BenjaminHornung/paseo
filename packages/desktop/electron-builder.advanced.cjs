@@ -20,7 +20,7 @@ module.exports = {
   executableName: "PaseoAdvanced",
   extraResources: [
     ...upstream.extraResources,
-    { from: "../orchestrator/dist", to: "orchestrator/dist" },
+    { from: "../orchestrator/dist", to: "orchestrator/dist", filter: ["!paseo-plugin/**"] },
     {
       from: "../orchestrator/config",
       to: "orchestrator/config",
@@ -29,9 +29,8 @@ module.exports = {
     { from: "../orchestrator/scripts", to: "orchestrator/scripts", filter: ["!build.mjs"] },
     { from: "../orchestrator/pi", to: "orchestrator/pi", filter: ["paseo-advanced-pi.cmd"] },
     {
-      from: "../orchestrator/paseo-plugin",
+      from: "../orchestrator/dist/paseo-plugin",
       to: "orchestrator/paseo-plugin",
-      filter: ["!node_modules/**"],
     },
   ],
   protocols: [{ name: "Paseo Advanced agent link", schemes: ["paseo-advanced"] }],
