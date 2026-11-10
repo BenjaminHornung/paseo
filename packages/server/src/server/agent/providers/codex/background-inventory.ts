@@ -1,6 +1,11 @@
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import type { AgentStreamEvent } from "../../agent-sdk-types.js";
 import { CodexAppServerRpcError } from "./app-server-transport.js";
+import {
+  AgentBackgroundWorkRefreshError,
+  type AgentBackgroundWorkObservationInput,
+} from "../../background-work/index.js";
 
 type InventoryEvent = Extract<AgentStreamEvent, { type: "background_work" }>;
 interface Client {
@@ -19,7 +24,58 @@ export class CodexBackgroundInventory {
   private retrying = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private current: InventoryEvent | null = null;
+  private observedThreads: string[] = [];
   private readonly listeners = new Set<() => void>();
+  private readonly observationListeners = new Set<
+    (error: AgentBackgroundWorkRefreshError | null) => void
+  >();
+
+  refreshNow(
+    providerSessionId: string | null = this.thread,
+  ): Promise<AgentBackgroundWorkObservationInput> {
+    if (this.unsupported) {
+      throw new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_REFRESH_UNSUPPORTED");
+    }
+    const thread = providerSessionId;
+    const generation = this.generation;
+    if (!this.client || !thread) {
+      throw new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_SESSION_UNAVAILABLE");
+    }
+    return new Promise((resolve, reject) => {
+      const finish = (error: AgentBackgroundWorkRefreshError | null) => {
+        clearTimeout(timer);
+        this.observationListeners.delete(finish);
+        if (error) {
+          reject(error);
+        } else if (generation !== this.generation || thread !== this.thread) {
+          reject(new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_SESSION_CHANGED"));
+        } else if (this.current?.items) {
+          resolve({
+            providerSessionId: thread,
+            observationId: randomUUID(),
+            coverage: "codex_background_terminals",
+            queriedProviderSessionIds: [...this.observedThreads],
+            items: [...this.current.items],
+          });
+        } else {
+          reject(new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_SESSION_UNAVAILABLE"));
+        }
+      };
+      const timer = setTimeout(
+        () => finish(new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_REFRESH_TIMEOUT")),
+        30_000,
+      );
+      this.observationListeners.add(finish);
+      this.retrying = false;
+      // Marks an in-flight older read dirty, so only a native query started after
+      // this request can resolve the observation, including unchanged empty results.
+      this.changed(thread);
+    });
+  }
+
+  private finishObservations(error: AgentBackgroundWorkRefreshError | null = null): void {
+    for (const listener of this.observationListeners) listener(error);
+  }
 
   async stopItem(id: string): Promise<void> {
     const client = this.client;
@@ -81,6 +137,7 @@ export class CodexBackgroundInventory {
   }
   stop() {
     this.generation++;
+    this.finishObservations(new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_SESSION_CHANGED"));
     this.notify();
     this.client = null;
     this.thread = null;
@@ -93,6 +150,7 @@ export class CodexBackgroundInventory {
     this.timer = null;
     if (this.current) this.emit({ type: "background_work", provider: "codex", items: null });
     this.current = null;
+    this.observedThreads = [];
   }
   changed(thread: string | null) {
     this.thread = thread;
@@ -120,8 +178,10 @@ export class CodexBackgroundInventory {
         for (const threadId of activeThreads) this.threads.add(threadId);
         if (this.thread) this.threads.add(this.thread);
         this.current = { type: "background_work", provider: "codex", items };
+        this.observedThreads = threads;
         this.emit(this.current);
         this.notify();
+        this.finishObservations();
       } catch (error) {
         failed = true;
         if (
@@ -130,6 +190,12 @@ export class CodexBackgroundInventory {
           error.code === -32601
         )
           this.unsupported = true;
+        if (generation === this.generation) {
+          const code = this.unsupported
+            ? "BACKGROUND_WORK_REFRESH_UNSUPPORTED"
+            : "BACKGROUND_WORK_REFRESH_FAILED";
+          this.finishObservations(new AgentBackgroundWorkRefreshError(code));
+        }
       } finally {
         if (generation === this.generation) {
           this.pending = false;
@@ -177,6 +243,8 @@ async function readInventories(client: Client, threads: string[]) {
           kind: "shell",
           canStop: true,
           description: null,
+          providerSessionId: threadId,
+          processId: row.processId,
           ...(row.command ? { command: row.command } : {}),
         });
       }

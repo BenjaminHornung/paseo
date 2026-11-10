@@ -7,6 +7,30 @@ export interface AgentBackgroundWorkInput {
   description: string | null;
   command?: string;
   canStop?: boolean;
+  providerSessionId?: string;
+  processId?: string;
+}
+
+export interface AgentBackgroundWorkObservationInput {
+  providerSessionId: string;
+  observationId: string;
+  coverage: "codex_background_terminals";
+  queriedProviderSessionIds: string[];
+  items: AgentBackgroundWorkInput[];
+}
+
+export type AgentBackgroundWorkRefreshErrorCode =
+  | "BACKGROUND_WORK_REFRESH_UNSUPPORTED"
+  | "BACKGROUND_WORK_REFRESH_FAILED"
+  | "BACKGROUND_WORK_REFRESH_TIMEOUT"
+  | "BACKGROUND_WORK_SESSION_UNAVAILABLE"
+  | "BACKGROUND_WORK_SESSION_CHANGED";
+
+export class AgentBackgroundWorkRefreshError extends Error {
+  constructor(readonly code: AgentBackgroundWorkRefreshErrorCode) {
+    super(code);
+    this.name = "AgentBackgroundWorkRefreshError";
+  }
 }
 
 export interface AgentBackgroundWorkItem extends AgentBackgroundWorkInput {
@@ -40,6 +64,8 @@ export class AgentBackgroundWorkStore {
         kind: input.kind,
         description: input.description,
         ...(input.command ? { command: input.command } : {}),
+        ...(input.providerSessionId ? { providerSessionId: input.providerSessionId } : {}),
+        ...(input.processId ? { processId: input.processId } : {}),
         ...(input.canStop
           ? { canStop: true, stopToken: previousById.get(input.id)?.stopToken ?? randomUUID() }
           : {}),
@@ -79,6 +105,8 @@ function sameItems(
         item.kind === other.kind &&
         item.description === other.description &&
         item.command === other.command &&
+        item.providerSessionId === other.providerSessionId &&
+        item.processId === other.processId &&
         item.canStop === other.canStop &&
         item.stopToken === other.stopToken &&
         item.startedAt === other.startedAt

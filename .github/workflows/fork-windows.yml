@@ -22,6 +22,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
+      - name: Preserve repository LF line endings for source checks
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -49,10 +52,6 @@ jobs:
       - name: Typecheck app
         run: npm run typecheck --workspace=@getpaseo/app
 
-      - name: Verify desktop distribution and CLI isolation
-        working-directory: packages/desktop
-        run: node ../../node_modules/vitest/vitest.mjs run src/distribution.test.ts src/daemon/node-entrypoint-runner.test.ts src/integrations/cli-install/path.test.ts src/daemon/daemon-manager.test.ts --bail=1
-
       - name: Check fork source style
         run: |
           npm run lint
@@ -67,6 +66,22 @@ jobs:
           PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
           PASEO_DESKTOP_SMOKE_EXECUTABLE_NAME: PaseoAdvanced
           PASEO_DESKTOP_SMOKE_CLI_SHIM_NAME: paseo-advanced.cmd
+
+      - name: Verify desktop distribution and CLI isolation
+        working-directory: packages/desktop
+        run: node ../../node_modules/vitest/vitest.mjs run src/distribution.test.ts src/daemon/node-entrypoint-runner.test.ts src/integrations/cli-install/path.test.ts src/daemon/daemon-manager.test.ts --bail=1
+
+      - name: Verify native observation freshness and work ownership
+        working-directory: packages/server
+        run: node ../../node_modules/vitest/vitest.mjs run src/server/agent/providers/codex/background-inventory.test.ts src/server/agent/background-work/index.test.ts --bail=1
+
+      - name: Verify resumed native terminal correlation
+        working-directory: packages/server
+        run: node ../../node_modules/vitest/vitest.mjs run src/server/agent/providers/codex-app-server-agent.test.ts -t "correlates resumed terminal interactions|exact bytes Codex writes|labels a terminal write" --bail=1
+
+      - name: Verify negotiated public SDK background-work contract
+        working-directory: packages/client
+        run: node ../../node_modules/vitest/vitest.mjs run src/index.test.ts -t "background work" --bail=1
 
       - name: Record artifact checksums and build provenance
         shell: pwsh

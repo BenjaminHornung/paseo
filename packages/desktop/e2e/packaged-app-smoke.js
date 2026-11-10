@@ -877,6 +877,32 @@ async function smokePackagedDesktopApp({
   expectedSandbox,
 }) {
   assertExecutable(executablePath, "Packaged app executable");
+  if (EXECUTABLE_NAME === "PaseoAdvanced") {
+    const probe = spawnSync(
+      executablePath,
+      [
+        "-e",
+        'const {DatabaseSync}=require("node:sqlite"); const db=new DatabaseSync(":memory:"); console.log(JSON.stringify({node:process.versions.node,electron:process.versions.electron,sqlite:db.prepare("SELECT 1 AS ok").get().ok})); db.close();',
+      ],
+      {
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 15_000,
+      },
+    );
+    assert.equal(probe.status, 0, "Advanced controller runtime must support native node:sqlite");
+    const runtime = JSON.parse(probe.stdout.trim());
+    assert.ok(Number(runtime.node.split(".")[0]) >= 24, "Advanced controller requires Node >=24");
+    assert.equal(runtime.sqlite, 1);
+    if (process.env.PASEO_DESKTOP_SMOKE_ARTIFACT_DIR) {
+      fs.mkdirSync(process.env.PASEO_DESKTOP_SMOKE_ARTIFACT_DIR, { recursive: true });
+      fs.writeFileSync(
+        path.join(process.env.PASEO_DESKTOP_SMOKE_ARTIFACT_DIR, "advanced-node-runtime.json"),
+        JSON.stringify(runtime, null, 2),
+      );
+    }
+  }
   assertLinuxDesktopIdentity(appPath);
   await smokeColdCliDaemonStart({ appPath });
 

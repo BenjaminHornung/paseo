@@ -1678,6 +1678,7 @@ function decodeCodexOutputDeltaChunk(chunk: string): string {
 
 function mapCodexExecNotificationToToolCall(params: {
   callId?: string | null;
+  nativeThreadId?: string | null;
   command: unknown;
   cwd?: string | null;
   output?: string | null;
@@ -1716,7 +1717,11 @@ function mapCodexExecNotificationToToolCall(params: {
   if (!mapped) {
     return null;
   }
-  return params.running ? toRunningToolCall(mapped) : mapped;
+  const correlated = withCodexTerminalCorrelation(mapped, {
+    nativeThreadId: params.nativeThreadId,
+    parentCallId: params.callId,
+  });
+  return params.running ? toRunningToolCall(correlated) : correlated;
 }
 
 function codexPatchPreview(
@@ -1801,15 +1806,42 @@ export function mapCodexPatchNotificationToToolCall(params: {
   return params.running ? toRunningToolCall(mapped) : mapped;
 }
 
+interface CodexTerminalCorrelation {
+  nativeThreadId?: string | null;
+  parentCallId?: string | null;
+  processId?: string | null;
+}
+
+function withCodexTerminalCorrelation(
+  item: ToolCallTimelineItem,
+  correlation: CodexTerminalCorrelation,
+): ToolCallTimelineItem {
+  const nativeThreadId = nonEmptyString(correlation.nativeThreadId ?? undefined);
+  const parentCallId = nonEmptyString(correlation.parentCallId ?? undefined);
+  const processId = nonEmptyString(correlation.processId ?? undefined);
+  if (!nativeThreadId && !parentCallId && !processId) return item;
+
+  return {
+    ...item,
+    metadata: {
+      ...item.metadata,
+      ...(nativeThreadId ? { nativeThreadId } : {}),
+      ...(parentCallId ? { parentCallId } : {}),
+      ...(processId ? { processId } : {}),
+    },
+  };
+}
+
 function mapCodexTerminalInteractionToToolCall(params: {
   callId: string;
+  nativeThreadId?: string | null;
+  parentCallId?: string | null;
   processId?: string | null;
   command?: string | null;
   stdin?: string | null;
 }): ToolCallTimelineItem {
-  const processId = nonEmptyString(params.processId ?? undefined);
   const label = nonEmptyString(params.command ?? undefined);
-  return {
+  const item: ToolCallTimelineItem = {
     type: "tool_call",
     callId: params.callId,
     name: "terminal",
@@ -1821,8 +1853,12 @@ function mapCodexTerminalInteractionToToolCall(params: {
       ...(params.stdin !== null && params.stdin !== undefined ? { text: params.stdin } : {}),
       icon: "square_terminal",
     },
-    ...(processId ? { metadata: { processId } } : {}),
   };
+  return withCodexTerminalCorrelation(item, {
+    nativeThreadId: params.nativeThreadId,
+    parentCallId: params.parentCallId,
+    processId: params.processId,
+  });
 }
 
 function mapCodexThreadPlanItem(normalizedItem: Record<string, unknown>): AgentTimelineItem | null {
@@ -2063,9 +2099,25 @@ function mapCodexAgentMessage(item: Record<string, unknown>): AgentTimelineItem 
   };
 }
 
+function mapCodexThreadToolCall(
+  item: Record<string, unknown>,
+  options: { cwd: string | null; nativeThreadId?: string | null },
+): ToolCallTimelineItem | null {
+  const timelineItem = mapCodexToolCallFromThreadItem(item, { cwd: options.cwd });
+  if (item.type !== "commandExecution" || !timelineItem) return timelineItem;
+  return withCodexTerminalCorrelation(timelineItem, {
+    nativeThreadId: options.nativeThreadId,
+    parentCallId: timelineItem.callId,
+    processId:
+      typeof item.processId === "string" || typeof item.processId === "number"
+        ? String(item.processId)
+        : null,
+  });
+}
+
 export async function threadItemToTimeline(
   item: unknown,
-  options?: { includeUserMessage?: boolean; cwd?: string | null },
+  options?: { includeUserMessage?: boolean; cwd?: string | null; nativeThreadId?: string | null },
 ): Promise<AgentTimelineItem | null> {
   const itemRecord = toObjectRecord(item);
   if (!itemRecord) return null;
@@ -2083,7 +2135,10 @@ export async function threadItemToTimeline(
     return await mapCodexThreadImageItem(normalizedType, normalizedItem);
   }
   if (normalizedType && CODEX_TOOL_THREAD_ITEM_TYPES.has(normalizedType)) {
-    return mapCodexToolCallFromThreadItem(normalizedItem, { cwd });
+    return mapCodexThreadToolCall(normalizedItem, {
+      cwd,
+      nativeThreadId: options?.nativeThreadId,
+    });
   }
 
   switch (normalizedType) {
@@ -2130,7 +2185,7 @@ async function mcpToolResultImagesToTimeline(item: unknown): Promise<AgentTimeli
 
 async function threadItemToTimelineEntries(
   item: unknown,
-  options?: { includeUserMessage?: boolean; cwd?: string | null },
+  options?: { includeUserMessage?: boolean; cwd?: string | null; nativeThreadId?: string | null },
 ): Promise<AgentTimelineItem[]> {
   const timelineItem = await threadItemToTimeline(item, options);
   if (!timelineItem) {
@@ -2180,7 +2235,10 @@ async function projectCodexThreadHistory(
         historicalSubAgentActivity.agentThreadId,
       );
       if (existingIndex !== undefined) {
-        const activityTimelineItem = await threadItemToTimeline(item, { cwd: params.cwd });
+        const activityTimelineItem = await threadItemToTimeline(item, {
+          cwd: params.cwd,
+          nativeThreadId: params.threadId,
+        });
         updateHistoricalSubAgentActivity(
           timeline,
           existingIndex,
@@ -2193,7 +2251,10 @@ async function projectCodexThreadHistory(
         continue;
       }
     }
-    for (const timelineItem of await threadItemToTimelineEntries(item, { cwd: params.cwd })) {
+    for (const timelineItem of await threadItemToTimelineEntries(item, {
+      cwd: params.cwd,
+      nativeThreadId: params.threadId,
+    })) {
       const timestamp =
         readCodexHistoryTimestamp(item) ?? readCodexHistoryRowTimestamp(row, timelineItem);
       const settledTimelineItem =
@@ -3569,7 +3630,13 @@ export class CodexAppServerAgentSession implements AgentSession {
   private interruptedTurnCleanup: Promise<void> | null = null;
   private pendingUnlabeledTerminalInteractions = new Map<
     string,
-    Array<{ callId: string; stdin: string | null }>
+    Array<{
+      callId: string;
+      stdin: string | null;
+      nativeThreadId: string | null;
+      parentCallId: string | null;
+      processId: string;
+    }>
   >();
   private nextTerminalInteractionOrdinal = 0;
   private emittedTerminalInteractionKeys = new Set<string>();
@@ -5230,6 +5297,12 @@ export class CodexAppServerAgentSession implements AgentSession {
     return this.background.stopItem(id);
   }
 
+  async refreshBackgroundWork() {
+    if (this.connectionState === "disconnected") await this.connect();
+    if (!this.currentThreadId) await this.ensureThread();
+    return this.background.refreshNow(this.currentThreadId);
+  }
+
   async canStopRuntime(): Promise<boolean> {
     if (
       !this.client ||
@@ -6767,6 +6840,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     const timelineItem = mapCodexExecNotificationToToolCall({
       callId: parsed.callId,
+      nativeThreadId: parsed.threadId,
       command: parsed.command,
       cwd: parsed.cwd ?? this.config.cwd ?? null,
       running: true,
@@ -6793,6 +6867,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     const timelineItem = mapCodexExecNotificationToToolCall({
       callId: parsed.callId,
+      nativeThreadId: parsed.threadId,
       command: parsed.command,
       cwd: parsed.cwd ?? this.config.cwd ?? null,
       output: resolvedOutput,
@@ -6812,7 +6887,12 @@ export class CodexAppServerAgentSession implements AgentSession {
   private handleTerminalInteractionNotification(
     parsed: Extract<ParsedCodexNotification, { kind: "terminal_interaction" }>,
   ): void {
-    const interactionKey = [parsed.processId ?? "", parsed.stdin ?? ""].join("\u0000");
+    const interactionKey = [
+      parsed.threadId ?? "",
+      parsed.callId ?? "",
+      parsed.processId ?? "",
+      parsed.stdin ?? "",
+    ].join("\u0000");
     if (!this.shouldEmitTerminalInteractionKey(interactionKey)) {
       return;
     }
@@ -6823,11 +6903,19 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (!command && parsed.processId) {
       const pendingInteractions =
         this.pendingUnlabeledTerminalInteractions.get(parsed.processId) ?? [];
-      pendingInteractions.push({ callId, stdin: parsed.stdin });
+      pendingInteractions.push({
+        callId,
+        stdin: parsed.stdin,
+        nativeThreadId: parsed.threadId,
+        parentCallId: parsed.callId,
+        processId: parsed.processId,
+      });
       this.pendingUnlabeledTerminalInteractions.set(parsed.processId, pendingInteractions);
     }
     const timelineItem = mapCodexTerminalInteractionToToolCall({
       callId,
+      nativeThreadId: parsed.threadId,
+      parentCallId: parsed.callId,
       processId: parsed.processId,
       command,
       stdin: parsed.stdin,
@@ -6961,6 +7049,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     const timelineItem = await threadItemToTimeline(parsed.item, {
       includeUserMessage: false,
       cwd: this.config.cwd ?? null,
+      nativeThreadId: parsed.threadId,
     });
     if (!timelineItem) {
       return;
@@ -7137,6 +7226,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     const timelineItem = await threadItemToTimeline(parsed.item, {
       includeUserMessage: false,
       cwd: this.config.cwd ?? null,
+      nativeThreadId: parsed.threadId,
     });
     if (!timelineItem || timelineItem.type !== "tool_call") {
       return;
@@ -7185,6 +7275,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     const timelineItem = await threadItemToTimeline(parsed.item, {
       includeUserMessage: true,
       cwd: this.config.cwd ?? null,
+      nativeThreadId: parsed.threadId,
     });
     if (!timelineItem || timelineItem.type !== "user_message") {
       return;
@@ -7305,7 +7396,9 @@ export class CodexAppServerAgentSession implements AgentSession {
         provider: CODEX_PROVIDER,
         item: mapCodexTerminalInteractionToToolCall({
           callId: pendingInteraction.callId,
-          processId,
+          nativeThreadId: pendingInteraction.nativeThreadId,
+          parentCallId: pendingInteraction.parentCallId,
+          processId: pendingInteraction.processId,
           command: displayCommand,
           stdin: pendingInteraction.stdin,
         }),
@@ -7373,6 +7466,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       .parse(params);
     const commandPreview = mapCodexExecNotificationToToolCall({
       callId: parsed.itemId,
+      nativeThreadId: parsed.threadId,
       command: parsed.command,
       cwd: parsed.cwd ?? this.config.cwd ?? null,
       running: true,

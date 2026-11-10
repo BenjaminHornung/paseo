@@ -12,6 +12,7 @@ import type { DaemonClientConfig } from "./daemon-client.js";
 import type { AgentPermissionResponse, JsonValue } from "@getpaseo/protocol/agent-types";
 import type {
   AgentSnapshotPayload,
+  AgentBackgroundWorkObservation,
   CreationSnapshot,
   CreateAgentRequestMessage,
   FetchWorkspacesRequestMessage,
@@ -370,8 +371,16 @@ export interface PaseoAgentTimelineHandle {
 }
 
 export type PaseoAgentBackgroundWorkItem = AgentBackgroundWorkItem;
+export type PaseoAgentBackgroundWorkObservation = AgentBackgroundWorkObservation;
 
 export interface PaseoAgentBackgroundWorkHandle {
+  /** Await a successful native query after this call, bound to the exact provider session.
+   * Coverage is Codex-reported background terminals; inspect providerSubagents separately.
+   * Missing capabilities, failed queries or changed sessions reject, never return cached emptiness. */
+  refresh(options?: {
+    requestId?: string;
+    timeout?: number;
+  }): Promise<PaseoAgentBackgroundWorkObservation>;
   /** Stop one item and wait for provider confirmation. */
   stop(
     item: PaseoAgentBackgroundWorkItem,
@@ -1046,6 +1055,7 @@ function createAgentHandleFactory(
           }),
       },
       backgroundWork: {
+        refresh: (options) => daemonClient.refreshAgentBackgroundWork(id, options),
         stop: (item, options) => daemonClient.stopAgentBackgroundWork(id, item, options),
         list: (options) => daemonClient.listAgentBackgroundWork(id, options),
         subscribe: (listener, options) => {

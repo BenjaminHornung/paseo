@@ -1872,12 +1872,15 @@ describe("Codex app-server provider", () => {
             icon: "square_terminal",
           },
           metadata: {
+            nativeThreadId: "thread-1",
+            parentCallId: "interactive-shell",
             processId: "4242",
           },
         },
       });
 
       const relabeledTerminal = waitForTimelineToolCall(session, "terminal-session-4242-1");
+      const shellCommand = waitForTimelineToolCall(session, "interactive-shell");
       appServer.runsLegacyCommand({
         threadId: "thread-1",
         callId: "interactive-shell",
@@ -1902,10 +1905,166 @@ describe("Codex app-server provider", () => {
             icon: "square_terminal",
           },
           metadata: {
+            nativeThreadId: "thread-1",
+            parentCallId: "interactive-shell",
             processId: "4242",
           },
         },
       });
+      await expect(shellCommand).resolves.toMatchObject({
+        item: {
+          type: "tool_call",
+          callId: "interactive-shell",
+          name: "shell",
+          metadata: {
+            nativeThreadId: "thread-1",
+            parentCallId: "interactive-shell",
+          },
+        },
+      });
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("correlates resumed terminal interactions with completed shell history", async () => {
+    const appServer = createFakeCodexAppServer({
+      "thread/read": () => ({
+        thread: {
+          id: "thread-1",
+          turns: [
+            {
+              id: "turn-1",
+              items: [
+                {
+                  type: "commandExecution",
+                  id: "interactive-shell",
+                  status: "completed",
+                  command: "sleep 30",
+                  aggregatedOutput: null,
+                  exitCode: null,
+                },
+                {
+                  type: "commandExecution",
+                  id: "other-shell",
+                  status: "completed",
+                  command: "sleep 60",
+                  processId: 4242,
+                  aggregatedOutput: null,
+                  exitCode: null,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      { sessionId: "thread-1" },
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    try {
+      await session.connect();
+      const history: AgentTimelineItem[] = [];
+      for await (const event of session.streamHistory()) {
+        if (event.type === "timeline") history.push(event.item);
+      }
+
+      const completedShell = history.find(
+        (item) => item.type === "tool_call" && item.callId === "interactive-shell",
+      );
+      const otherCompletedShell = history.find(
+        (item) => item.type === "tool_call" && item.callId === "other-shell",
+      );
+      expect(completedShell).toMatchObject({
+        type: "tool_call",
+        name: "shell",
+        callId: "interactive-shell",
+        metadata: {
+          nativeThreadId: "thread-1",
+          parentCallId: "interactive-shell",
+        },
+      });
+      expect(
+        completedShell?.type === "tool_call" ? completedShell.metadata : undefined,
+      ).not.toHaveProperty("processId");
+      expect(otherCompletedShell).toMatchObject({
+        type: "tool_call",
+        name: "shell",
+        callId: "other-shell",
+        metadata: {
+          nativeThreadId: "thread-1",
+          parentCallId: "other-shell",
+          processId: "4242",
+        },
+      });
+
+      const terminalItems: Extract<AgentTimelineItem, { type: "tool_call" }>[] = [];
+      const unsubscribe = session.subscribe((event) => {
+        if (
+          event.type === "timeline" &&
+          event.item.type === "tool_call" &&
+          event.item.name === "terminal"
+        ) {
+          terminalItems.push(event.item);
+        }
+      });
+      const sendTerminalInput = async (itemId: string, text: string): Promise<void> => {
+        appServer.typesIntoTerminal({
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId,
+          processId: "4242",
+          text,
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      };
+
+      await sendTerminalInput("interactive-shell", "");
+      expect(terminalItems).toHaveLength(1);
+      expect(terminalItems[0]).toMatchObject({
+        name: "terminal",
+        detail: { type: "plain_text", text: "" },
+        metadata: {
+          nativeThreadId: "thread-1",
+          parentCallId: "interactive-shell",
+          processId: "4242",
+        },
+      });
+
+      // Same process and stdin can belong to a different native shell item.
+      await sendTerminalInput("other-shell", "");
+      expect(terminalItems).toHaveLength(2);
+      expect(terminalItems[1]).toMatchObject({
+        name: "terminal",
+        detail: { type: "plain_text", text: "" },
+        metadata: {
+          nativeThreadId: "thread-1",
+          parentCallId: "other-shell",
+          processId: "4242",
+        },
+      });
+
+      // The existing dedupe behavior still drops an identical native payload.
+      await sendTerminalInput("other-shell", "");
+      expect(terminalItems).toHaveLength(2);
+
+      await sendTerminalInput("interactive-shell", "\u0003");
+      expect(terminalItems).toHaveLength(3);
+      expect(terminalItems[2]).toMatchObject({
+        name: "terminal",
+        detail: { type: "plain_text", text: "\u0003" },
+        metadata: {
+          nativeThreadId: "thread-1",
+          parentCallId: "interactive-shell",
+          processId: "4242",
+        },
+      });
+      unsubscribe();
       appServer.assertNoErrors();
     } finally {
       await session.close();
@@ -1949,7 +2108,11 @@ describe("Codex app-server provider", () => {
             callId: "terminal-session-73-1",
             name: "terminal",
             detail: { type: "plain_text", label: "python3 -i", text: "print(1)\n" },
-            metadata: { processId: "73" },
+            metadata: {
+              nativeThreadId: "thread-1",
+              parentCallId: "interactive-shell",
+              processId: "73",
+            },
           },
         });
         appServer.assertNoErrors();

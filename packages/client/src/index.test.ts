@@ -1985,6 +1985,63 @@ test("agent handles list background work", async () => {
   await client.close();
 });
 
+test("background work refresh requires negotiation and never falls back to a prior observation", async () => {
+  const old = await connectClient(BACKGROUND_WORK_FEATURES);
+  const sentBefore = old.ws.sent.length;
+  await expect(old.client.agents.ref("agent-a").backgroundWork.refresh()).rejects.toThrow(
+    "Update the host",
+  );
+  expect(old.ws.sent).toHaveLength(sentBefore);
+  await old.client.close();
+  FakeWebSocket.instances.length = 0;
+
+  const { client, ws } = await connectClient({
+    ...BACKGROUND_WORK_FEATURES,
+    agentBackgroundWorkRefresh: true,
+  });
+  try {
+    const pending = client.agents.ref("agent-a").backgroundWork.refresh();
+    const request = parseSentSessionMessage(ws.sent.at(-1));
+    expect(request).toMatchObject({
+      type: "agent.background_work.refresh.request",
+      agentId: "agent-a",
+    });
+    const observation = {
+      agentId: "agent-a",
+      providerSessionId: "native-a",
+      observationId: "fresh-query-a",
+      coverage: "codex_background_terminals",
+      queriedProviderSessionIds: ["native-a"],
+      items: [{ ...SHELL_ITEM, providerSessionId: "native-a", processId: "42" }],
+      providerSubagents: [],
+    };
+    ws.message(
+      sessionMessage({
+        type: "agent.background_work.refresh.response",
+        payload: { requestId: request.requestId, agentId: "agent-a", observation, error: null },
+      }),
+    );
+    await expect(pending).resolves.toEqual(observation);
+
+    const failed = client.agents.ref("agent-a").backgroundWork.refresh();
+    const failedRequest = parseSentSessionMessage(ws.sent.at(-1));
+    ws.message(
+      sessionMessage({
+        type: "agent.background_work.refresh.response",
+        payload: {
+          requestId: failedRequest.requestId,
+          agentId: "agent-a",
+          observation: null,
+          error: "BACKGROUND_WORK_REFRESH_FAILED",
+        },
+      }),
+    );
+    await expect(failed).rejects.toThrow("BACKGROUND_WORK_REFRESH_FAILED");
+  } finally {
+    await client.close();
+  }
+});
+
 test("agent handles follow only their own background work", async () => {
   const { client, ws } = await connectClient(BACKGROUND_WORK_FEATURES);
   const received: unknown[] = [];

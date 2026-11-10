@@ -68,6 +68,62 @@ One active-work/missing-capability boundary must wait with an actionable reason.
 This gate is pending until explicitly recorded with the compatible controller revision
 and packaged runtime evidence; the Windows package smoke is a separate gate.
 
+### Fresh public completion observation
+
+The fork SDK exports `PaseoAgentBackgroundWorkObservation`. Controllers must
+negotiate `server_info.features.agentBackgroundWorkRefresh === true` and await
+`agent.backgroundWork.refresh()` after the worker becomes idle. This invokes
+Codex's native `thread/backgroundTerminals/list` after the request, including
+when an unchanged empty inventory emits no store update. The response contains:
+
+```typescript
+{
+  agentId: string;
+  providerSessionId: string;
+  observationId: string;
+  coverage: "codex_background_terminals";
+  queriedProviderSessionIds: string[];
+  items: AgentBackgroundWorkItem[];
+  providerSubagents: ProviderSubagentDescriptorPayload[];
+}
+```
+
+Compare `providerSessionId` exactly with the refreshed agent's
+`runtimeInfo.sessionId`; reject a changed or unavailable session. A native thread
+without a first saved turn can still have `runtimeInfo.sessionId: null`, so its
+empty observation alone cannot establish worker completion. Require no active
+foreground turn, no returned work items and no known running provider subagent.
+The coverage names Codex-reported terminals, not arbitrary OS processes;
+provider subagents are separate known state, outside that native terminal query.
+Items preserve the native `providerSessionId` and `processId` when supplied.
+
+Missing capability, unsupported provider/native method, query failure, timeout
+or a changed session rejects the refresh. Never fall back to `list()`, a cached
+`count: 0`, timestamps from another host or automatic operator attestation.
+The ordinary cached list/subscription and stop-token behavior remain available
+for display and control.
+
+Private runtime evidence on 2026-11-10 used the compiled fork daemon/client with
+local Codex 0.167.0 and one subscription `codex/gpt-6-luna` turn at `max` effort.
+Agent `29e63ae8-127c-4e8e-be99-3dabcccf8ac4` was idle with native session
+`01a1c512-0336-7e72-8b6c-1741f490375f`. Fresh observation
+`43bc8127-4a41-49fd-8494-837a06390e03` still reported its active
+`Start-Sleep -Seconds 90` process `77182`; the public snapshot session matched.
+After public `backgroundWork.stop`, observation
+`620e665b-53d6-47fa-933b-60567b082e65` reported no work for the same session.
+The isolated daemon was then stopped. This is native API evidence; integrated
+controller routing and COMPLETE acceptance remain separate, pending gates.
+
+Projected Codex `shell` and `terminal` tool calls now preserve
+`metadata.nativeThreadId` and `metadata.parentCallId`; the latter is the native
+command item/call ID, not a display label. `metadata.processId` is included only
+when the native event supplies it. Live V2 command items and resumed command
+history use the same mapping. Empty/Ctrl-C terminal interactions retain these
+references even when the original completed shell has no process ID. Never
+reconstruct old missing IDs from time, order, output or command text. Identical
+native interaction payloads retain existing deduplication because the provider
+does not supply a distinct per-interaction event ID.
+
 ## Sync upstream and rebuild
 
 Use a dedicated fork checkout. Keep local edits committed or preserved before sync.

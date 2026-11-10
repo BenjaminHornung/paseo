@@ -3072,6 +3072,8 @@ export class Session {
         return this.handleProviderSubagentListRequest(msg);
       case "agent.background_work.list.request":
         return this.handleAgentBackgroundWorkListRequest(msg);
+      case "agent.background_work.refresh.request":
+        return this.handleAgentBackgroundWorkRefreshRequest(msg);
       case "agent.background_work.stop.request":
         return this.handleAgentBackgroundWorkStopRequest(msg);
       case "agent.provider_subagents.timeline.get.request":
@@ -8665,6 +8667,28 @@ export class Session {
         error,
       },
     });
+  }
+
+  private async handleAgentBackgroundWorkRefreshRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.background_work.refresh.request" }>,
+  ): Promise<void> {
+    try {
+      const observation = await this.agentManager.refreshAgentBackgroundWork(msg.agentId);
+      this.emit({
+        type: "agent.background_work.refresh.response",
+        payload: { requestId: msg.requestId, agentId: msg.agentId, observation, error: null },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.background_work.refresh.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: msg.agentId,
+          observation: null,
+          error: error instanceof Error ? error.message : "BACKGROUND_WORK_REFRESH_FAILED",
+        },
+      });
+    }
   }
 
   private async handleAgentBackgroundWorkListRequest(

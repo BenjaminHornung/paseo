@@ -4077,6 +4077,25 @@ export class DaemonClient {
     return payload;
   }
 
+  async refreshAgentBackgroundWork(
+    agentId: string,
+    options: { requestId?: string; timeout?: number } = {},
+  ) {
+    // COMPAT(agentBackgroundWorkRefresh): Advanced 1.15.4, remove gate after 2027-05-10.
+    if (this.lastServerInfoMessage?.features?.agentBackgroundWorkRefresh !== true) {
+      throw new Error("Update the host to obtain a fresh background-work observation.");
+    }
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.background_work.refresh.response">({
+        requestId: options.requestId,
+        timeout: options.timeout ?? 35_000,
+        message: { type: "agent.background_work.refresh.request", agentId },
+      });
+    if (payload.error) throw new Error(payload.error);
+    if (!payload.observation) throw new Error("BACKGROUND_WORK_OBSERVATION_MISSING");
+    return payload.observation;
+  }
+
   async listAgentBackgroundWork(
     agentId: string,
     options: { requestId?: string; timeout?: number } = {},

@@ -111,7 +111,12 @@ import {
   type ProviderSubagentDescriptor,
   type ProviderSubagentStoreEvent,
 } from "./provider-subagents/store.js";
-import { AgentBackgroundWorkStore, type AgentBackgroundWorkItem } from "./background-work/index.js";
+import {
+  AgentBackgroundWorkStore,
+  AgentBackgroundWorkRefreshError,
+  type AgentBackgroundWorkItem,
+} from "./background-work/index.js";
+import type { AgentBackgroundWorkObservation } from "@getpaseo/protocol/messages";
 import { withTimeout } from "../../utils/promise-timeout.js";
 import { buildSessionConfig, extractAttention } from "../persistence-hooks.js";
 
@@ -1417,6 +1422,43 @@ export class AgentManager {
   listAgentBackgroundWork(agentId: string): AgentBackgroundWorkItem[] {
     this.requirePublicAgent(agentId);
     return this.backgroundWork.list(agentId);
+  }
+
+  async refreshAgentBackgroundWork(agentId: string): Promise<AgentBackgroundWorkObservation> {
+    const agent = this.requirePublicAgent(agentId);
+    const session = agent.session;
+    if (!session) {
+      throw new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_SESSION_UNAVAILABLE");
+    }
+    if (!session.refreshBackgroundWork) {
+      throw new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_REFRESH_UNSUPPORTED");
+    }
+    const observation = await session.refreshBackgroundWork();
+    if (
+      this.requirePublicAgent(agentId).session !== session ||
+      session.id !== observation.providerSessionId
+    ) {
+      throw new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_SESSION_CHANGED");
+    }
+    const changed = this.backgroundWork.apply(agentId, observation.items);
+    if (changed) this.dispatch({ type: "background_work", agentId, items: changed });
+    const items = this.backgroundWork.list(agentId);
+    // Native terminal inventory and known provider subagents are distinct evidence.
+    // Drain events received during the awaited read before collecting the latter.
+    await this.refreshRuntimeInfo(agent);
+    await this.drainSessionEvents(agentId);
+    if (
+      this.requirePublicAgent(agentId).session !== session ||
+      session.id !== observation.providerSessionId
+    ) {
+      throw new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_SESSION_CHANGED");
+    }
+    return {
+      ...observation,
+      agentId,
+      items,
+      providerSubagents: this.providerSubagents.list(agentId),
+    };
   }
 
   async stopAgentBackgroundWork({

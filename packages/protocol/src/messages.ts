@@ -2071,6 +2071,12 @@ export const AgentBackgroundWorkListRequestMessageSchema = z.object({
   requestId: z.string(),
 });
 
+export const AgentBackgroundWorkRefreshRequestMessageSchema = z.object({
+  type: z.literal("agent.background_work.refresh.request"),
+  agentId: z.string(),
+  requestId: z.string(),
+});
+
 export const AgentBackgroundWorkStopRequestMessageSchema = z.object({
   type: z.literal("agent.background_work.stop.request"),
   agentId: z.string(),
@@ -3606,6 +3612,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   AgentTimelineListPromptsRequestMessageSchema,
   ProviderSubagentListRequestMessageSchema,
   AgentBackgroundWorkListRequestMessageSchema,
+  AgentBackgroundWorkRefreshRequestMessageSchema,
   AgentBackgroundWorkStopRequestMessageSchema,
   ProviderSubagentTimelineRequestMessageSchema,
   SetAgentTimelineSubscriptionRequestMessageSchema,
@@ -4039,6 +4046,8 @@ export const ServerInfoStatusPayloadSchema = z
         providerSubagents: z.boolean().optional(),
         // COMPAT(agentBackgroundWork): added after v0.11.0-beta.5, remove gate after 2027-04-06.
         agentBackgroundWork: z.boolean().optional(),
+        // COMPAT(agentBackgroundWorkRefresh): added by Advanced 1.15.4, remove gate after 2027-05-10.
+        agentBackgroundWorkRefresh: z.boolean().optional(),
         // COMPAT(agentBackgroundWorkStop): added after v0.15.0, remove after 2027-05-03.
         agentBackgroundWorkStop: z.boolean().optional(),
         // COMPAT(projectedSubagentTimeline): added after v0.8.0, remove gates after 2027-03-14; retain wire field.
@@ -5149,9 +5158,34 @@ export const AgentBackgroundWorkItemSchema = z.object({
   startedAt: z.string(),
   canStop: z.boolean().optional(),
   stopToken: z.string().optional(),
+  providerSessionId: z.string().optional(),
+  processId: z.string().optional(),
 });
 
 export type AgentBackgroundWorkItemPayload = z.infer<typeof AgentBackgroundWorkItemSchema>;
+
+export const AgentBackgroundWorkObservationSchema = z.object({
+  agentId: z.string(),
+  providerSessionId: z.string().min(1),
+  observationId: z.string().min(1),
+  coverage: z.literal("codex_background_terminals"),
+  queriedProviderSessionIds: z.array(z.string()),
+  items: z.array(AgentBackgroundWorkItemSchema),
+  // Separately reported known state; the native terminal query does not enumerate subagents.
+  providerSubagents: z.array(ProviderSubagentDescriptorPayloadSchema),
+});
+
+export type AgentBackgroundWorkObservation = z.infer<typeof AgentBackgroundWorkObservationSchema>;
+
+export const AgentBackgroundWorkRefreshResponseMessageSchema = z.object({
+  type: z.literal("agent.background_work.refresh.response"),
+  payload: z.object({
+    requestId: z.string(),
+    agentId: z.string(),
+    observation: AgentBackgroundWorkObservationSchema.nullable(),
+    error: z.string().nullable(),
+  }),
+});
 
 export const AgentBackgroundWorkListResponseMessageSchema = z.object({
   type: z.literal("agent.background_work.list.response"),
@@ -7465,6 +7499,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ProviderSubagentTimelineResponseMessageSchema,
   ProviderSubagentUpdateMessageSchema,
   AgentBackgroundWorkListResponseMessageSchema,
+  AgentBackgroundWorkRefreshResponseMessageSchema,
   AgentBackgroundWorkStopResponseMessageSchema,
   AgentBackgroundWorkUpdateMessageSchema,
   SetAgentTimelineSubscriptionResponseMessageSchema,

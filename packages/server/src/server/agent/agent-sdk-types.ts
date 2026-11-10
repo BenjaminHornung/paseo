@@ -10,6 +10,7 @@ import type {
 } from "@getpaseo/protocol/agent-types";
 import type { AgentMessage } from "@getpaseo/protocol/agent-message";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
+import type { AgentBackgroundWorkObservationInput } from "./background-work/index.js";
 import type { PaseoToolCatalog } from "./tools/types.js";
 
 export type {
@@ -728,6 +729,8 @@ export interface AgentSession {
   interrupt(): Promise<void>;
   /** Stop one currently owned background item and wait for provider confirmation. */
   stopBackgroundWork?(id: string): Promise<void>;
+  /** Query the native provider after this request; cached snapshots cannot satisfy this boundary. */
+  refreshBackgroundWork?(): Promise<AgentBackgroundWorkObservationInput>;
   /** True only when releasing this runtime loses no background work or pending replies.
    * An optional additional veto: missing methods use daemon baseline eligibility;
    * implemented checks that reject or return false keep the runtime resident. */
