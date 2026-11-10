@@ -1,5 +1,6 @@
 import {
   useAgent,
+  type PluginClientContext,
   useWorkspace,
   useRpc,
   type PluginAgentPanelProps,
@@ -16,7 +17,7 @@ import {
   SettingsSwitch,
   SettingsInput,
 } from "@getpaseo/plugin/client/ui";
-import { useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Pressable, Text, View } from "react-native";
 import {
@@ -697,20 +698,43 @@ function StatusBody(
     </View>
   );
 }
-export function AgentStatus(props: PluginAgentPanelProps) {
+const agentPanelStyle = { flex: 1 };
+export function AgentStatus(
+  props: PluginAgentPanelProps & { openPreparation?: PluginClientContext["openScreen"] },
+) {
+  const { workspaceId, openPreparation } = props;
+  const agentId = props.params.agentId;
+  const projectId = useWorkspace(props.workspaceId, (workspace) => workspace.projectId);
   const agent = useAgent(props.params.agentId, (value) => ({
     cwd: value.cwd,
     provider: value.provider,
+    prepared: !!value.labels.orchestratorPreparation,
   }));
-  return agent ? (
-    <StatusBody
-      {...props}
-      directory={agent.cwd}
-      agentId={props.params.agentId}
-      controls={agent.provider.split("/")[0] === "codex"}
-    />
-  ) : (
-    <Loading />
+  const prepareMain = useCallback(() => {
+    if (projectId)
+      openPreparation?.({
+        screenId: "orchestrator-prepare",
+        params: { projectId, workspaceId, agentId },
+      });
+  }, [projectId, openPreparation, workspaceId, agentId]);
+  if (!agent) return <Loading />;
+  return (
+    <View style={agentPanelStyle}>
+      {!agent.prepared && props.openPreparation && (
+        <SettingsAction
+          label="Den normalen Composer mit dieser Hauptsession verbinden"
+          actionLabel="Hauptchat vorbereiten"
+          onPress={prepareMain}
+          disabled={!projectId}
+        />
+      )}
+      <StatusBody
+        {...props}
+        directory={agent.cwd}
+        agentId={props.params.agentId}
+        controls={agent.provider.split("/")[0] === "codex"}
+      />
+    </View>
   );
 }
 export function WorkspaceStatus(props: PluginWorkspacePanelProps) {

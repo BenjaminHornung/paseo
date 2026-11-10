@@ -62,7 +62,9 @@ Use `send()` for fire-and-forget delivery. Use `run()` when the caller needs the
 
 ## Find agents by label
 
-Set `labels` at creation, then filter on them. The daemon does the matching:
+Set `labels` at creation or merge them later with `await agent.setLabels({ source: "review" })`.
+Updating labels preserves the provider session and history. Refresh the handle to read the
+stored labels. The daemon matches label filters:
 
 ```ts
 const page = await client.agents.list({

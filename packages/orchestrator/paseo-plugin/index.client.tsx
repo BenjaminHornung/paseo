@@ -89,6 +89,19 @@ export default function contribute(client: PluginClientContext) {
       Component: PrepareSidebar,
     }),
     client.addCommandCenterItem({
+      id: "prepare-existing-orchestrator",
+      title: "Diesen Hauptchat für den Composer vorbereiten",
+      icon: "Workflow",
+      keywords: ["bestehend", "composer", "vorbereiten", "auto-routing"],
+      context: "agent",
+      onSelect({ agent, workspace, openScreen }) {
+        openScreen({
+          screenId: "orchestrator-prepare",
+          params: { projectId: workspace.projectId, workspaceId: workspace.id, agentId: agent.id },
+        });
+      },
+    }),
+    client.addCommandCenterItem({
       id: "prepare-orchestrator-here",
       title: "Orchestrator-Session in diesem Workspace",
       icon: "Plus",
@@ -123,7 +136,7 @@ export default function contribute(client: PluginClientContext) {
       title: "Orchestrator",
       icon: "Workflow",
       locations: ["workspace", "explorer"],
-      Component: AgentStatus,
+      Component: (props) => <AgentStatus {...props} openPreparation={client.openScreen} />,
     }),
     client.addTimelineRenderer({
       kind: "orchestrator-status",

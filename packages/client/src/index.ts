@@ -456,6 +456,8 @@ export interface PaseoAgentHandle {
   setOptions(patch: Record<string, unknown>): Promise<void>;
   /** Top-level keys replace; `null` removes the key. Needs a host with `entityMetadata`. */
   setMetadata(patch: Record<string, JsonValue>): Promise<void>;
+  /** Merges labels using the existing agent update operation; does not reopen the session. */
+  setLabels(patch: Record<string, string>): Promise<void>;
   /** Sends a prompt and resolves when that turn finishes or needs attention. */
   run(text: string, options?: PaseoAgentRunOptions): Promise<PaseoAgentRunResult>;
   /** Waits for the current turn, including one started with `prompt`. */
@@ -1165,6 +1167,9 @@ function createAgentHandleFactory(
       setMetadata: async (patch) => {
         const metadata = await daemonClient.setAgentMetadata(id, patch);
         if (current) current = { ...current, metadata };
+      },
+      setLabels: async (patch) => {
+        await daemonClient.updateAgent(id, { labels: patch });
       },
       respondToPermission: async ({ requestId, response }) => {
         await daemonClient.respondToPermission(id, requestId, response);

@@ -80,13 +80,47 @@ in the calling process. This does not change the user's global environment.
 
 For an existing Advanced `bfa2fe1a2` installation, the successful run also provides
 `paseo-advanced-plugin-repair-<commit>`. Check its `pluginFileSha256` values against
-the three files in `paseo-plugin/` and confirm its controller `compiledInputSha256`
-matches the installed `resources/orchestrator/dist/build-info.json`. Copy only those
+the three files in `paseo-plugin/` and confirm `pluginCompatibleControllerInputSha256`
+includes the installed `resources/orchestrator/dist/build-info.json`'s
+`compiledInputSha256`. The build's own controller hash can differ because its SDK
+also includes the additive agent label action; the plugin bundles that SDK and
+uses the existing daemon update operation. Copy only those
 three files into `resources/orchestrator/paseo-plugin/`, preserving the existing
 data/configuration, then run the Advanced CLI with its explicit home:
 `plugin reload paseo-orchestrator`, followed by `plugin ls --json` and require `running`.
 This repairs the bundled plugin without replacing the renderer or restarting the
 daemon. The full installer/ZIP includes the same fix for new installations.
+
+### Prepare an existing main for the normal composer
+
+From that chat, choose **Diesen Hauptchat für den Composer vorbereiten** in the
+Command Center, or **Hauptchat vorbereiten** in its Orchestrator panel. The existing
+project, workspace, model, reasoning and mode are fixed; select the data scope and
+whether to prepare Auto-Routing. The form waits for an idle chat with no active turn
+or pending permissions. The public `orchestrator.prepare-session` RPC accepts the
+same fields as new-session preparation plus `agentId` and the existing `workspaceId`.
+It rejects a busy or ineligible target without changing it.
+
+Preparation keeps the agent/native session, cwd, workspace, title and history. It
+requires a successful fresh, session-bound native background query with no known
+terminal or provider-subagent work before marking the session. Reusing the same
+request preserves the target and data scope; a changed request binding fails closed.
+Requested Auto-Routing uses the normal existing-main activation: an idle recheck,
+the supported orchestration-instruction prompt and an accepted send before `ready`.
+Model, mode and sandbox settings remain unchanged; an existing main does not gain
+the read-only launch configuration used when creating a new main. Its bootstrap
+states that distinction and the no-implementation/stop rules. Unknown sends remain
+`uncertain` and are never replayed by preparation retries. There is no reload,
+completion attestation or synthetic human receipt. Only later real composer input records its own message ID through the existing
+human-origin path. Auto-Routing activation retains existing off/uncertain outcomes
+on retries. Preparation alone does not prove worker completion or V3 acceptance.
+
+The bundled SDK connection for this repair requires the configured passwordless
+loopback daemon. It reads no authentication secret; password-protected deployments
+fail before mutation and require a separately supported authenticated connection.
+If marking succeeds but activation then loses an idle race, the preparation label
+remains. Use the existing Auto-Routing switch once the main is idle to recover;
+an uncertain activation needs explicit reconciliation, not automatic resending.
 
 Git and PowerShell 7 must already be available on PATH. The package resolves their
 actual installed paths and runs the controller using its own Electron Node runtime

@@ -1984,6 +1984,34 @@ function answerBackgroundWorkList(ws: FakeWebSocket, items: unknown[]): void {
   );
 }
 
+test("agent labels update the same agent without reopening or creating a session", async () => {
+  const { client, ws } = await connectClient();
+  try {
+    const pending = client.agents.ref("existing-main").setLabels({ prepared: "request-id" });
+    const request = parseSentSessionMessage(ws.sent.at(-1));
+    expect(request).toEqual({
+      type: "update_agent_request",
+      requestId: expect.any(String),
+      agentId: "existing-main",
+      labels: { prepared: "request-id" },
+    });
+    ws.message(
+      sessionMessage({
+        type: "update_agent_response",
+        payload: {
+          requestId: request.requestId,
+          agentId: "existing-main",
+          accepted: true,
+          error: null,
+        },
+      }),
+    );
+    await pending;
+  } finally {
+    await client.close();
+  }
+});
+
 test("agent handles list background work", async () => {
   const { client, ws } = await connectClient(BACKGROUND_WORK_FEATURES);
 

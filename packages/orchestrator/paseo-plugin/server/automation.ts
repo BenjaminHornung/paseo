@@ -31,7 +31,7 @@ Wenn der bestehende Codex-Worker bei NEEDS_CONFIRMATION unvollständige Umsetzun
 Prüfe dabei completionReason im Status. process-coverage-unavailable bedeutet: Der Worker-Turn ist beendet, dem verbundenen Runtime fehlt ein bestätigter Prozessnachweis. Das ist keine fehlende Implementierung. Keine Fortsetzung zur Beschaffung dieses Nachweises starten. Bei CONTINUATION_NOT_NEEDED_AWAITING_PROCESS_PROOF den kompatiblen Runtime beziehungsweise den ausdrücklich vorgesehenen Operatorpfad verwenden; keine Wiederholung, keine neue Registrierung und kein automatisches Attest. Ein offenes Testdatenbank-, Browser- oder Sichtprüfungsziel ist ebenfalls eine konkrete Voraussetzung, keine pauschale Nachbesserung des Workers.
 Gibt es dagegen konkrete noch fehlende oder fehlerhafte Codeänderungen innerhalb des ursprünglichen Auftrags, lies mit orchestrator_inspect_task den aktuellen diffHash und übergebe orchestrator_continue_task ein repair-Objekt mit diesem diffHash und mindestens einem konkreten Finding (severity,file,line,problem,requiredChange). Keine Findings für fehlende Umgebung oder zur Umgehung eines Gates erfinden. Scope-, Freigabe-, Zwei-Fortsetzungen- und Prozessregeln bleiben erhalten.
 Verwende die eingebundenen orchestrator_status/research/worktree/register_task-Werkzeuge unter den normalen MCP-Freigaben.
-Die neue Hauptsession ist read-only. Keine Vertragsdateien schreiben; Aufgabenvertrag direkt im registrierenden Werkzeug übergeben.
+Als Hauptagent schreibst du keinen Implementierungscode und keine Vertragsdateien; Aufgabenvertrag direkt im registrierenden Werkzeug übergeben.
 Plane vor dem Registrieren. Leite Aufgabenverträge selbst aus dem Arbeitsauftrag ab; der Benutzer schreibt kein JSON.
 Planungsstandard: Zerlege Arbeit grundsätzlich in kleine eigenständig umsetzbare und prüfbare Pakete, wenn Ziele, Dateien und Abnahmen trennbar sind. Klassifiziere jedes Paket separat; einfache Teilaufgaben folgen der gespeicherten einfachen Rollenpriorität. Normale/komplexe Klassen bleiben für tatsächlich schwierige Änderungen. Setze highRisk nicht pauschal für das Gesamtvorhaben, sondern anhand belegter Risiken je Paket. Gemeinsame Verträge/Tokens zuerst festlegen und Abhängigkeiten angeben. Bei shouldSplit=true verlangt der Controller weitere Planung statt den Monolithen zu starten. Parallele Writer sind im selben Workspace und Worktree bei unabhängigen Paketen mit disjunkten allowedPaths zulässig; der Benutzer hat die pauschale Ein-Writer-Regel für diesen Controller ersetzt. Weise gemeinsame Dateien genau einem Paket zu, sonst Abhängigkeiten und Reihenfolge. Behalte ausdrücklich engere Paketgrenzen, etwa maximal zwei Writer, bei.
 Komplexität: Reproduzierbarer Build, Abhängigkeitsprüfung, isolierter Start und ZIP sind normalerweise ein normales Paket. Produktivziel, Geheimnisschutzregeln und viele Abnahmekriterien machen es nicht komplex. Bestehende UI-Muster ergeben meist einfache oder normale Teilpakete. Komplex nur bei tatsächlich schwieriger neuer Architektur/Algorithmik oder einer benannten Änderung von Persistenz-, Recovery-, Parallelitäts-, Autorisierungs- oder laufzeitübergreifenden Vertragsinvarianten. Fehlende Fakten verlangen Recherche statt pauschaler Hochstufung. highRisk nur mit konkreter Begründung in unknowns/interfaces setzen, nicht vorsorglich für jedes Paket. Wähle niemals eine Modellroute über die Aufgabenklasse aus.
@@ -71,6 +71,7 @@ export class AutomationRuntime {
   private disposed = false;
   private fingerprints = new Map<string, string>();
   private timelineAvailable = true;
+  private preparations = new Map<string, Promise<WorkflowStatus>>();
   constructor() {
     this.timer = setInterval(() => {
       void this.pulse();
@@ -141,7 +142,40 @@ export class AutomationRuntime {
     await this.publish(agentId, snapshot.cwd);
     return this.status(snapshot.cwd, agentId);
   }
-  async toggle(agentId: string, enabled: boolean, paseo: PaseoApi): Promise<WorkflowStatus> {
+  async prepareExisting(
+    agentId: string,
+    requestId: string,
+    paseo: PaseoApi,
+    retry: boolean,
+  ): Promise<WorkflowStatus> {
+    this.use(paseo);
+    const key = `${agentId}:${requestId}`;
+    const pending = this.preparations.get(key);
+    if (pending) return pending;
+    const activation = (async () => {
+      const { mains } = (await controller({ operation: "auto-list" })) as { mains: Main[] };
+      const existing = mains.find((main) => main.agentId === agentId);
+      if (existing && (existing.state === "arming" || existing.state === "uncertain"))
+        throw Error("AUTOMATION_ACTIVATION_UNCERTAIN");
+      // A repeated preparation never replays an accepted/unknown bootstrap or
+      // re-enables a main deliberately disabled through the normal switch.
+      if (existing && (retry || existing.requestId === requestId))
+        return this.status(existing.directory, agentId);
+      return this.toggle(agentId, true, paseo, requestId);
+    })();
+    this.preparations.set(key, activation);
+    try {
+      return await activation;
+    } finally {
+      this.preparations.delete(key);
+    }
+  }
+  async toggle(
+    agentId: string,
+    enabled: boolean,
+    paseo: PaseoApi,
+    activationRequestId?: string,
+  ): Promise<WorkflowStatus> {
     this.use(paseo);
     const h = paseo.agents.ref(agentId),
       snapshot = (await h.refresh())?.agent;
@@ -166,7 +200,7 @@ export class AutomationRuntime {
     }
     if (snapshot.status !== "idle" || snapshot.activeTurn || snapshot.pendingPermissions.length)
       throw Error("AUTOMATION_MAIN_MUST_BE_IDLE");
-    const requestId = randomUUID();
+    const requestId = activationRequestId || randomUUID();
     await controller({
       operation: "auto-state",
       agentId,
@@ -187,7 +221,7 @@ export class AutomationRuntime {
       )
         throw Error("AUTOMATION_MAIN_MUST_BE_IDLE");
       promptStarted = true;
-      const instructions = `Auto-Routing wurde vom Benutzer für diese Hauptsession eingeschaltet.\nPrüfe den bestehenden Controller-Status. Setze bereits zugeordnete und weiterhin freigegebene Aufträge fort. Wenn keine gültige Arbeitsfreigabe besteht, warte auf einen neuen Auftrag über den Plugin-Eingang; keine eigene Freigabe ableiten.\n${orchestrationInstructions(agentId)}`;
+      const instructions = `Auto-Routing wurde vom Benutzer für diese Hauptsession eingeschaltet.\nDeine vorhandenen Modell-, Berechtigungs- und Sandbox-Einstellungen bleiben unverändert. Die Orchestrator-Rolle ist kein nachträglicher technischer Sandbox-Wechsel: keine eigene Implementierung und keine Ersatzwriter.\nPrüfe den bestehenden Controller-Status. Setze bereits zugeordnete und weiterhin freigegebene Aufträge fort. Wenn keine gültige Arbeitsfreigabe besteht, warte auf einen neuen Auftrag über den Plugin-Eingang; keine eigene Freigabe ableiten.\n${orchestrationInstructions(agentId)}`;
       await h.send(instructions, { messageId: requestId, activeTurnBehavior: "steer" });
       await controller({
         operation: "auto-state",

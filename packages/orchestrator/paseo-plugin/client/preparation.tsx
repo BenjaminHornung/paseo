@@ -1,3 +1,4 @@
+import { ExistingPreparationForm } from "./existing-preparation";
 import { usePaseo, useRpc, type PluginScreenProps } from "@getpaseo/plugin/client";
 import {
   Loading,
@@ -15,6 +16,9 @@ import { Text, View } from "react-native";
 import { prepareSession, type PreparationInput } from "../shared/preparation";
 
 export function PrepareSession(props: PluginScreenProps) {
+  if (props.params.agentId) {
+    return <ExistingPreparationForm key={`${props.host.id}:${props.params.agentId}`} {...props} />;
+  }
   return (
     <PreparationForm
       key={`${props.host.id}:${props.params.projectId ?? ""}:${props.params.workspaceId ?? ""}`}

@@ -94,6 +94,7 @@ for (const input of inputs) {
   hash.update(input);
   hash.update(await readFile(path.resolve(root, input)));
 }
+const compiledInputSha256 = hash.digest("hex");
 await mkdir(path.join(root, "dist"), { recursive: true });
 await writeFile(
   path.join(root, "dist/package.json"),
@@ -104,7 +105,15 @@ await writeFile(
   JSON.stringify(
     {
       candidateRevision: "80c9ef3a278d8be4fea59ce9b79cc9ab37a71075df0ce60f59b9aad350da9390",
-      compiledInputSha256: hash.digest("hex"),
+      compiledInputSha256,
+      // The plugin bundles its additive SDK label action; the existing daemon
+      // already implements that wire operation. No controller source/schema or
+      // renderer change is needed when repairing these reviewed base builds.
+      pluginCompatibleControllerInputSha256: [
+        compiledInputSha256,
+        "176685ed8dce0112d082940dc24dcf839ab0ab190d34134a1673cdba8d8fbd7b",
+      ],
+      pluginPreparationConnection: { requiresPasswordlessLoopback: true, credentialLookup: false },
       pluginCompiledInputSha256: pluginHash.digest("hex"),
       pluginFileSha256,
       sdk: `${sdkPackage.name}@${sdkPackage.version}`,

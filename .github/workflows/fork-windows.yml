@@ -90,7 +90,7 @@ jobs:
 
       - name: Verify negotiated public SDK background-work contract
         working-directory: packages/client
-        run: node ../../node_modules/vitest/vitest.mjs run src/index.test.ts -t "background work" --bail=1
+        run: node ../../node_modules/vitest/vitest.mjs run src/index.test.ts -t "background work|agent labels update" --bail=1
 
       - name: Record artifact checksums and build provenance
         shell: pwsh

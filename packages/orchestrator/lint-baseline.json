@@ -1240,13 +1240,6 @@
       "count": 1
     },
     {
-      "file": "packages/orchestrator/paseo-plugin/server/preparation.ts",
-      "rule": "eslint(complexity)",
-      "message": "async function `prepareOrchestratorSession` has a complexity of 42. Maximum allowed is 20.",
-      "sourceSha256": "e578d4a7965dc98e1e1deb17325b238f8b4fd6f1b7dfd6970169745d0dd58815",
-      "count": 1
-    },
-    {
       "file": "packages/orchestrator/paseo-plugin/shared/routes.ts",
       "rule": "eslint(complexity)",
       "message": "function `createProfileRoute` has a complexity of 31. Maximum allowed is 20.",

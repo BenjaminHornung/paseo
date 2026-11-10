@@ -1,4 +1,5 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { createPaseoClient } from "@getpaseo/client";
 import { controller } from "./server/controller";
 import {
   loadSettings,
@@ -124,9 +125,27 @@ export default function contribute(server: PluginServerContext) {
     await controller({ operation: "auto-abandon-input", ...input, directory: agent.cwd });
     return { abandoned: true };
   });
-  server.handle(prepareSession, async (input, { paseo }) =>
-    prepareOrchestratorSession(input, paseo, automation),
-  );
+  server.handle(prepareSession, async (input, { paseo }) => {
+    if (!input.agentId) return prepareOrchestratorSession(input, paseo, automation);
+    const { config } = (await controller({ operation: "get" })) as {
+      config: { daemonUrl: string };
+    };
+    // Use this plugin's bundled SDK for the additive label action even on an
+    // installed host whose injected API predates it. The wire operation already
+    // exists on that daemon. Keep long-lived automation on the plugin-owned API.
+    const client = createPaseoClient({ url: config.daemonUrl, reconnect: { enabled: false } });
+    try {
+      await client.connect();
+      return await prepareOrchestratorSession(input, client, {
+        prepare: (agentId, requestId) => automation.prepare(agentId, requestId, paseo),
+        prepareExisting: (agentId, requestId, _client, retry) =>
+          automation.prepareExisting(agentId, requestId, paseo, retry),
+        status: (directory, agentId) => automation.status(directory, agentId),
+      });
+    } finally {
+      await client.close();
+    }
+  });
   server.on("agent.turn_ended", async ({ agent, turnId }, { paseo }) => {
     await automation.afterTurn(agent, turnId, paseo);
   });
