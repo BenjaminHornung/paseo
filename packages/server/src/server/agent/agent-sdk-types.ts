@@ -127,6 +127,7 @@ export function filterSelectableAgentModels(
 
 export interface ProviderSnapshotEntry {
   provider: AgentProvider;
+  capabilities?: AgentCapabilityFlags;
   status: ProviderStatus;
   enabled: boolean;
   source?: "builtin" | "custom";

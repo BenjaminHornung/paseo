@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "orchestrationVersion": 3,
+  "daemonUrl": "ws://127.0.0.1:6777/ws",
+  "gitExecutable": "C:\\Program Files\\Git\\cmd\\git.exe",
+  "maxWorkflows": 2,
+  "maxRework": 2,
+  "apiEnabled": false,
+  "liveDispatchApproved": false,
+  "roleRoutes": {
+    "planner": ["codex-sol", "codex-astra"],
+    "advisor": ["codex-sol", "codex-astra"],
+    "implement-simple": ["deepseek-go", "codex-terra", "codex-sol"],
+    "implement-normal": ["codex-terra", "codex-sol"],
+    "implement-complex": ["codex-sol", "codex-astra"],
+    "reviewer": ["claude-company-review", "codex-astra", "codex-sol"]
+  },
+  "budgets": { "decisions": 0, "implementation": 0, "premium-api": 0, "emergency": 0 },
+  "decisions": {
+    "enabled": false,
+    "model": "gpt-6-luna",
+    "roles": [],
+    "dataScopes": ["public", "personal"],
+    "minConfidence": 0.8,
+    "timeoutMs": 10000,
+    "monthlyBudgetMicroUsd": 0,
+    "maxCallMicroUsd": 1000,
+    "fundsConfirmed": false,
+    "validUntil": "",
+    "projectId": ""
+  },
+  "routes": [
+    {
+      "id": "claude-company-review",
+      "access": "claude-company-pro",
+      "provider": "claude",
+      "model": "claude-opus-5-5",
+      "revision": "discovery-required",
+      "reasoning": "",
+      "tier": 3,
+      "modeId": "plan",
+      "enabled": false,
+      "maxConcurrent": 1,
+      "dataScopes": ["company"],
+      "capabilities": ["code", "text"]
+    },
+    {
+      "id": "codex-terra",
+      "access": "codex-pro200",
+      "provider": "codex",
+      "model": "gpt-6.1-terra",
+      "revision": "discovery-required",
+      "reasoning": "medium",
+      "tier": 2,
+      "modeId": "auto-review",
+      "enabled": true,
+      "maxConcurrent": 2,
+      "dataScopes": ["public", "personal"],
+      "capabilities": ["code", "text"]
+    },
+    {
+      "id": "codex-sol",
+      "access": "codex-pro200",
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "revision": "discovery-required",
+      "reasoning": "high",
+      "tier": 3,
+      "modeId": "auto-review",
+      "enabled": true,
+      "maxConcurrent": 2,
+      "dataScopes": ["public", "personal"],
+      "capabilities": ["code", "text"]
+    },
+    {
+      "id": "codex-astra",
+      "access": "codex-pro200",
+      "provider": "codex",
+      "model": "gpt-6-astra",
+      "revision": "discovery-required",
+      "reasoning": "xhigh",
+      "tier": 3,
+      "modeId": "auto-review",
+      "enabled": true,
+      "maxConcurrent": 2,
+      "dataScopes": ["public", "personal"],
+      "capabilities": ["code", "text"]
+    },
+    {
+      "id": "deepseek-go",
+      "access": "opencode-go",
+      "provider": "pi",
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "revision": "discovery-required",
+      "reasoning": "max",
+      "tier": 1,
+      "enabled": false,
+      "maxConcurrent": 1,
+      "dataScopes": ["public"],
+      "capabilities": ["code", "text"]
+    }
+  ]
+}

@@ -34,7 +34,7 @@ function createTempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-async function assertBuiltinPluginsStarted(listen) {
+async function assertBuiltinPluginsStarted(listen, daemonHome) {
   const { DaemonClient } = await import("@getpaseo/client/internal/daemon-client");
   const { builtinPlugins } =
     await import("../../server/dist/server/server/plugins/builtin/index.js");
@@ -49,9 +49,27 @@ async function assertBuiltinPluginsStarted(listen) {
     const catalog = await client.getPluginCatalog();
     assert.deepEqual(
       catalog.map(({ id }) => id).sort(),
-      [...builtinPlugins].sort(),
+      [
+        ...builtinPlugins,
+        ...(EXECUTABLE_NAME === "PaseoAdvanced" ? ["paseo-orchestrator"] : []),
+      ].sort(),
       "Every built-in plugin must start in the packaged desktop daemon",
     );
+    if (EXECUTABLE_NAME === "PaseoAdvanced") {
+      const settings = await client.invokePluginRpc(
+        "paseo-orchestrator",
+        "orchestrator.settings.get",
+        {},
+      );
+      assert.equal(
+        path.resolve(settings.controllerRoot).toLowerCase(),
+        path.resolve(daemonHome, "orchestrator").toLowerCase(),
+        "Packaged controller RPC must bind to Advanced-owned data",
+      );
+      assert.equal(settings.config.daemonUrl, `ws://${listen}/ws`);
+      assert.equal(settings.config.apiEnabled, false);
+      assert.equal(settings.credentials.decisions.present, false);
+    }
   } finally {
     await client.close();
   }
@@ -648,6 +666,12 @@ async function smokeColdCliDaemonStart({ appPath }) {
   const listen = `127.0.0.1:${port}`;
   const env = createDefaultDaemonEnv({ HOME: home, USERPROFILE: home });
   configureIsolatedDaemonHome(home, listen);
+  if (EXECUTABLE_NAME === "PaseoAdvanced") {
+    const config = JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8"));
+    delete config.daemon.listen;
+    fs.writeFileSync(path.join(home, "config.json"), JSON.stringify(config));
+    env.PORT = String(port);
+  }
 
   try {
     console.log("Packaged desktop smoke: cold-starting daemon through bundled CLI shim");
@@ -662,6 +686,7 @@ async function smokeColdCliDaemonStart({ appPath }) {
     if (!pidInfo || typeof pidInfo.pid !== "number") {
       throw new Error(`Cold CLI daemon wrote invalid pid file: ${JSON.stringify(pidInfo)}`);
     }
+    if (EXECUTABLE_NAME === "PaseoAdvanced") await assertBuiltinPluginsStarted(listen, home);
 
     if (process.platform === "darwin") {
       assertDarwinProcessDoesNotUseMainAppExecutable({
@@ -1003,10 +1028,15 @@ async function smokePackagedDesktopApp({
         status.pid,
         "Own 1.x version must not restart the bundled daemon",
       );
+      // A fresh home opens upstream's first-run setup and redirects its route.
+      // Complete that public UI decision before checking the visible About page.
+      const skipSetup = page.getByRole("button", { name: "Skip setup", exact: true });
+      await skipSetup.click({ timeout: 15_000 });
+      await skipSetup.waitFor({ state: "hidden", timeout: 15_000 });
       await page.goto("paseo://app/settings/about");
       await page.getByText(`v${metadata.version}`, { exact: true }).waitFor({ timeout: 15_000 });
     }
-    await assertBuiltinPluginsStarted(listen);
+    await assertBuiltinPluginsStarted(listen, daemonHome);
     console.log("Packaged desktop smoke: every built-in plugin started");
     await smokeCliShim({ appPath, env });
     await smokeCliTerminal({ appPath, env });

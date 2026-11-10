@@ -29,7 +29,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
 
       - name: Install locked dependencies
@@ -45,6 +45,15 @@ jobs:
 
       - name: Build app dependencies
         run: npm run build:app-deps
+
+      - name: Build controller with this fork SDK
+        run: npm run build --workspace=@paseo-advanced/orchestrator
+
+      - name: Verify controller and plugin contracts
+        run: |
+          npm run typecheck --workspace=@paseo-advanced/orchestrator
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test --workspace=@paseo-advanced/orchestrator
 
       - name: Verify composer receipts and native attachments
         run: npm run test --workspace=@getpaseo/app -- src/composer/actions.test.ts --bail=1

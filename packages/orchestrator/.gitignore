@@ -1,0 +1,7 @@
+config/local.controller.json
+config/*.bak
+state/
+.provider-placement-*/
+.review-context-test-*/
+.rework-checkpoint-test-*/
+.intake-test-*/

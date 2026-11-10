@@ -39,7 +39,8 @@ and daemon ownership are separate by default. Other platform packaging keeps the
 upstream identity; this renamed distribution currently targets Windows only.
 
 The desktop version maps upstream `0.MINOR.PATCH` to `1.MINOR.PATCH`, initially
-`1.15.4`, and is shown in the app's About settings. Package metadata records the
+`1.16.0-beta.1`, and is shown in the app's About settings. Prerelease suffixes are
+preserved. Package metadata records the
 exact upstream version separately; server/client/plugin source packages keep their
 upstream versions. Daemon restart decisions compare the bundled upstream version,
 so the branding change cannot trigger a version-mismatch restart loop. The config
@@ -58,8 +59,21 @@ An installer or composer receipt alone is not proof of autonomous orchestration.
 The compatible controller/plugin must use the new daemon's actual public background-work
 and native terminal-session metadata, with a capability preflight before starting writers.
 An older standalone daemon or older controller SDK cannot acquire these capabilities
-merely by connecting a newer renderer. The controller/plugin is delivered separately;
-no controller state or credentials belong in these public build artifacts.
+merely by connecting a newer renderer. This package bundles the controller/plugin
+and the compiled fork SDK. Its code lives in `resources/orchestrator`; its configuration,
+state, watch lease and credential storage live under `~/.paseo-advanced/orchestrator`.
+The Advanced daemon registers that bundled plugin on first start. No original controller
+configuration, state, funding or credentials are copied into these public build artifacts.
+The initial configuration uses orchestration V3 with API access and dispatch disabled,
+zero budgets and unverified routes. Complete the settings in the new Advanced profile
+before enabling real routing; the package never grants a new API allowance.
+
+Git and PowerShell 7 must already be available on PATH. The package resolves their
+actual installed paths and runs the controller using its own Electron Node runtime
+(Node >=24 with `node:sqlite`). Pi remains optional. Its Advanced-specific launcher
+uses this distribution's roots, profile and job supervisor. Explicit installed Pi
+coding-agent package/base-launcher paths are required; the guard and tool extension are
+compiled into the Advanced bundle. No development-controller path is assumed.
 
 The integrated acceptance gate is one isolated real prepared-composer task through
 routing, worker changes, process settlement, configured checks, independent review,
@@ -161,9 +175,10 @@ structured attachments, steering, send retry and titles retain upstream behavior
 Blank text and text over 12,000 characters bypass the bounded classifier and send
 natively; they do not grant controller work through a recorded receipt.
 The RPC uses the existing trusted-local-client boundary, not cryptographic proof
-of human authorship. The running controller/plugin is managed separately.
+of human authorship. Only this distribution's bundled controller/plugin is registered;
+the original app and its controller are unchanged.
 
-Upstream 0.15.4 exposes `agent.turn.before` after the provider turn starts; it is
+Upstream 0.16.0-beta.1 exposes `agent.turn.before` after the provider turn starts; it is
 non-waiting and lacks text, message ID and submitting-client identity. Its composer
 API edits/focuses drafts but provides no submit callback. Neither can replace this
 pre-send receipt. Public `PaseoAgent.backgroundWork` supports `list`, `subscribe`
@@ -173,13 +188,15 @@ a valid stop token. It does not authenticate input or persist work inventory.
 ## Integration and verification
 
 Initial fork main: `1a1ff8828f002fce08e239bae3d46aff75e22f52`.
-Integrated upstream main: `63ea3e55618ab0849cf0a45d5fee02f509b58c73`.
-This is upstream `main`, not the v0.15.4 release tag; its package metadata still
-reads 0.15.4. The final refresh added #9275 after the initial main snapshot #9207.
-The fork had no unique commits and was fast-forwarded on the feature branch.
+Integrated upstream main: `e7432cb2a5968ecec5dbc3a9d66a218fbbdc306b`.
+This includes the 0.16.0-beta.1 release reconciliation and the following lockfile fix.
+The initial sync used main through `63ea3e55618ab0849cf0a45d5fee02f509b58c73`, already
+containing the beta's background-task and plugin features. The final refresh adds
+release metadata, changelog presentation and tests. The original fork main had no unique
+commits; subsequent fork implementation commits are preserved on the feature branch.
 The installed desktop archive was read-only verified as 0.15.2 and was not changed;
 the running daemon was not restarted or replaced. Fork client/plugin SDKs and
-bundled server are 0.15.4.
+bundled server are 0.16.0-beta.1.
 
 The focused composer regression file failed without the fix (four behavioral
 failures) and passed with it. An additional inclusive-maximum regression catches

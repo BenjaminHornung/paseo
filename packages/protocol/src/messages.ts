@@ -412,9 +412,29 @@ const AgentModelDefinitionSchema = z.object({
   defaultThinkingOptionId: z.string().optional(),
 }) satisfies z.ZodType<AgentModelDefinition>;
 
+const AgentCapabilityFlagsSchema: z.ZodType<AgentCapabilityFlags> = z
+  .object({
+    supportsStreaming: z.boolean(),
+    supportsSessionPersistence: z.boolean(),
+    supportsSessionListing: z.boolean().optional(),
+    supportsDynamicModes: z.boolean(),
+    supportsMcpServers: z.boolean(),
+    supportsReasoningStream: z.boolean(),
+    supportsToolInvocations: z.boolean(),
+    supportsBackgroundWorkRefresh: z.boolean().optional(),
+    // COMPAT(rewind): added in v0.1.X, drop when floor >= v0.1.X.
+    supportsRewindConversation: z.boolean().optional().default(false),
+    // COMPAT(rewind): added in v0.1.X, drop when floor >= v0.1.X.
+    supportsRewindFiles: z.boolean().optional().default(false),
+    // COMPAT(rewind): added in v0.1.X, drop when floor >= v0.1.X.
+    supportsRewindBoth: z.boolean().optional().default(false),
+  })
+  .catchall(z.boolean());
+
 export const ProviderSnapshotEntrySchema = z.object({
   provider: AgentProviderSchema,
   status: ProviderStatusSchema,
+  capabilities: AgentCapabilityFlagsSchema.optional(),
   enabled: z.boolean().optional().default(true),
   source: z.enum(["builtin", "custom"]).optional(),
   error: z.string().optional(),
@@ -449,24 +469,6 @@ export const CompactProviderSnapshotSchema = z.object({
   entries: z.array(CompactProviderSnapshotEntrySchema),
   thinkingSets: z.array(ProviderSnapshotThinkingSetSchema),
 });
-
-const AgentCapabilityFlagsSchema: z.ZodType<AgentCapabilityFlags> = z
-  .object({
-    supportsStreaming: z.boolean(),
-    supportsSessionPersistence: z.boolean(),
-    supportsSessionListing: z.boolean().optional(),
-    supportsDynamicModes: z.boolean(),
-    supportsMcpServers: z.boolean(),
-    supportsReasoningStream: z.boolean(),
-    supportsToolInvocations: z.boolean(),
-    // COMPAT(rewind): added in v0.1.X, drop when floor >= v0.1.X.
-    supportsRewindConversation: z.boolean().optional().default(false),
-    // COMPAT(rewind): added in v0.1.X, drop when floor >= v0.1.X.
-    supportsRewindFiles: z.boolean().optional().default(false),
-    // COMPAT(rewind): added in v0.1.X, drop when floor >= v0.1.X.
-    supportsRewindBoth: z.boolean().optional().default(false),
-  })
-  .catchall(z.boolean());
 
 const AgentUsageSchema: z.ZodType<AgentUsage> = z.object({
   inputTokens: z.number().optional(),

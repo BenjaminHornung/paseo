@@ -534,6 +534,8 @@ export interface PaseoProviderRefreshOptions {
 
 export interface PaseoProviderWaitOptions extends PaseoProviderListOptions {
   timeoutMs?: number;
+  /** Wait only for these providers; the returned snapshot still includes every provider. */
+  providers?: PaseoAgentProvider[];
 }
 
 export interface PaseoProviderActions {
@@ -1293,7 +1295,9 @@ async function waitForProvidersReady(
   signal: AbortSignal,
   options: PaseoProviderWaitOptions = {},
 ): Promise<PaseoProviderSnapshotResult> {
-  const { timeoutMs = 60_000, ...snapshotOptions } = options;
+  const { timeoutMs = 60_000, providers, ...snapshotOptions } = options;
+  const isLoading = (entry: PaseoProviderSnapshotResult["entries"][number]) =>
+    entry.status === "loading" && (!providers || providers.includes(entry.provider));
 
   try {
     await observation.ready;
@@ -1335,7 +1339,7 @@ async function waitForProvidersReady(
           }
           if (!updateMatches(update)) return;
           latestEntries = update.entries;
-          if (update.entries.some((entry) => entry.status === "loading")) return;
+          if (update.entries.some(isLoading)) return;
           finish({ ...update, requestId });
         },
       });
@@ -1344,7 +1348,7 @@ async function waitForProvidersReady(
 
       const timeout = setTimeout(() => {
         const loading = latestEntries
-          .filter((entry) => entry.status === "loading")
+          .filter(isLoading)
           .map((entry) => entry.provider)
           .join(", ");
         fail(
@@ -1362,12 +1366,12 @@ async function waitForProvidersReady(
           requestId = snapshot.requestId;
           snapshotCwd = snapshot.cwd;
           latestEntries = snapshot.entries;
-          if (!snapshot.entries.some((entry) => entry.status === "loading")) {
+          if (!snapshot.entries.some(isLoading)) {
             finish(snapshot);
             return;
           }
           const pendingUpdate = pendingUpdates.get(snapshotCwd);
-          if (pendingUpdate && !pendingUpdate.entries.some((entry) => entry.status === "loading")) {
+          if (pendingUpdate && !pendingUpdate.entries.some(isLoading)) {
             finish({ ...pendingUpdate, requestId });
           }
           return undefined;

@@ -1056,6 +1056,7 @@ export class ProviderSnapshotManager {
           catalog.defaultModeId === undefined ? base.defaultModeId : catalog.defaultModeId,
         status: "ready",
         enabled: true,
+        capabilities: client.capabilities,
         models,
         modes: catalog.modes,
         fetchedAt: new Date().toISOString(),

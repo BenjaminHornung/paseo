@@ -1349,7 +1349,11 @@ test("provider actions delegate to existing provider RPCs and local snapshot upd
     entries: [{ provider: "codex", status: "ready", enabled: true }],
   });
 
-  const readyPromise = client.providers.waitForReady({ cwd: "/repo/sdk", timeoutMs: 5_000 });
+  const readyPromise = client.providers.waitForReady({
+    cwd: "/repo/sdk",
+    timeoutMs: 1_000,
+    providers: ["codex", "claude"],
+  });
   acknowledgeObservation(ws, "provider-wait");
   await new Promise((resolve) => setTimeout(resolve, 0));
   const readyRequest = parseSentSessionMessage(ws.sent.at(-1));
@@ -1363,7 +1367,11 @@ test("provider actions delegate to existing provider RPCs and local snapshot upd
       payload: {
         requestId: readyRequest.requestId,
         cwd: "/repo/sdk",
-        entries: [{ provider: "codex", status: "loading", enabled: true }],
+        entries: [
+          { provider: "codex", status: "loading", enabled: true },
+          { provider: "claude", status: "ready", enabled: true },
+          { provider: "pi", status: "loading", enabled: true },
+        ],
         generatedAt: "2026-05-16T00:00:00.000Z",
       },
     }),
@@ -1385,14 +1393,27 @@ test("provider actions delegate to existing provider RPCs and local snapshot upd
       payload: {
         subscriptionId: "provider-wait",
         cwd: "/repo/sdk",
-        entries: [{ provider: "codex", status: "ready", enabled: true }],
+        entries: [
+          {
+            provider: "codex",
+            status: "ready",
+            enabled: true,
+            capabilities: { ...createAgent().capabilities, supportsBackgroundWorkRefresh: true },
+          },
+          { provider: "claude", status: "ready", enabled: true },
+          { provider: "pi", status: "loading", enabled: true },
+        ],
         generatedAt: "2026-05-16T00:00:01.000Z",
       },
     }),
   );
   await expect(readyPromise).resolves.toMatchObject({
     requestId: readyRequest.requestId,
-    entries: [{ provider: "codex", status: "ready", enabled: true }],
+    entries: [
+      { provider: "codex", status: "ready", capabilities: { supportsBackgroundWorkRefresh: true } },
+      { provider: "claude", status: "ready" },
+      { provider: "pi", status: "loading" },
+    ],
     generatedAt: "2026-05-16T00:00:01.000Z",
   });
 
