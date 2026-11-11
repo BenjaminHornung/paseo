@@ -206,6 +206,54 @@ function automaticRepository(directory: string, repository: string, git: Git): s
   }
   return selected;
 }
+function automaticWorktreePath(repository: string, agentId: string, slug: string): string {
+  return path.join(
+    localPath(path.dirname(repository)),
+    ".worktrees",
+    `${path.basename(repository)}-${hash(agentId).slice(0, 12)}-${slug}`,
+  );
+}
+async function automaticTaskWorkspace(
+  contract: Contract,
+  mainWorkspace: NonNullable<Contract["workspace"]>,
+  provider: PaseoProvider,
+  git: Git,
+): Promise<NonNullable<Contract["workspace"]>> {
+  if (
+    !contract.mutation ||
+    canonicalPath(mainWorkspace.directory) === canonicalPath(contract.worktree)
+  )
+    return mainWorkspace;
+  // Only the explicitly selected, main-owned worktree returned by the public
+  // worktree operation may acquire a different workspace and provider cwd.
+  git.validate(contract);
+  if (!git.isIsolatedWorkspace(contract.worktree))
+    throw Error("AUTOMATION_ISOLATED_WORKTREE_REQUIRED");
+  const slug = git.run(contract.worktree, ["branch", "--show-current"]).slice("feature/".length);
+  const expected = automaticWorktreePath(contract.repository, mainWorkspace.mainAgentId, slug);
+  const relative = path.relative(
+    localPath(path.dirname(contract.repository)),
+    canonicalPath(contract.worktree),
+  );
+  if (
+    !/^[a-zA-Z0-9_-]{1,40}$/.test(slug) ||
+    !existsSync(expected) ||
+    canonicalPath(expected) !== canonicalPath(contract.worktree) ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  )
+    throw Error("AUTOMATION_WORKTREE_MISMATCH");
+  const source = await provider.client.workspaces.open(contract.worktree);
+  const current = await source.refresh();
+  if (!current || canonicalPath(current.workspaceDirectory) !== canonicalPath(contract.worktree))
+    throw Error("AUTOMATION_SOURCE_WORKSPACE_MISMATCH");
+  return {
+    id: source.id,
+    directory: canonicalPath(contract.worktree),
+    mainAgentId: mainWorkspace.mainAgentId,
+  };
+}
 export function settingsView(store: Store, config: Config, vault = new CredentialVault()) {
   const cycle = new Date().toISOString().slice(0, 7);
   const apiUsage = store.db
@@ -725,10 +773,7 @@ export async function settingsOperation(
         const relative = path.relative(projectDirectory, localPath(worktreeDirectory));
         if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
           throw Error("AUTOMATION_WORKTREE_ROOT_OUTSIDE_PROJECT");
-        const destination = path.join(
-          worktreeDirectory,
-          `${path.basename(repository)}-${hash(request.agentId).slice(0, 12)}-${request.slug}`,
-        );
+        const destination = automaticWorktreePath(repository, request.agentId, request.slug);
         return { worktree: git.createWorktree(repository, destination, request.slug) };
       }
       const contract = {
@@ -823,12 +868,27 @@ export async function settingsOperation(
         amendmentTarget = predecessor.taskKey;
       }
       contract.repository = automaticRepository(request.directory, contract.repository, git);
+      contract.worktree = localPath(contract.worktree);
+      const intake =
+        config.orchestrationVersion === 3
+          ? currentIntake(store, request.agentId, contract.mutation)
+          : undefined;
+      const intakeRow = intake
+        ? (store.db.prepare("SELECT facts_json FROM assessments WHERE id=?").get(intake.id) as {
+            facts_json: string;
+          })
+        : undefined;
+      if (intakeRow) {
+        const scope = JSON.parse(intakeRow.facts_json).dataScope;
+        if (contract.dataScope !== scope && contract.dataScope !== "restricted")
+          throw Error("INTAKE_DATA_SCOPE_MISMATCH");
+      }
       // Placement is derived from the registered main, never from a model-supplied ID.
-      if (options.workspaceForMain)
-        contract.workspace = await options.workspaceForMain(request.agentId, request.directory);
-      else {
-        await provider.connect();
-        try {
+      await provider.connect();
+      try {
+        if (options.workspaceForMain)
+          contract.workspace = await options.workspaceForMain(request.agentId, request.directory);
+        else {
           const agent = (await provider.client.agents.ref(request.agentId).refresh())?.agent;
           if (!agent?.workspaceId || canonicalPath(agent.cwd) !== canonicalPath(request.directory))
             throw Error("AUTOMATION_WORKSPACE_REQUIRED");
@@ -843,16 +903,23 @@ export async function settingsOperation(
             directory: canonicalPath(request.directory),
             mainAgentId: request.agentId,
           };
-        } finally {
-          await provider.close();
         }
+        if (
+          contract.workspace.mainAgentId !== request.agentId ||
+          canonicalPath(contract.workspace.directory) !== canonicalPath(request.directory)
+        )
+          throw Error("AUTOMATION_WORKSPACE_MISMATCH");
+        if (main.workerPlacement === "source-workspace") delete contract.workspace;
+        else
+          contract.workspace = await automaticTaskWorkspace(
+            contract,
+            contract.workspace,
+            provider,
+            git,
+          );
+      } finally {
+        await provider.close();
       }
-      if (
-        contract.workspace.mainAgentId !== request.agentId ||
-        canonicalPath(contract.workspace.directory) !== canonicalPath(request.directory)
-      )
-        throw Error("AUTOMATION_WORKSPACE_MISMATCH");
-      if (main.workerPlacement === "source-workspace") delete contract.workspace;
       if (
         contract.mutation &&
         contract.workspace &&
@@ -860,14 +927,7 @@ export async function settingsOperation(
       )
         throw Error("SHARED_WORKSPACE_REQUIRES_SOURCE_DIRECTORY");
       if (contract.role === "reviewer") throw Error("AUTOMATION_REVIEW_IS_CONTROLLER_OWNED");
-      if (config.orchestrationVersion === 3) {
-        const intake = currentIntake(store, request.agentId, contract.mutation);
-        const intakeRow = store.db
-          .prepare("SELECT facts_json FROM assessments WHERE id=?")
-          .get(intake.id) as { facts_json: string };
-        const scope = JSON.parse(intakeRow.facts_json).dataScope;
-        if (contract.dataScope !== scope && contract.dataScope !== "restricted")
-          throw Error("INTAKE_DATA_SCOPE_MISMATCH");
+      if (intake && intakeRow) {
         const facts = packageFactsSchema.parse({
           mainAgentId: request.agentId,
           intakeId: intake.id,

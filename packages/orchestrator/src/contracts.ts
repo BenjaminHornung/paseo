@@ -303,6 +303,7 @@ export const configSchema = z
         "implement-simple": z.array(identifier).min(1),
         "implement-normal": z.array(identifier).min(1),
         "implement-complex": z.array(identifier).min(1),
+        ui: z.array(identifier).min(1).optional(),
         reviewer: z.array(identifier).min(1),
       })
       .optional(),
@@ -336,7 +337,7 @@ export const configSchema = z
     if (
       c.roleRoutes &&
       Object.values(c.roleRoutes).some((ids) =>
-        ids.some((id) => !c.routes.some((r) => r.id === id)),
+        ids?.some((id) => !c.routes.some((r) => r.id === id)),
       )
     )
       ctx.addIssue({ code: "custom", message: "roleRoutes references an unknown route" });

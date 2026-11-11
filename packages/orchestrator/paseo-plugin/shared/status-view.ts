@@ -1,4 +1,68 @@
-import type { TaskStatus } from "./status";
+import type { TaskStatus } from "./status.ts";
+
+interface DecisionDetail {
+  id: string;
+  source: string;
+  result: string | null;
+  response: string | null;
+}
+
+export function decisionView(input: {
+  latestId?: string;
+  detail?: DecisionDetail;
+  loading: boolean;
+  error: boolean;
+}): { status: string; summary: string } {
+  if (input.error) return { status: "Decision konnte nicht geladen werden.", summary: "" };
+  if (input.loading) return { status: "Decision wird geladen …", summary: "" };
+  if (!input.latestId) return { status: "Noch keine Decision vorhanden.", summary: "" };
+  const detail = input.detail?.id === input.latestId ? input.detail : undefined;
+  if (!detail || detail.source === "pending")
+    return { status: "Decision ausstehend.", summary: "" };
+  let status = "Kein bestätigtes Modellergebnis";
+  if (detail.source === "fallback") status = "Lokaler Controller-Fallback";
+  else if (detail.source === "operator-confirmed") status = "Manuell bestätigtes Ergebnis";
+  else if (detail.source === "decisions" && detail.response && detail.result)
+    status = "Decision-Ergebnis";
+  let summary = "";
+  if (detail.result) {
+    try {
+      const value = JSON.parse(detail.result);
+      const labels: Record<string, string> = {
+        question: "Frage",
+        status: "Status",
+        "new-task": "Neuer Auftrag",
+        "change-request": "Änderung",
+        "review-request": "Review",
+        approval: "Freigabe",
+        cancel: "Abbruch",
+        other: "Sonstiges",
+        simple: "Einfach",
+        normal: "Normal",
+        complex: "Komplex",
+        unknown: "Unbekannt",
+      };
+      const classification = value.intent ?? value.complexity;
+      if (typeof classification === "string") summary = labels[classification] ?? classification;
+      const actions = [
+        ["needExplorer", "Recherche"],
+        ["needPlanner", "Planung"],
+        ["additionalPlanning", "Planung"],
+        ["needAdvisor", "Advisor"],
+        ["advisorNeeded", "Advisor"],
+        ["needImplementation", "Umsetzung"],
+        ["shouldSplit", "Aufteilen"],
+        ["extraReviewRecommended", "Zusätzliches Review"],
+      ]
+        .filter(([key]) => value[key] === true)
+        .map(([, label]) => label);
+      if (actions.length) summary += (summary ? " · " : "") + [...new Set(actions)].join(", ");
+    } catch {
+      summary = "";
+    }
+  }
+  return { status, summary };
+}
 
 export function checksPassed(task: TaskStatus): boolean {
   const checks = task.checks;

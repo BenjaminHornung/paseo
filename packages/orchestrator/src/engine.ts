@@ -426,6 +426,7 @@ export class Engine {
     routing?: {
       reason: string;
       source: string;
+      category?: "ui";
       confidence?: number;
       skipped?: { routeId: string; reason: string }[];
     };
@@ -471,6 +472,14 @@ export class Engine {
       quotaAvailable: true,
       priority: 0,
     }));
+    // UI is a work kind, independent of the assessed complexity and quality tier.
+    // Apply its explicit candidate list to both fresh dispatch and session reuse.
+    const uiPreference =
+      c.mutation && c.uiChanged && c.role.startsWith("implement-")
+        ? this.config.roleRoutes?.ui
+        : undefined;
+    const preference = uiPreference ?? this.config.roleRoutes?.[c.role] ?? routePreference[c.role];
+    const routingCategory = uiPreference ? { category: "ui" as const } : {};
     const input = {
       task: {
         workflowId: c.workflowId,
@@ -506,7 +515,7 @@ export class Engine {
           return false;
         }
       },
-      preferences: this.config.roleRoutes,
+      preferences: { ...this.config.roleRoutes, [c.role]: preference },
       verifiedProviderModel: (r: Route) => {
         const configured = this.config.routes.find((x) => x.id === r.id)!;
         if (
@@ -532,7 +541,6 @@ export class Engine {
     // Reconcile an existing compatible same-task context before selecting a new
     // model from the priority list. Pi API sessions remain ineligible until the
     // daemon can atomically rebind their per-attempt environment/ledger.
-    const preference = this.config.roleRoutes?.[c.role] ?? routePreference[c.role];
     for (const candidate of preference
       .map((id) => this.config.routes.find((route) => route.id === id))
       .filter((route): route is RuntimeRoute => !!route)) {
@@ -598,13 +606,17 @@ export class Engine {
         route: candidate,
         sessionId: snapshot.id,
         reason: "confirmed-compatible-idle",
-        routing: { reason: "same-task-role-context-before-new-priority", source: "policy" },
+        routing: {
+          reason: "same-task-role-context-before-new-priority",
+          source: "policy",
+          ...routingCategory,
+        },
       };
     }
     const d = decideRoute(input);
-    if (!d.route) return { action: d.action, reason: d.reason };
-    let route = this.config.routes.find((r) => r.id === d.route!.id)!;
-    const skipped = preference.slice(0, preference.indexOf(route.id)).map((id) => {
+    if (!d.route && !uiPreference) return { action: d.action, reason: d.reason };
+    const skippedIds = d.route ? preference.slice(0, preference.indexOf(d.route.id)) : preference;
+    const skipped = skippedIds.map((id) => {
       const configured = this.config.routes.find((route) => route.id === id),
         candidate = routes.find((route) => route.id === id);
       let reason = "capability-or-model-unavailable";
@@ -626,7 +638,10 @@ export class Engine {
       else if (configured.revision === "discovery-required") reason = "catalog-revision-unverified";
       return { routeId: id, reason };
     });
-    const routing = { reason: d.reason, source: "policy", skipped };
+    const reason = !d.route && uiPreference ? `ui-${d.reason}` : d.reason;
+    const routing = { reason, source: "policy", skipped, ...routingCategory };
+    if (!d.route) return { action: d.action, reason, routing };
+    const route = this.config.routes.find((r) => r.id === d.route!.id)!;
     // Workflow/package classification happens before admission. Model priority is
     // deterministic here, including when a legacy caller passes allowDecisions.
     return { action: "start", route, reason: d.reason, routing };

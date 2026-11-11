@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
-import { editAutomation, taskDispatchAllowed } from "../src/automation.ts";
+import { editAutomation, readAutomation, taskDispatchAllowed } from "../src/automation.ts";
 import {
   intakeIdentity,
   packageIdentity,
@@ -31,7 +31,8 @@ import {
   type Contract,
 } from "../src/contracts.ts";
 import { PaseoProvider, type Snapshot } from "../src/provider.ts";
-import { settingsOperation } from "../src/settings.ts";
+import { settingsOperation, settingsView } from "../src/settings.ts";
+import { readConfig } from "../src/settings-files.ts";
 import { Store } from "../src/store.ts";
 import { CredentialVault } from "../src/secrets.ts";
 import { decisionHistory } from "../src/decision-history.ts";
@@ -426,6 +427,265 @@ class FixtureClassifier implements Classifier {
   }
 }
 
+// Consequential regression: the public worktree operation succeeds, but registration
+// pins an umbrella main workspace and prevents any isolated implementation worker.
+test("public automatic worktree registration pins the source workspace and preserves the main parent", async (t) => {
+  const directory = mkdtempSync(path.join(process.cwd(), ".placement-intake-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const mainDirectory = path.join(directory, "main"),
+    repository = path.join(mainDirectory, "repository"),
+    controllerRoot = path.join(directory, "controller");
+  mkdirSync(repository, { recursive: true });
+  mkdirSync(controllerRoot, { recursive: true });
+  const git = gitExecutable();
+  runGit(git, ["init", "-b", "main"], repository);
+  runGit(git, ["config", "core.autocrlf", "false"], repository);
+  runGit(git, ["config", "user.name", "Paseo test"], repository);
+  runGit(git, ["config", "user.email", "paseo-test@example.invalid"], repository);
+  writeFileSync(
+    path.join(repository, "greeting.mjs"),
+    "export const greet = name => `Hello ${name}`;\n",
+  );
+  runGit(git, ["add", "."], repository);
+  runGit(git, ["commit", "-m", "fixture"], repository);
+  const baseCommit = runGit(git, ["rev-parse", "HEAD"], repository);
+  const config = configSchema.parse({
+    schemaVersion: 1,
+    orchestrationVersion: 3,
+    daemonUrl: "ws://127.0.0.1:3010/ws",
+    gitExecutable: git,
+    maxWorkflows: 2,
+    maxRework: 1,
+    apiEnabled: false,
+    liveDispatchApproved: false,
+    budgets: { decisions: 0, implementation: 0, "premium-api": 0, emergency: 0 },
+    routes: [
+      {
+        id: "placement-codex",
+        access: "codex-pro200",
+        provider: "codex",
+        model: "fixture-model",
+        revision: "fixture",
+        reasoning: "high",
+        tier: 3,
+        enabled: true,
+        maxConcurrent: 1,
+        dataScopes: ["public"],
+        capabilities: ["code"],
+      },
+    ],
+  });
+  const configFile = path.join(controllerRoot, "controller.json"),
+    database = path.join(controllerRoot, "controller.sqlite"),
+    agentId = "existing-placement-main";
+  writeFileSync(configFile, JSON.stringify(config));
+  const main = {
+    id: agentId,
+    workspaceId: "main-workspace",
+    cwd: mainDirectory,
+    provider: "codex",
+    status: "idle",
+    activeTurn: false,
+    pendingPermissions: [],
+    runtimeInfo: { sessionId: "placement-native-session" },
+    labels: { orchestratorScope: "public" },
+  };
+  const originalMain = structuredClone(main);
+  const messageId = "placement-human-input-0001",
+    text = "new task: fix greeting.mjs";
+  let worktree = "",
+    sourceOpens = 0;
+  const sourceWorkspace = {
+    id: "source-workspace",
+    refresh: async () => ({ workspaceDirectory: worktree }),
+    agents: {
+      create: async () => {
+        throw Error("Registration must not start a worker");
+      },
+    },
+  };
+  const provider = new PaseoProvider(config.daemonUrl);
+  Object.assign(provider, {
+    connect: async () => {},
+    close: async () => {},
+    client: {
+      agents: {
+        ref: () => ({
+          id: agentId,
+          runtimeInfo: main.runtimeInfo,
+          refresh: async () => ({ agent: main }),
+          timeline: {
+            refetch: async () => ({
+              entries: [
+                {
+                  timestamp: new Date().toISOString(),
+                  seqStart: 1,
+                  seqEnd: 1,
+                  item: { type: "user_message", clientMessageId: messageId, messageId, text },
+                },
+              ],
+              error: false,
+              gap: false,
+              hasOlder: false,
+              hasNewer: false,
+              startCursor: { epoch: "placement-native-session", seq: 1 },
+              endCursor: { epoch: "placement-native-session", seq: 1 },
+            }),
+          },
+          backgroundWork: {
+            refresh: async () => ({
+              agentId,
+              providerSessionId: "placement-native-session",
+              observationId: "placement-fresh-observation",
+              coverage: "codex_background_terminals",
+              queriedProviderSessionIds: ["placement-native-session"],
+              items: [],
+              providerSubagents: [],
+            }),
+          },
+        }),
+      },
+      workspaces: {
+        ref: (id: string) => {
+          if (id === sourceWorkspace.id) return sourceWorkspace;
+          assert.equal(id, main.workspaceId);
+          return {
+            refresh: async () => ({ workspaceDirectory: mainDirectory }),
+            agents: {
+              create: async () => {
+                throw Error("Worker must not run in the main workspace");
+              },
+            },
+          };
+        },
+        open: async (selected: string) => {
+          sourceOpens++;
+          if (canonicalPath(selected) === canonicalPath(worktree)) return sourceWorkspace;
+          return {
+            id: "other-source-workspace",
+            refresh: async () => ({ workspaceDirectory: selected }),
+          };
+        },
+      },
+    },
+  });
+  const options = {
+    file: configFile,
+    database,
+    vault: new CredentialVault(controllerRoot),
+    providerFactory: () => provider,
+    classifierFactory: (store: Store) => new FixtureClassifier(store),
+  };
+  editAutomation(
+    agentId,
+    () => ({
+      agentId,
+      directory: canonicalPath(mainDirectory),
+      state: "ready",
+      requestId: "placement-prepared-main",
+      protocolVersion: 3,
+      taskKeys: [],
+      wakeCount: 0,
+      wakeBaseline: {},
+    }),
+    controllerRoot,
+  );
+  await settingsOperation(
+    { operation: "auto-input", agentId, directory: mainDirectory, messageId, text },
+    options,
+  );
+  const created = (await settingsOperation(
+    {
+      operation: "auto-worktree",
+      agentId,
+      directory: mainDirectory,
+      repository,
+      slug: "placement-worker",
+    },
+    options,
+  )) as { worktree: string };
+  worktree = created.worktree;
+  const contract = contractSchema.parse({
+    workflowId: "placement",
+    taskId: "greeting",
+    repository,
+    worktree,
+    baseCommit,
+    dataScope: "public",
+    role: "implement-simple",
+    prompt: "Fix greeting.mjs",
+    acceptance: ["Greeting is correct"],
+    allowedPaths: ["greeting.mjs"],
+    requiredCapabilities: ["code"],
+    minTier: 1,
+    mutation: true,
+    highRisk: false,
+    uiChanged: false,
+    estimatedMicroUsd: 0,
+    checks: {
+      build: [process.execPath, "--check", "greeting.mjs"],
+      test: [process.execPath, "--check", "greeting.mjs"],
+    },
+  });
+  const register = (value: Contract) =>
+    settingsOperation(
+      { operation: "auto-task", agentId, directory: mainDirectory, contract: value },
+      options,
+    );
+  const opensBeforeScopeRejection = sourceOpens;
+  await assert.rejects(
+    register({ ...contract, dataScope: "personal" }),
+    /INTAKE_DATA_SCOPE_MISMATCH/,
+  );
+  assert.equal(
+    sourceOpens,
+    opensBeforeScopeRejection,
+    "a rejected intake scope must not persist a source workspace or Git observer",
+  );
+  const registered = (await register(contract)) as { key: string; state: string };
+  assert.equal(registered.state, "READY");
+  assert.deepEqual(await register(contract), registered, "registration remains idempotent");
+  const store = new Store(database);
+  try {
+    const saved = contractSchema.parse(JSON.parse(store.task(registered.key)!.contract_json));
+    assert.deepEqual(saved.workspace, {
+      id: sourceWorkspace.id,
+      directory: canonicalPath(worktree),
+      mainAgentId: agentId,
+    });
+    assert.deepEqual(saved.allowedPaths, ["greeting.mjs"]);
+    assert.equal(
+      (store.db.prepare("SELECT COUNT(*) AS count FROM tasks").get() as { count: number }).count,
+      1,
+    );
+    assert.deepEqual(main, originalMain);
+    assert.equal(readAutomation(controllerRoot).mains[0].workerPlacement, undefined);
+
+    const outside = path.join(directory, "unapproved-worktree");
+    runGit(
+      git,
+      ["worktree", "add", "-b", "feature/unapproved-worktree", outside, baseCommit],
+      repository,
+    );
+    const previousOpens = sourceOpens;
+    await assert.rejects(
+      register({ ...contract, taskId: "outside", worktree: outside }),
+      /AUTOMATION_WORKTREE_MISMATCH/,
+    );
+    await assert.rejects(
+      register({ ...contract, taskId: "foreign", repository: process.cwd() }),
+      /AUTOMATION_REPOSITORY_MISMATCH/,
+    );
+    assert.equal(sourceOpens, previousOpens, "unapproved source paths cannot create a workspace");
+    assert.equal(
+      (store.db.prepare("SELECT COUNT(*) AS count FROM tasks").get() as { count: number }).count,
+      1,
+    );
+  } finally {
+    store.close();
+  }
+});
+
 test("automatic intake preserves authorization, audits high-risk approval, and waits for settled amendments", async (t) => {
   const root = mkdtempSync(path.join(process.cwd(), ".intake-test-"));
   let closeRiskStore = () => {};
@@ -489,6 +749,8 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
   });
   const configFile = path.join(root, "controller.json"),
     database = path.join(root, "controller.sqlite");
+  // Legacy configurations retain their role lists until UI is explicitly configured.
+  assert.equal(config.roleRoutes?.ui, undefined);
   writeFileSync(configFile, JSON.stringify(config));
   const messages: { id: string; text: string; timestamp: string }[] = [];
   let backgroundActive: boolean | null = false;
@@ -557,6 +819,12 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
         models: [{ id: route.model, thinking: ["high"] }],
         modes: [],
       },
+      {
+        provider: "claude",
+        status: "ready",
+        models: [{ id: "fixture-ui-model", thinking: ["high"] }],
+        modes: [],
+      },
     ],
     refresh: async (id: string): Promise<Snapshot> => ({
       id,
@@ -591,6 +859,35 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
       mainAgentId: agentId,
     }),
   };
+  // Concrete regression: a saved UI preference was ignored because assessment
+  // assigns implement-normal. Exercise real save/readback, V3 package binding
+  // and Engine.plan; no paid Decisions or provider executions are needed.
+  const savedView = (await settingsOperation(
+    {
+      operation: "save",
+      revision: hash(config),
+      config: {
+        ...config,
+        roleRoutes: { ...config.roleRoutes, ui: ["test-claude-ui", "test-codex"] },
+        routes: [
+          ...config.routes,
+          {
+            ...route,
+            id: "test-claude-ui",
+            provider: "claude",
+            access: "claude-company-pro",
+            model: "fixture-ui-model",
+            tier: 2,
+            repositoryRoots: [root],
+          },
+        ],
+      },
+    },
+    options,
+  )) as { config: Config };
+  const savedConfig = readConfig(configFile);
+  assert.deepEqual(savedConfig.roleRoutes?.ui, ["test-claude-ui", "test-codex"]);
+  assert.deepEqual(savedView.config.roleRoutes?.ui, savedConfig.roleRoutes?.ui);
   editAutomation(
     agentId,
     () => ({
@@ -685,7 +982,7 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
       operation: "auto-task",
       agentId,
       directory: repo,
-      contract: taskRequest("initial", "initial objective"),
+      contract: { ...taskRequest("initial", "initial objective"), uiChanged: true },
     },
     options,
   )) as { key: string; state: string };
@@ -693,6 +990,92 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
   const store = new Store(database);
   const originalTask = store.task(originalResult.key)!;
   const originalContract = contractSchema.parse(JSON.parse(originalTask.contract_json));
+  await t.test(
+    "saved UI routes preserve package binding, safety filters and legacy routing",
+    async () => {
+      const routingEngine = new Engine(
+        store,
+        savedConfig,
+        fakeProvider,
+        undefined,
+        undefined,
+        (key) => taskDispatchAllowed(key, vaultRoot),
+      );
+      assert.equal(originalContract.role, "implement-normal");
+      assert.equal(originalContract.minTier, 2);
+      const uiPlan = await routingEngine.plan(originalResult.key);
+      assert.equal(uiPlan.route?.provider, "claude", "UI work uses the saved provider preference");
+      assert.equal(uiPlan.routing?.category, "ui");
+      assert.throws(
+        () => assertTaskAssessment(store, savedConfig, { ...originalContract, uiChanged: false }),
+        /PACKAGE_EXECUTION_FACTS_MISMATCH/,
+        "routing work kind cannot diverge from assessed execution facts",
+      );
+      store.blockAccess("route:test-claude-ui", "fixture-unavailable", null);
+      const uiFallback = await routingEngine.plan(originalResult.key);
+      assert.equal(uiFallback.route?.id, "test-codex");
+      assert.deepEqual(uiFallback.routing?.skipped, [
+        { routeId: "test-claude-ui", reason: "confirmed-provider-or-route-circuit" },
+      ]);
+      store.blockAccess("route:test-codex", "fixture-unavailable", null);
+      const uiWaiting = await routingEngine.plan(originalResult.key);
+      assert.equal(uiWaiting.action, "wait");
+      assert.equal(uiWaiting.reason, "ui-no-safe-and-funded-candidate");
+      assert.equal(uiWaiting.routing?.skipped?.length, 2);
+      store.db.prepare("DELETE FROM circuits WHERE reason=?").run("fixture-unavailable");
+
+      // A UI route below the assessed tier must not be selected merely due to priority.
+      const lowTierConfig = configSchema.parse({
+        ...savedConfig,
+        routes: savedConfig.routes.map((candidate) =>
+          candidate.provider === "claude" ? { ...candidate, tier: 1 } : candidate,
+        ),
+      });
+      // Separate legacy admissions never change the immutable V3 task/configuration
+      // or manufacture assessment/authorization records for the active workflow.
+      for (const scenario of [
+        { name: "legacy-without-ui", config, expectedRoute: "test-codex" },
+        { name: "ui-tier-fallback", config: lowTierConfig, expectedRoute: "test-codex" },
+        {
+          name: "ui-list-exhausted",
+          config: {
+            ...lowTierConfig,
+            roleRoutes: { ...lowTierConfig.roleRoutes!, ui: ["test-claude-ui"] },
+          },
+          expectedRoute: undefined,
+        },
+      ]) {
+        const legacyStore = new Store(":memory:");
+        try {
+          const legacyConfig = configSchema.parse({ ...scenario.config, orchestrationVersion: 2 });
+          const legacyKey = legacyStore.add(
+            { ...taskRequest(scenario.name, "legacy UI objective"), uiChanged: true },
+            legacyConfig,
+          );
+          const legacyEngine = new Engine(
+            legacyStore,
+            legacyConfig,
+            fakeProvider,
+            undefined,
+            undefined,
+            () => true,
+          );
+          const legacyPlan = await legacyEngine.plan(legacyKey);
+          assert.equal(legacyPlan.route?.id, scenario.expectedRoute, scenario.name);
+          if (!scenario.expectedRoute) {
+            assert.equal(legacyPlan.reason, "ui-no-safe-and-funded-candidate");
+            assert.deepEqual(legacyPlan.routing?.skipped, [
+              { routeId: "test-claude-ui", reason: "quality-tier-insufficient" },
+            ]);
+          }
+          const legacyView = settingsView(legacyStore, config, options.vault);
+          assert.equal(legacyView.config.roleRoutes?.ui, undefined);
+        } finally {
+          legacyStore.close();
+        }
+      }
+    },
+  );
   writeFileSync(
     path.join(worktree, "src", "prior-change.ts"),
     "export const priorChange = true;\n",
@@ -827,6 +1210,17 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
   assert.equal(oldAttempt.error_kind, "task-amended");
   assert.equal(oldLease.state, "RELEASED");
   assert.equal(afterAmendment.task(amended.key)?.state, "READY");
+  const nonUiEngine = new Engine(
+    afterAmendment,
+    savedConfig,
+    fakeProvider,
+    undefined,
+    undefined,
+    (key) => taskDispatchAllowed(key, vaultRoot),
+  );
+  const nonUiPlan = await nonUiEngine.plan(amended.key);
+  assert.equal(nonUiPlan.route?.id, "test-codex", "non-UI amendments keep ordinary role routing");
+  assert.equal(nonUiPlan.routing?.category, undefined);
   assert.equal(
     (afterAmendment.db.prepare("SELECT COUNT(*) AS count FROM circuits").get() as { count: number })
       .count,

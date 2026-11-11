@@ -31,7 +31,7 @@ const config: Config = configSchema.parse({
 // Concrete fault: source-workspace registration omits workspace identity, so the dirty-check
 // blocks a read-only advisor despite an active writer lease. Existing routing tests never run
 // this registration path against a dirty Git tree and its SQLite lease.
-function createFixture() {
+function createFixture(placement: "legacy" | "public") {
   const stateDirectory = path.join(process.cwd(), "state");
   mkdirSync(stateDirectory, { recursive: true });
   const directory = mkdtempSync(path.join(stateDirectory, "advisor-registration-"));
@@ -67,6 +67,14 @@ function createFixture() {
     requiredCapabilities: ["code"],
     minTier: 2,
     mutation: true,
+    workspace:
+      placement === "public"
+        ? {
+            id: "source-workspace",
+            directory: canonicalPath(worktree),
+            mainAgentId: "existing-main",
+          }
+        : undefined,
     highRisk: false,
     uiChanged: false,
     checks: {
@@ -86,63 +94,89 @@ function createFixture() {
   return { directory, engine, store, contract, attempt, route, worktree };
 }
 
-test("a read-only advisor may idempotently register against a VERIFY writer’s scoped dirty source", () => {
-  const fixture = createFixture();
-  try {
-    fixture.store.observe(fixture.attempt.id, "VERIFY");
-    const writerState = fixture.store.db
-      .prepare(`SELECT l.state,a.status FROM leases l
+for (const placement of ["legacy", "public"] as const)
+  test(`a read-only advisor may idempotently register against a VERIFY writer’s scoped dirty source (${placement})`, () => {
+    const fixture = createFixture(placement);
+    try {
+      fixture.store.observe(fixture.attempt.id, "VERIFY");
+      const writerState = fixture.store.db
+        .prepare(`SELECT l.state,a.status FROM leases l
       JOIN attempts a ON a.id=l.attempt_id WHERE a.id=?`)
-      .get(fixture.attempt.id) as { state: string; status: string } | undefined;
-    assert.equal(writerState?.state, "HELD");
-    assert.equal(writerState?.status, "VERIFY");
+        .get(fixture.attempt.id) as { state: string; status: string } | undefined;
+      assert.equal(writerState?.state, "HELD");
+      assert.equal(writerState?.status, "VERIFY");
 
-    const advisor = contractSchema.parse({
-      ...fixture.contract,
-      taskId: "advisor",
-      role: "advisor",
-      prompt: "Review the current value and advise.",
-      acceptance: ["Advice is tied to the current source."],
-      requiredCapabilities: ["text"],
-      minTier: 1,
-      mutation: false,
-    });
+      const advisor = contractSchema.parse({
+        ...fixture.contract,
+        taskId: "advisor",
+        role: "advisor",
+        prompt: "Review the current value and advise.",
+        acceptance: ["Advice is tied to the current source."],
+        requiredCapabilities: ["text"],
+        minTier: 1,
+        mutation: false,
+        workspace:
+          placement === "public"
+            ? {
+                id: "main-workspace",
+                directory: canonicalPath(fixture.directory),
+                mainAgentId: "existing-main",
+              }
+            : undefined,
+      });
 
-    assert.throws(
-      () => fixture.engine.add({ ...fixture.contract, taskId: "second-writer" }),
-      /New task requires clean baseline or exclusively known peer changes/,
-      "dirty source must not authorize a second writer registration",
-    );
+      if (advisor.workspace) {
+        assert.throws(
+          () =>
+            fixture.engine.add({
+              ...advisor,
+              workspace: { ...advisor.workspace!, mainAgentId: "foreign-main" },
+            }),
+          /New task requires clean baseline or exclusively known peer changes/,
+          "another main cannot attribute the leased writer's changes",
+        );
+      }
 
-    const advisorKey = fixture.engine.add(advisor);
-    assert.equal(advisorKey, "advisor-registration/advisor/advisor");
-    assert.equal(
-      fixture.engine.add(advisor),
-      advisorKey,
-      "re-registering the same advisor contract remains idempotent while the writer is in VERIFY",
-    );
-    assert.throws(
-      () => fixture.store.claim(advisorKey, fixture.route, config, "advisor-session"),
-      /Worktree coordination blocked/,
-      "advisor registration must not bypass the active writer lease",
-    );
-    const activeLeases = fixture.store.db
-      .prepare("SELECT COUNT(*) AS count FROM leases WHERE state!='RELEASED'")
-      .get() as { count: number };
-    assert.equal(
-      activeLeases.count,
-      1,
-      "registering an advisor must leave the existing writer lease as the only active lease",
-    );
+      assert.throws(
+        () =>
+          fixture.engine.add({
+            ...fixture.contract,
+            workspace: undefined,
+            taskId: "second-writer",
+          }),
+        /New task requires clean baseline or exclusively known peer changes/,
+        "dirty source must not authorize an unattributed second writer registration",
+      );
 
-    writeFileSync(path.join(fixture.worktree, "unowned.txt"), "unowned change\n");
-    assert.throws(
-      () => fixture.engine.add({ ...advisor, taskId: "advisor-out-of-scope" }),
-      /New task requires clean baseline or exclusively known peer changes/,
-      "an advisor must not register against source outside its declared and leased scope",
-    );
-  } finally {
-    fixture.store.close();
-    rmSync(fixture.directory, { recursive: true, force: true });
-  }
-});
+      const advisorKey = fixture.engine.add(advisor);
+      assert.equal(advisorKey, "advisor-registration/advisor/advisor");
+      assert.equal(
+        fixture.engine.add(advisor),
+        advisorKey,
+        "re-registering the same advisor contract remains idempotent while the writer is in VERIFY",
+      );
+      assert.throws(
+        () => fixture.store.claim(advisorKey, fixture.route, config, "advisor-session"),
+        /Worktree coordination blocked/,
+        "advisor registration must not bypass the active writer lease",
+      );
+      const activeLeases = fixture.store.db
+        .prepare("SELECT COUNT(*) AS count FROM leases WHERE state!='RELEASED'")
+        .get() as { count: number };
+      assert.equal(
+        activeLeases.count,
+        1,
+        "registering an advisor must leave the existing writer lease as the only active lease",
+      );
+
+      writeFileSync(path.join(fixture.worktree, "unowned.txt"), "unowned change\n");
+      assert.throws(
+        () => fixture.engine.add({ ...advisor, taskId: "advisor-out-of-scope" }),
+        /New task requires clean baseline or exclusively known peer changes/,
+        "an advisor must not register against source outside its declared and leased scope",
+      );
+    } finally {
+      fixture.store.close();
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });

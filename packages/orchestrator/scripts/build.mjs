@@ -124,6 +124,7 @@ await writeFile(
         compatibleBaseInputSha256: [
           "176685ed8dce0112d082940dc24dcf839ab0ab190d34134a1673cdba8d8fbd7b",
           "f144eecf2e112f76c1a7af4f6ff4a965ae211b3f58f1a4f59f8b35c36641f9ec",
+          "95f0b1c7089000a5de10d96fc260b3b25892e3e160f7b5c077aabc6615c216fa",
         ],
         minimumNodeMajor: 24,
         scope: [
@@ -136,6 +137,11 @@ await writeFile(
         daemonRestartRequired: false,
       },
       pluginPreparationConnection: { requiresPasswordlessLoopback: true, credentialLookup: false },
+      pluginClientCompatibility: {
+        requiredUiExports: ["ActiveSubagents"],
+        delivery: "matching-full-advanced-package",
+        standaloneRepairSupported: false,
+      },
       pluginCompiledInputSha256: pluginHash.digest("hex"),
       pluginFileSha256,
       sdk: `${sdkPackage.name}@${sdkPackage.version}`,

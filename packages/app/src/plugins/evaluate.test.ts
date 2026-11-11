@@ -745,10 +745,10 @@ describe("evaluatePluginClientBundle", () => {
     const plugin = evaluatePluginClientBundle(
       "example",
       `(function(require) {
-        const { Icon, Modal, useToast, SettingsSection, SidebarRow, StreamedText } = require("@getpaseo/plugin/client/ui");
+        const { Icon, Modal, useToast, SettingsSection, SidebarRow, StreamedText, ActiveSubagents } = require("@getpaseo/plugin/client/ui");
         const module = { exports: {} };
         module.exports.default = function(plugin) {
-          if (typeof Icon !== "function" || typeof Modal !== "function" || typeof Modal.Content !== "function" || typeof useToast !== "function" || typeof SettingsSection !== "function" || typeof SidebarRow !== "function" || typeof StreamedText !== "function") {
+        if (typeof Icon !== "function" || typeof Modal !== "function" || typeof Modal.Content !== "function" || typeof useToast !== "function" || typeof SettingsSection !== "function" || typeof SidebarRow !== "function" || typeof StreamedText !== "function" || typeof ActiveSubagents !== "function") {
             throw new Error("React Native plugin UI is incomplete");
           }
           plugin.addSurface("main", function Surface() { return null; });

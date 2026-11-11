@@ -59,6 +59,11 @@ export function buildSubagentRowPresentationData(row: SubagentRow): SubagentRowP
   };
 }
 
+/** The active subset of the same rows presented by the composer track. */
+export function activeSubagentRows(rows: readonly SubagentRow[]): SubagentRow[] {
+  return rows.filter((row) => buildSubagentRowPresentationData(row).statusBucket === "running");
+}
+
 type ActiveStatusBucket = Exclude<SidebarStateBucket, "done">;
 
 /** The sidebar's list order, minus the state that earns no mark. */

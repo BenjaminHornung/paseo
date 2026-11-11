@@ -10,6 +10,8 @@ export const roles = [
   "reviewer",
 ] as const;
 export type Role = (typeof roles)[number];
+export const routingCategories = [...roles, "ui"] as const;
+export type RoutingCategory = (typeof routingCategories)[number];
 export interface DecisionSettings {
   enabled: boolean;
   model: "gpt-6-luna";
@@ -55,7 +57,7 @@ export interface ControllerConfig {
   apiEnabled: boolean;
   liveDispatchApproved: boolean;
   apiFunding?: { confirmed: boolean; cycle: string; availableMicroUsd: number; validUntil: string };
-  roleRoutes?: Record<Role, string[]>;
+  roleRoutes?: Record<Role, string[]> & { ui?: string[] };
   routes: Route[];
   decisions?: DecisionSettings;
   budgets: { decisions: number; implementation: number; "premium-api": number; emergency: number };

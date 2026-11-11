@@ -3,6 +3,7 @@ import { i18n } from "@/i18n/i18next";
 import type { PaseoSubagentRow, ProviderSubagentRow, SubagentRow } from "./select";
 import {
   buildSubagentPillPresentation,
+  activeSubagentRows,
   buildSubagentRowPresentationData,
   countFinishedSubagents,
   resolveRowLabel,
@@ -30,6 +31,35 @@ function row(
     createdAt: overrides.createdAt ?? new Date("2026-04-20T00:00:00.000Z"),
   };
 }
+
+describe("activeSubagentRows", () => {
+  it("keeps working and background-work children while excluding idle and finished children", () => {
+    const provider = (id: string, status: "running" | "completed"): ProviderSubagentRow => ({
+      kind: "provider",
+      id,
+      parentAgentId: "parent",
+      provider: "codex",
+      title: id,
+      description: null,
+      subtitle: null,
+      status,
+      requiresAttention: false,
+      createdAt: new Date(0),
+    });
+    const rows = [
+      row({ id: "working", status: "running" }),
+      row({ id: "background", status: "idle", backgroundWork: { count: 1 } }),
+      row({ id: "idle" }),
+      provider("native-working", "running"),
+      provider("native-finished", "completed"),
+    ];
+    expect(activeSubagentRows(rows).map((child) => child.id)).toEqual([
+      "working",
+      "background",
+      "native-working",
+    ]);
+  });
+});
 
 describe("buildSubagentPillPresentation", () => {
   // The real instance, so a label that names a key nobody added renders as that key and fails.

@@ -47,7 +47,7 @@ prompt, acceptance[], allowedPaths[] (relativ), requiredCapabilities:['code'], m
 mutation, highRisk, uiChanged, ownerApproved (nur bei echter Freigabe), estimatedMicroUsd:0,
 Das Taskbudget kommt ausschließlich aus der gespeicherten Route; keinen Betrag schätzen oder erfinden.
 checks:{build:[absoluter Programm-Pfad,...Argumente],test:[absoluter Programm-Pfad,...Argumente]}.
-Registriere unabhängige Pakete mit enger Dateizuordnung im selben Workflow und Worktree. Der Controller ordnet neue Worker automatisch deinem Workspace und seiner Subagent-Anzeige zu; workspace nicht selbst angeben. Abhängigkeiten als vollständige Task-Keys angeben; abhängige Aufgaben starten erst nach verifiziertem Vorgänger.
+Registriere unabhängige Pakete mit enger Dateizuordnung im selben Workflow und Worktree. Bei einem separaten orchestrator_worktree bindet der Controller schreibende Worker an dessen Quell-Workspace. Sie erscheinen dort als Tabs und bleiben als deine Subagents verknüpft. Dein Hauptchat behält Workspace und cwd; workspace nicht selbst angeben. Abhängigkeiten als vollständige Task-Keys angeben; abhängige Aufgaben starten erst nach verifiziertem Vorgänger.
 Fasse zusammenhängende Änderungen desselben Arbeitspakets möglichst in einem Implementierungsvertrag
 und Worker-Kontext zusammen. Neue Pakete dürfen ausschließlich bekannte Änderungen ihrer zugeordneten Peers vorfinden; unbekannte Änderungen zuerst klären. Erfinde keine Commits, um Zwischenstände zu übernehmen. Gemeinsame Builds, Tests und Reviews erst nach Prozessruhe aller Writer; während der Verifikation keine neuen Writer. Kein Modellwechsel allein wegen kleiner Kostenschätzungen.
 Die Statusabfrage zeigt den Fortschritt; Chat-Status wird zusätzlich automatisch aktualisiert.
@@ -504,7 +504,7 @@ export function orchestrationTools(runtime: AutomationRuntime) {
     defineAgentTool({
       name: "orchestrator_worktree",
       description:
-        "Create one isolated feature worktree. repository may select a real Git root inside this main session’s workspace directory; omit only if cwd already is that Git root. Keep the same main chat. Only while Auto-Routing is ready.",
+        "Create one isolated feature worktree. repository may select a real Git root inside this main session’s workspace directory; omit only if cwd already is that Git root. Register writes using the returned worktree: the controller pins its source workspace and keeps this main as parent. Keep the same main chat. Only while Auto-Routing is ready.",
       input: z.object({
         slug: z.string().regex(/^[a-zA-Z0-9_-]{1,40}$/),
         repository: z.string().optional(),
@@ -514,7 +514,7 @@ export function orchestrationTools(runtime: AutomationRuntime) {
     defineAgentTool({
       name: "orchestrator_register_task",
       description:
-        "Register a task contract derived from the user’s work order. The contract repository must be a real Git root within this main session’s workspace directory, which may itself be a non-Git project folder. Controller handles routing/checks/review; isolated clean worktree required for writes. Never auto-attest.",
+        "Register a task contract derived from the user’s work order. The contract repository must be a real Git root within this main session’s workspace directory, which may itself be a non-Git project folder. For writes, use the exact isolated worktree returned by orchestrator_worktree; the controller verifies and binds its source workspace while preserving the main parent. Do not supply workspace IDs. Controller handles routing/checks/review; isolated clean worktree required for writes. Never auto-attest.",
       input: z.object({ contract: z.record(z.string(), z.unknown()) }),
       execute: (input, context) => call("auto-task", input, context),
     }),

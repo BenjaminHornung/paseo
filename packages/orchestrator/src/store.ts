@@ -727,9 +727,10 @@ export class Store {
       ),
     ];
   }
-  // Source-workspace placement omits workspace IDs, so sameCohort cannot find its leased writer.
+  // An advisor in the original main workspace may inspect its leased source-workspace writer.
+  // Legacy source-workspace contracts omit workspace IDs on both sides.
   sourceWorkspaceWriterPathsForAdvisor(c: Contract): string[] {
-    if (c.role !== "advisor" || c.mutation || c.workspace) return [];
+    if (c.role !== "advisor" || c.mutation) return [];
     const key = `${c.workflowId}/${c.taskId}/${c.role}`;
     const paths: string[] = [];
     for (const peer of this.ownership(c)) {
@@ -740,10 +741,16 @@ export class Store {
       )
         continue;
       const other: Contract = JSON.parse(peer.contract_json);
+      const legacyPlacement = !c.workspace && !other.workspace;
+      const sourcePlacement =
+        c.workspace &&
+        other.workspace &&
+        c.workspace.mainAgentId === other.workspace.mainAgentId &&
+        samePath(other.workspace.directory, other.worktree);
       if (
         !other.mutation ||
         !other.role.startsWith("implement-") ||
-        other.workspace ||
+        (!legacyPlacement && !sourcePlacement) ||
         other.workflowId !== c.workflowId ||
         !samePath(other.repository, c.repository) ||
         other.baseCommit !== c.baseCommit ||

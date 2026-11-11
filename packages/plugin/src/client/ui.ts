@@ -176,6 +176,9 @@ export declare const SidebarSeparator: ComponentType;
 /** Paseo's loading state. Fills the panel; the panel decides when to show it. */
 export declare const Loading: ComponentType;
 
+/** Active children of an agent, using the host's own subagent selection and navigation. */
+export declare const ActiveSubagents: ComponentType<{ agentId: string }>;
+
 /** Render a local document URL in an isolated frame. */
 export declare const DocumentFrame: ComponentType<{ url: string; testID?: string }>;
 

@@ -22,9 +22,10 @@ import {
   pauseDispatch,
   testDecisions,
   roles,
+  routingCategories,
   type ControllerConfig,
   type DecisionSettings,
-  type Role,
+  type RoutingCategory,
   type Route,
   type SettingsView,
 } from "../shared/settings";
@@ -49,14 +50,16 @@ const tabs: { value: Tab; label: string }[] = [
   { value: "decisions", label: "Decisions" },
   { value: "keys", label: "Keys & Budgets" },
 ];
-const roleLabels: Record<Role, string> = {
+const roleLabels: Record<RoutingCategory, string> = {
   planner: "Planung",
   advisor: "Beratung",
   "implement-simple": "Kleine Implementierung",
   "implement-normal": "Normale Implementierung",
   "implement-complex": "Komplexe Implementierung",
   reviewer: "Unabhängiges Review",
+  ui: "UI-Implementierung",
 };
+const routingOptions = routingCategories.map((value) => ({ value, label: roleLabels[value] }));
 const scopeLabels: Record<string, string> = {
   public: "Öffentlich",
   personal: "Privat",
@@ -99,7 +102,7 @@ export function OrchestratorSettings({
   const draftRef = useRef<ControllerConfig | undefined>(undefined);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState("");
-  const [role, setRole] = useState<Role>("planner");
+  const [role, setRole] = useState<RoutingCategory>("planner");
   const [routeId, setRouteId] = useState("");
   const [newProfileId, setNewProfileId] = useState("");
   const [generation, setGeneration] = useState(0);
@@ -250,11 +253,12 @@ export function OrchestratorSettings({
     change((c) => ({
       ...c,
       roleRoutes: {
+        ...c.roleRoutes,
         ...(Object.fromEntries(roles.map((r) => [r, c.roleRoutes?.[r] ?? []])) as Record<
-          Role,
+          Exclude<RoutingCategory, "ui">,
           string[]
         >),
-        [role]: ids,
+        [role]: role === "ui" && !ids.length ? undefined : ids,
       },
     }));
   const provider = catalog.data?.providers.find((p) => p.provider === route?.provider);
@@ -423,16 +427,22 @@ export function OrchestratorSettings({
             </SettingsCard>
           </SettingsSection>
           <SettingsSection
-            title="Reihenfolge je Rolle"
+            title="Reihenfolge je Rolle & Arbeitsart"
             info="Die erste Route ist primär; weitere werden in dieser Reihenfolge als Fallback verwendet."
           >
             <SettingsCard>
-              <SettingsSelect<Role>
-                label="Rolle"
+              <SettingsSelect<RoutingCategory>
+                label="Rolle oder Arbeitsart"
                 value={role}
-                options={roles.map((value) => ({ value, label: roleLabels[value] }))}
+                options={routingOptions}
                 onValueChange={setRole}
               />
+              {role === "ui" && (
+                <SettingsRow
+                  label={preference.length ? "Eigene UI-Reihenfolge" : "Standardrouting aktiv"}
+                  hint="Gilt für Pakete mit UI-Änderungen. Ohne Zuordnung gilt die Reihenfolge der Implementierungsklasse. Mit Zuordnung werden nur diese Routen verwendet; ist keine geeignet, wartet der Controller. Qualitätsstufe, Datenfreigaben und Budget gelten weiterhin."
+                />
+              )}
               {preference.map((id, index) => (
                 <View key={id}>
                   {info(

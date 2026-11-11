@@ -856,6 +856,12 @@ function hideAlerts() {
 
 ## Host UI
 
+In an agent or workspace panel, `ActiveSubagents` from `@getpaseo/plugin/client/ui`
+accepts `agentId` and renders the active direct children from the same host selection as
+the composer track. Rows open their corresponding agent or provider conversation. It requires
+a matching app renderer that exports this component; the introducing release has not yet been
+assigned. Package and deploy the renderer with plugins that use this unreleased API.
+
 Import Paseo-owned UI from `@getpaseo/plugin/client/ui` in client code. This example
 opens a controlled modal, renders a host icon, and confirms the action with a toast:
 

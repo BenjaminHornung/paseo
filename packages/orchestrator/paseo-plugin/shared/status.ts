@@ -149,6 +149,8 @@ export const phaseLabel: Record<string, string> = {
   COMPLETE: "Verifiziert abgeschlossen",
 };
 export const reasonLabel: Record<string, string> = {
+  "ui-no-safe-and-funded-candidate":
+    "Keine freigegebene UI-Route verfügbar. Prüfe die UI-Prioritäten, Datenfreigaben und das Budget in den Einstellungen.",
   "transport-unknown":
     "Provider antwortet nicht; der Ausgang ist unklar. Bestehenden Worker vor einem Neustart prüfen.",
   "quota-5h": "Provider-Limit für das aktuelle Zeitfenster erreicht.",

@@ -43,6 +43,7 @@ test("provider creates a child through its pinned workspace with explicit isolat
   });
   const provider = new PaseoProvider("ws://127.0.0.1:6767/ws");
   let options: Record<string, unknown> | undefined;
+  let childCreates = 0;
   let placementDirectory = root;
   Object.assign(provider, {
     client: {
@@ -53,6 +54,7 @@ test("provider creates a child through its pinned workspace with explicit isolat
             refresh: async () => ({ workspaceDirectory: placementDirectory }),
             agents: {
               create: async (value: Record<string, unknown>) => {
+                childCreates++;
                 options = value;
                 return { id: "child" };
               },
@@ -68,14 +70,22 @@ test("provider creates a child through its pinned workspace with explicit isolat
     },
   });
   assert.equal(await provider.create(route, contract, "workflow/task/1"), "child");
+  assert.equal(childCreates, 1);
   assert.equal(options!.parent, "main");
   assert.equal("cwd" in options!, false);
+  assert.deepEqual(
+    (options!.config as { options: { sandbox_workspace_write: { writable_roots: string[] } } })
+      .options.sandbox_workspace_write.writable_roots,
+    [root],
+    "the worker can write only in the pinned source directory",
+  );
   assert.ok(String(options!.prompt).includes(`SOURCE AND COMMAND DIRECTORY is ${root}`));
   assert.ok(taskPrompt(contract).includes("Modify only allowedPaths"));
   placementDirectory = canonicalPath(path.dirname(root));
   options = undefined;
   await assert.rejects(provider.create(route, contract, "workflow/task/2"), /workspace changed/);
   assert.equal(options, undefined);
+  assert.equal(childCreates, 1, "workspace drift must not start another worker");
   placementDirectory = root;
   Object.assign(provider, {
     client: {

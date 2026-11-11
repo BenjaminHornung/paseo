@@ -41,6 +41,22 @@ task revision after the predecessor settles. Missing capabilities remain explici
 Reviewer preference is preserved; unsupported completion boundaries are audited before
 falling back to the next eligible saved route.
 
+Under **Rollen & Modelle → Reihenfolge je Rolle & Arbeitsart → UI-Implementierung**,
+choose existing routes and order their priority, including routes created from Advanced
+profiles. The optional `roleRoutes.ui` list applies to mutating implementation packages
+whose assessed execution facts have `uiChanged: true`, regardless of their
+`implement-simple`, `implement-normal` or `implement-complex` role. It does not change
+complexity, tier, capability, repository/data approvals, budgets, writer coordination,
+review or visual acceptance requirements. No provider is selected automatically.
+
+Absent UI preferences preserve ordinary role routing; removing all UI assignments restores
+that behavior. Once configured, only the saved UI candidates are considered, in order,
+including for compatible session reuse. Ineligible earlier candidates are recorded in
+the routing detail (`category: "ui"`); if all are unsuitable, the controller waits with
+`ui-no-safe-and-funded-candidate` and reports their skip reasons instead of silently
+using the generic implementation list. Settings updates apply to newly admitted tasks;
+existing tasks retain their pinned configuration.
+
 Existing focused checks run with `npm test` and `npm run typecheck` in this workspace.
 Root lint keeps every rule active. Its exact diagnostic baseline records reviewed source
 debt from this imported controller without ignoring the directory or accepting additional

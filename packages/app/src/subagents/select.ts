@@ -49,6 +49,8 @@ type ProviderSubagentStoreSnapshot = ReturnType<typeof useProviderSubagentStore.
 interface SelectSubagentsParams {
   serverId: string;
   parentAgentId: string;
+  /** A caller that owns refresh status can perform the refresh itself. */
+  refresh?: boolean;
   /** Select children of this provider subagent instead of children of the managed agent. */
   providerParentSubagentId?: string;
 }
@@ -194,11 +196,11 @@ export function useSubagentsForParent(params: SelectSubagentsParams): SubagentRo
   const client = useSessionStore((state) => state.sessions[params.serverId]?.client ?? null);
 
   useEffect(() => {
-    if (!client || !supported) return;
+    if (!client || !supported || params.refresh === false) return;
     void refreshProviderSubagents(client, params.serverId, params.parentAgentId).catch(
       () => undefined,
     );
-  }, [client, params.parentAgentId, params.serverId, supported]);
+  }, [client, params.parentAgentId, params.serverId, params.refresh, supported]);
 
   return useMemo(() => {
     if (params.providerParentSubagentId) return providerRows;

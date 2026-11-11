@@ -4,7 +4,9 @@
   "dispositions": {
     "style": "Exact complexity, nesting, local shadow names and existing React allocation diagnostics are retained without a behavioral rewrite of the imported controller.",
     "nodeWorkerMessages": "Four targetOrigin diagnostics concern Node worker_threads postMessage, which has no browser targetOrigin argument.",
-    "auditAnswerOrder": "One index key displays immutable stateless audit answer rows whose refusal names can be null; no mutable row state is keyed by the index."
+    "auditAnswerOrder": "One index key displays immutable stateless audit answer rows whose refusal names can be null; no mutable row state is keyed by the index.",
+    "uiRouting": "The existing large settings and plan functions retain their established layers. Reviewed UI-category branches raise their complexity from 87 to 89 and 37 to 48 respectively; exact fingerprints are renewed only for those two functions. Routing safety filters remain shared and unchanged.",
+    "sidebarIntegration": "Reconstructed sidebar retains the existing inline-style pattern and decreases total diagnostics from 71 to 46; exact fingerprints renewed, no new rule categories or allowances. Intake/scope preflight increases the existing settingsOperation complexity from 218 to 222; authorization gates are unchanged."
   },
   "entries": [
     {
@@ -668,8 +670,8 @@
     {
       "file": "packages/orchestrator/paseo-plugin/client/settings.tsx",
       "rule": "eslint(complexity)",
-      "message": "function `OrchestratorSettings` has a complexity of 87. Maximum allowed is 20.",
-      "sourceSha256": "40bacfdd720a5adcc9da983e313a0ba0da752f7e6b81ca6682a2b48e49c56c18",
+      "message": "function `OrchestratorSettings` has a complexity of 89. Maximum allowed is 20.",
+      "sourceSha256": "8af9dc2d7705ab0dc5b1a75e9a1ba35880aff131d5eb22530b0216a92f5d8503",
       "count": 1
     },
     {
@@ -741,426 +743,6 @@
       "message": "'route' is already declared in the upper scope.",
       "sourceSha256": "06ade2739bbfa9acaf00616a6e8146a6bf3ef40f546d4f4685f883fbffdc8410",
       "count": 3
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
-      "message": "JSX attribute values should not contain functions created in the same scope.",
-      "sourceSha256": "2665db3850544e9955b31a4603a508daa2b36f45538208d5be930d1060948307",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
-      "message": "JSX attribute values should not contain functions created in the same scope.",
-      "sourceSha256": "29532ca9102a743cf1b9db81b922aa119be21a9d284e9301cc82aa1115f26492",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
-      "message": "JSX attribute values should not contain functions created in the same scope.",
-      "sourceSha256": "4bdf79bd0d788f0ffa7846e54df03bf5028ee643729c76302ed5ba45930e201f",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
-      "message": "JSX attribute values should not contain functions created in the same scope.",
-      "sourceSha256": "6340acbb4a763a91ea8adf6e3f4818e47d6f90a823ccdfdcbcf3e49f0a1997f8",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
-      "message": "JSX attribute values should not contain functions created in the same scope.",
-      "sourceSha256": "8522469146a929afa7e7dcb75f2df4d915f7de34563fa1865c03cbe440993e1d",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
-      "message": "JSX attribute values should not contain functions created in the same scope.",
-      "sourceSha256": "930b1e843e6b3439ab20728a9bd1ca646e2998ec8901d0149815394a1773df3f",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
-      "message": "JSX attribute values should not contain functions created in the same scope.",
-      "sourceSha256": "958a151c61acaa98495eeda17a26162c16cf329c89ff9c034cbc87b13eb2eb04",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
-      "message": "JSX attribute values should not contain functions created in the same scope.",
-      "sourceSha256": "b52f60f1b1ec8e2fb4e50f9af589b52e7624131ac17a4747ee175050774653d5",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
-      "message": "JSX attribute values should not contain functions created in the same scope.",
-      "sourceSha256": "c9e9ff3d73b84f8d16428b97c99e70b5eabf5f188be50f753b7a61a6902b8ed7",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
-      "message": "JSX attribute values should not contain functions created in the same scope.",
-      "sourceSha256": "cd938dce16bacf0976952dab48885b2c484b8e37be6446ac82ec4fcd444908e2",
-      "count": 2
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "024e2f89ef572cf009aed783a4938671fe092eb77f663346c0d61c63042188ac",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "0676418e82f414d289bb3202958c023961e9123d19942c4de704d55b6de50221",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "153731e0fc9906f956816e775e64033b9010e83a0b072fbc82a838a0b905c8bc",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "1a36863fc7c4dd1fe650173ae5c507e5ec9a45f1d07bcd9b7465a97c98b1de63",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "1b1000a9aecaf3d44b0a667728667cb9e8e624e696fa16ba1957f005f607fac8",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "22cc00dfaee681fd9b77ec85264fc5eef1abe875ebdf396d6af8a1b91bbe2c6e",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "23937d9e2f01c6c5d6cfde270e63c3a693ff9df3acb9c64387a4d4962fb02d5d",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "29300f00693bc5d29d74ee58f317d5b53a69dc38ab43fa838a1638aefea95f1d",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "45407c99a5dc11634647c1ec226f84b6a71204e8c48e52e62475655337347a9a",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "4c2e16233b4f1de8378c3f30d5699b8182293c54849bbc8fbf16389ba5d71574",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "4f186e7b07029635b2470a4dc72c74344f57f284464dd42a22ed088b0fdaab45",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "50a520b696ad3f9fd724efab1215ffcd52c3fbeebcca36c34cceaa78c25f572b",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "534bcf507b0a540c5f7776b7c71a1502662cf85bf1e479bb671bf28379b75ef7",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "5429035a1cadc0fa9f019ec99b991becd40551adad2c35af25be4273e01da42d",
-      "count": 4
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "56f9aa0bde43d7e65e836bd2306ad3d4442d6c5ec201826deb9846762f2ae29b",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "5c0302bed5056d62ed5b0a3478573cfdd47d34ba5117fcdd2cd7a679ae2c3a2e",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "5c895a635c3515d28bbb5f94b31a82d787ed0d1305ca00a736715e97f8b7425d",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "601be59dd5d6decfbdfadf2c0df1cbe0493f424902d27edceaf76c65be1726e2",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "6716501ec22eb443a48b4ca9b0c081a67f62cc9996a4da95cd85cc63b4673033",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "6c8763c690ed6c86afa7cf12710cc913e9caf95e0004e1afddece9fab90507f6",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "715f138e422f48da5eb1618ca4485de10c674da8b6f496237b1accee413ef933",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "7bbe1ec447a2e53abfe77c6bf4b414215898b3769b2318daeedd9081a305b350",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "8677dc088177b8c273723d95aed99304da5fa52f5fff590aafe8438bac86bec7",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "8a5e637cf5990e1177580ea864c18aacaee8420ab11535a56a6bbdfae2441f66",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "9ebffaa016a39402e1bf84d9bcb2f9ad7f5a2ff850a23dead940e625e944d91a",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "b43a6333f243b03e68e04816618ee0532c328196f300dca6d4d44117e8f1f206",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "b737fa13ca4e84d805b599c39c41886f007d8542b4c7eb9b64be96b070ef8e69",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "c1cb4c80eb151fd90d0a5666ec9ae8f3f6726b1824632c0c5e43d103a3e7b9e0",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "caae6289862e547fa11b998c1866c0c0bf3e77115185c4891ec66fd8c8c323ba",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "cd62b10ebc2e9f2b42f5fcd6f5539e149dd6f8284af8e0e1150cc01cd05968dd",
-      "count": 2
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "d46ce4c3b5ba6e68cef314881ab9113228179145394722f0b4b54e4d19c79aa0",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "da1a270a58e485675afd8d64a3095a800113c2e8b5d0493f01815e3658363401",
-      "count": 6
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "e0edbf69b289d7917a9659e5c741c3f9eb73a777bde46319a5cd4eb899db0728",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "eb68f3f0d3559338c02ebf9152cdf4240a8b5e35e07af8ee6ca299eca8bbab39",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
-      "message": "JSX attribute values should not contain objects created in the same scope.",
-      "sourceSha256": "fdebd9843a054fec171472fe54a2927744f80a59735c9dd38b4b15468d5a44b3",
-      "count": 2
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(complexity)",
-      "message": "function `StatusBody` has a complexity of 147. Maximum allowed is 20.",
-      "sourceSha256": "3776d88ba0c6a291db417eaa5de286e1c75f852b07228701d292c403ab33446d",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "02eb3ad17ed4bdacfeac98c9d30cf2c5a079e114bd4ce0356ec8bb449062c164",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "0d0fc37c4daf88cedca9cbdceb33bbdddb66e306256a34ec04a8642463563232",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "1de52da764aab252d9b0326dabbe967801e8f7e62ab5ddd1f2f96169c13ece3d",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "2e16211f692736e0e73d3f0f5e1323571b72abfe442bab627bb2981bc6ffc74e",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "44a05e475b284237f4da4049234ee29fc711142ea2055970573cab96b0c28295",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "844a5fe2acc8b97f8a89d481c2e40c32e18f7fd0ffb3e58670fc6af8657c9ffd",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "9348b47bc6d8cf5e66112d3d34ece7d649b6b3ab20f35628a59c703c04dafc77",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "96e738e613194172535a1d7f461d0d283cbc556a49326ef8e82b1cb687ad7299",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "a0c01189a243aaef5519dfe4e6f006f8d156f8088c76f38e3fd7d015167b177a",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "c79a83a3f5f441b7381596e783e6d857bfd680635ee5f87e4a3ddba66d0075d9",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "cc24df529a4499a4e6ed5f385b8b4d9d8311614b1392a656f19565e60c5c9e23",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "de633874f2d6563398d13f02cb21f6ecb7f217037ca02d40e548b1d5fc16c0e1",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "df7010c950eb2d7cd9e1724b8d7e0ed3f99b7eac14515e5abab3ba954a1db73c",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
-      "rule": "eslint(no-nested-ternary)",
-      "message": "Do not nest ternary expressions.",
-      "sourceSha256": "f728bca6d6e3ce6e0cd7dd350879057ba6ed864b6bec775d3736d653430b0ba6",
-      "count": 1
     },
     {
       "file": "packages/orchestrator/paseo-plugin/index.client.tsx",
@@ -1543,8 +1125,8 @@
     {
       "file": "packages/orchestrator/src/engine.ts",
       "rule": "eslint(complexity)",
-      "message": "async method `plan` has a complexity of 37. Maximum allowed is 20.",
-      "sourceSha256": "7960ea59137ebe073322b5344afc099077f8a6c43d8ed0423b546320b4091ee8",
+      "message": "async method `plan` has a complexity of 48. Maximum allowed is 20.",
+      "sourceSha256": "3fdb04ba2bdf7c7dfbdcab348361aff36f2b5e4a34ec432fb9c44a675fe6ab85",
       "count": 1
     },
     {
@@ -1795,8 +1377,8 @@
     {
       "file": "packages/orchestrator/src/settings.ts",
       "rule": "eslint(complexity)",
-      "message": "async function `settingsOperation` has a complexity of 218. Maximum allowed is 20.",
-      "sourceSha256": "987b503b856996197a5552bc42ad513176091887dab9ebd4dbdb7b52899c308c",
+      "message": "async function `settingsOperation` has a complexity of 222. Maximum allowed is 20.",
+      "sourceSha256": "2e479f9b100f99533157eac9f8d0a93514ef20088e2195557242393db43d0503",
       "count": 1
     },
     {
@@ -2049,6 +1631,223 @@
       "rule": "eslint(no-nested-ternary)",
       "message": "Do not nest ternary expressions.",
       "sourceSha256": "c629ff6009c2749b7d2786807bc39244d49576f9c16df999f761416decf3ffd1",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint(complexity)",
+      "message": "function `StatusBody` has a complexity of 68. Maximum allowed is 20.",
+      "sourceSha256": "f718844ac9aa7630cfb3af20974d3179147ca13874dcf686a0445c395fc468b1",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint(no-nested-ternary)",
+      "message": "Do not nest ternary expressions.",
+      "sourceSha256": "a0c01189a243aaef5519dfe4e6f006f8d156f8088c76f38e3fd7d015167b177a",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint(no-nested-ternary)",
+      "message": "Do not nest ternary expressions.",
+      "sourceSha256": "96e738e613194172535a1d7f461d0d283cbc556a49326ef8e82b1cb687ad7299",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint(no-nested-ternary)",
+      "message": "Do not nest ternary expressions.",
+      "sourceSha256": "f728bca6d6e3ce6e0cd7dd350879057ba6ed864b6bec775d3736d653430b0ba6",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint(no-nested-ternary)",
+      "message": "Do not nest ternary expressions.",
+      "sourceSha256": "9348b47bc6d8cf5e66112d3d34ece7d649b6b3ab20f35628a59c703c04dafc77",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint(no-nested-ternary)",
+      "message": "Do not nest ternary expressions.",
+      "sourceSha256": "844a5fe2acc8b97f8a89d481c2e40c32e18f7fd0ffb3e58670fc6af8657c9ffd",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint(no-nested-ternary)",
+      "message": "Do not nest ternary expressions.",
+      "sourceSha256": "df7010c950eb2d7cd9e1724b8d7e0ed3f99b7eac14515e5abab3ba954a1db73c",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
+      "message": "JSX attribute values should not contain functions created in the same scope.",
+      "sourceSha256": "b3bd34a1be791fba2d9e3ca16b073041ac15623e0f6ca9d2950f150a598bb931",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
+      "message": "JSX attribute values should not contain functions created in the same scope.",
+      "sourceSha256": "4bdf79bd0d788f0ffa7846e54df03bf5028ee643729c76302ed5ba45930e201f",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
+      "message": "JSX attribute values should not contain functions created in the same scope.",
+      "sourceSha256": "2665db3850544e9955b31a4603a508daa2b36f45538208d5be930d1060948307",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-function-as-prop)",
+      "message": "JSX attribute values should not contain functions created in the same scope.",
+      "sourceSha256": "7b2b01c880fd9c755a9a703f39260286f56fe37f20abcf34ac9c709677c9773b",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "9ebffaa016a39402e1bf84d9bcb2f9ad7f5a2ff850a23dead940e625e944d91a",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "56f9aa0bde43d7e65e836bd2306ad3d4442d6c5ec201826deb9846762f2ae29b",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "e1955c7b519cd7a6242412a2eea199b31580ef25e3480328b55fe99d59434637",
+      "count": 2
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "79b84821ced3193f121a4acb33aeff37fb13b7f6222fd4ec9ca78491c8d96a16",
+      "count": 2
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "50a520b696ad3f9fd724efab1215ffcd52c3fbeebcca36c34cceaa78c25f572b",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "715f138e422f48da5eb1618ca4485de10c674da8b6f496237b1accee413ef933",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "7cdd37591604bb57eabe427de7bc15affd66aea5f1c4d2e46878f51d6eee9ebf",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "5429035a1cadc0fa9f019ec99b991becd40551adad2c35af25be4273e01da42d",
+      "count": 7
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "cd62b10ebc2e9f2b42f5fcd6f5539e149dd6f8284af8e0e1150cc01cd05968dd",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "fdebd9843a054fec171472fe54a2927744f80a59735c9dd38b4b15468d5a44b3",
+      "count": 2
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "27547c82d89c42fa9190b78efd19234e5af6210d4de70c66fef109d658d372b9",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "cfc1b494847f766a54b0debfff03f7a8791eec9e7f871a5ddcede2bcbb8d1347",
+      "count": 2
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "8558ea7f018963f278d455665fafb5cf3c395703842e1711149007ccca0a3aca",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "4a7b0576f14df48643724d2a31be33893813894fc7d3221a224f6761d6b7cd66",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "512ecf487547086e59b8a1b43e84f17a882b64e70584627c61120b554bba008f",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "c1cb4c80eb151fd90d0a5666ec9ae8f3f6726b1824632c0c5e43d103a3e7b9e0",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "5c0302bed5056d62ed5b0a3478573cfdd47d34ba5117fcdd2cd7a679ae2c3a2e",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "da1a270a58e485675afd8d64a3095a800113c2e8b5d0493f01815e3658363401",
+      "count": 6
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "534bcf507b0a540c5f7776b7c71a1502662cf85bf1e479bb671bf28379b75ef7",
+      "count": 1
+    },
+    {
+      "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
+      "rule": "eslint-plugin-react-perf(jsx-no-new-object-as-prop)",
+      "message": "JSX attribute values should not contain objects created in the same scope.",
+      "sourceSha256": "601be59dd5d6decfbdfadf2c0df1cbe0493f424902d27edceaf76c65be1726e2",
       "count": 1
     }
   ]

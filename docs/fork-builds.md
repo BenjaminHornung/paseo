@@ -1,5 +1,11 @@
 # Paseo Advanced Windows builds
 
+The active-subagent sidebar requires the matching Advanced renderer, plugin UI API and
+Orchestrator plugin from the same full Windows package. Do not install this plugin or
+controller build as a standalone overlay on an earlier renderer. Build metadata records
+the required public `ActiveSubagents` UI export. An older renderer shows an upgrade
+message instead of a fabricated empty subagent list.
+
 The `Paseo Advanced Windows artifacts` workflow builds unsigned Windows x64 downloads in
 `BenjaminHornung/paseo` by manual dispatch on the desired branch.
 It uses the committed npm lockfile and upstream's desktop build and packaged-app
@@ -74,6 +80,33 @@ The `fork-windows-smoke-<commit>` artifact contains isolated packaged-runtime ev
 Package smoke does not establish acceptance against the user's running controller.
 
 ## Permanent automation acceptance
+
+### Existing main and isolated source workspace
+
+An existing main may keep its non-Git umbrella directory. Use `orchestrator_worktree`
+with the actual repository inside that directory, then pass the exact returned
+worktree to `orchestrator_register_task`. No `workspace` ID or private
+`workerPlacement` setting is required. An already-created worktree from the same
+main is accepted when it still matches that operation's main-bound path, feature
+branch, Git repository and contracted base. An unrelated checkout or a different
+worktree path is rejected before opening a worker workspace.
+
+For a separate writable worktree, registration opens/reuses the public source
+workspace and pins its verified identity in the task contract. The worker's
+actual provider cwd and write root are that isolated source directory. The main
+retains its original workspace, cwd, native session and history. Parentage is
+preserved: the worker remains in the main's Subagents track and is also opened
+as a tab in its own source workspace, following the existing
+[cross-workspace lifecycle](agent-lifecycle.md). Read-only/main-workspace placement
+and the existing checks for later workspace drift are unchanged.
+
+This path preserves input authorization, data scopes, routing/budget checks,
+isolation, leases, process observations, checks and review. It is not permission
+to edit a worktree outside the registered main's repository scope. Source checks
+with SDK stubs do not establish installed-runtime or full COMPLETE acceptance.
+The controller/plugin repair metadata includes the installed `8cde2ffce` controller
+input as a compatible base. Deploying that matching code remains a separate
+reviewed package-integration step; no private automation-state edit is needed.
 
 An installer or composer receipt alone is not proof of autonomous orchestration.
 The compatible controller/plugin must use the new daemon's actual public background-work
