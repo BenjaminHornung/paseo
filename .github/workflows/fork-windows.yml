@@ -1,8 +1,7 @@
 name: Paseo Advanced Windows artifacts
 
 on:
-  push:
-    branches: [main, "feature/**"]
+  # Packaging is intentional: ordinary pushes and PR updates must not rebuild it.
   workflow_dispatch:
 
 permissions:

@@ -1,9 +1,29 @@
 # Paseo Advanced Windows builds
 
 The `Paseo Advanced Windows artifacts` workflow builds unsigned Windows x64 downloads in
-`BenjaminHornung/paseo` on pushes to `main` and `feature/**`, or manual dispatch.
+`BenjaminHornung/paseo` by manual dispatch on the desired branch.
 It uses the committed npm lockfile and upstream's desktop build and packaged-app
-smoke. Other upstream platform and release workflows remain intact.
+smoke. Ordinary pushes and PR updates do not start a package build.
+
+## Fork CI usage
+
+Only `fork-windows.yml` is enabled in this fork's repository Actions settings.
+The twelve inherited upstream workflows are disabled there, including the broad
+PR test matrix, Linux packaging, deployment, Docker and release workflows. Their
+source files remain intact for upstream merges and deliberate future use.
+The last observed upstream PR run used 21 jobs plus a separate Linux package job;
+the Advanced workflow uses one Windows x64 job with its existing checks and smoke.
+
+Start a complete verified package only when a new download is needed:
+
+```powershell
+gh workflow run fork-windows.yml --repo BenjaminHornung/paseo --ref feature/orchestrator-composer-windows-ci
+```
+
+Concurrent runs on the same branch cancel the superseded run. Dependency caching,
+14-day artifact retention and all package acceptance checks are retained.
+When re-enabling fork Actions, verify that only the Advanced workflow is active;
+do not enable the inherited workflows together unless their jobs are needed.
 
 ## Download and update
 
