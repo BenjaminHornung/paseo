@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import {
+  claudeSubscriptionAccess,
+  isClaudeProvider,
+  isClaudeSubscription,
+} from "../paseo-plugin/shared/providers.ts";
 import { reviewFindingsSchema } from "../paseo-plugin/shared/continuation.ts";
 export {
   reviewFindingsSchema,
@@ -71,6 +76,7 @@ export const contractSchema = z
     mutation: z.boolean(),
     highRisk: z.boolean(),
     uiChanged: z.boolean(),
+    workKind: z.enum(["ui", "general"]).optional(),
     ownerApproved: z.boolean().default(false),
     estimatedMicroUsd: microUsd.default(0),
     implementationAgentId: z.string().min(1).optional(),
@@ -116,8 +122,14 @@ export const routeSchema = z
   .strictObject({
     id: identifier,
     name: z.string().trim().min(1).max(120).optional(),
-    access: z.enum(["codex-pro200", "claude-company-pro", "opencode-go", "openai-api"]),
-    provider: z.enum(["codex", "claude", "pi"]),
+    access: z.enum([
+      "codex-pro200",
+      "claude-company-pro",
+      "claude-personal-pro",
+      "opencode-go",
+      "openai-api",
+    ]),
+    provider: z.enum(["codex", "claude", "claude-private", "pi"]),
     model: z.string().min(1),
     revision: z.string().min(1),
     reasoning: z.enum(["", "off", "low", "medium", "high", "xhigh", "max", "ultracode"]),
@@ -144,22 +156,25 @@ export const routeSchema = z
     maxTaskMicroUsd: microUsd.min(10000).optional(),
   })
   .superRefine((r, ctx) => {
-    if ((r.provider === "claude") !== (r.access === "claude-company-pro"))
+    const expectedAccess = isClaudeProvider(r.provider)
+      ? claudeSubscriptionAccess[r.provider]
+      : undefined;
+    if (
+      (expectedAccess !== undefined && r.access !== expectedAccess) ||
+      (expectedAccess === undefined && isClaudeSubscription(r.access))
+    )
       ctx.addIssue({
         code: "custom",
-        message: "Claude requires its separate company subscription route",
+        message: "Claude provider requires its matching separate subscription route",
       });
-    if (
-      r.access === "claude-company-pro" &&
-      (r.bucket || (r.enabled && !r.repositoryRoots?.length))
-    )
+    if (isClaudeSubscription(r.access) && (r.bucket || (r.enabled && !r.repositoryRoots?.length)))
       ctx.addIssue({
         code: "custom",
         message: "Claude requires explicit repository roots without an API bucket",
       });
     if (r.access === "openai-api" && r.enabled && !r.repositoryRoots?.length)
       ctx.addIssue({ code: "custom", message: "API routes require explicit repository roots" });
-    if (r.provider !== "claude" && ["", "off", "ultracode"].includes(r.reasoning))
+    if (!isClaudeProvider(r.provider) && ["", "off", "ultracode"].includes(r.reasoning))
       ctx.addIssue({
         code: "custom",
         message: "Reasoning option requires a matching Claude catalog model",
@@ -208,7 +223,8 @@ export function apiTaskReservation(
 export function routeAllowsPath(route: RuntimeRoute, cwd: string): boolean {
   if (
     !route.repositoryRoots?.length &&
-    !["claude-company-pro", "openai-api"].includes(route.access) &&
+    !isClaudeSubscription(route.access) &&
+    route.access !== "openai-api" &&
     !(route.access === "opencode-go" && route.dataScopes.includes("company"))
   )
     return true;

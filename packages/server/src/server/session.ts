@@ -8673,7 +8673,10 @@ export class Session {
     msg: Extract<SessionInboundMessage, { type: "agent.background_work.refresh.request" }>,
   ): Promise<void> {
     try {
-      const observation = await this.agentManager.refreshAgentBackgroundWork(msg.agentId);
+      const observation = await this.agentManager.refreshAgentBackgroundWork(
+        msg.agentId,
+        msg.claudeBackgroundTasks,
+      );
       this.emit({
         type: "agent.background_work.refresh.response",
         payload: { requestId: msg.requestId, agentId: msg.agentId, observation, error: null },

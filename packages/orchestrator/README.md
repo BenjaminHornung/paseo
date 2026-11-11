@@ -44,10 +44,17 @@ falling back to the next eligible saved route.
 Under **Rollen & Modelle → Reihenfolge je Rolle & Arbeitsart → UI-Implementierung**,
 choose existing routes and order their priority, including routes created from Advanced
 profiles. The optional `roleRoutes.ui` list applies to mutating implementation packages
-whose assessed execution facts have `uiChanged: true`, regardless of their
+whose bound Decisions result has `workKind: "ui"` or whose assessed execution facts
+have `uiChanged: true`, regardless of their
 `implement-simple`, `implement-normal` or `implement-complex` role. It does not change
 complexity, tier, capability, repository/data approvals, budgets, writer coordination,
-review or visual acceptance requirements. No provider is selected automatically.
+review or visual acceptance requirements. Existing scope approvals remain mandatory.
+
+Company `claude` and private `claude-private` routes can be saved in the same ordered
+list. They retain separate subscription access and circuits; private routes require a
+distinct effective native configuration directory, including inherited launcher
+environment. Existing data/repository, tier, funding and capability gates still apply.
+Saving a preference does not add data or repository approvals.
 
 Absent UI preferences preserve ordinary role routing; removing all UI assignments restores
 that behavior. Once configured, only the saved UI candidates are considered, in order,
@@ -56,6 +63,10 @@ the routing detail (`category: "ui"`); if all are unsuitable, the controller wai
 `ui-no-safe-and-funded-candidate` and reports their skip reasons instead of silently
 using the generic implementation list. Settings updates apply to newly admitted tasks;
 existing tasks retain their pinned configuration.
+
+Older saved decisions without `workKind` remain legacy evidence; replay does not turn
+them into a new UI classification. Existing configurations remain compatible. UI work
+retains its required visual acceptance independently of implementation complexity.
 
 Existing focused checks run with `npm test` and `npm run typecheck` in this workspace.
 Root lint keeps every rule active. Its exact diagnostic baseline records reviewed source

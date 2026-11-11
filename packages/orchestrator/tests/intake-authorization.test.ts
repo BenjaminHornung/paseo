@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { editAutomation, readAutomation, taskDispatchAllowed } from "../src/automation.ts";
 import {
   intakeIdentity,
   packageIdentity,
+  packageFactsSchema,
   type Assessment,
   type Classifier,
   type IntakeFacts,
@@ -26,6 +27,8 @@ import {
   canonicalPath,
   configSchema,
   contractSchema,
+  defaultDecisionSettings,
+  routeSchema,
   hash,
   type Config,
   type Contract,
@@ -36,6 +39,126 @@ import { readConfig } from "../src/settings-files.ts";
 import { Store } from "../src/store.ts";
 import { CredentialVault } from "../src/secrets.ts";
 import { decisionHistory } from "../src/decision-history.ts";
+import { Decisions } from "../src/decisions.ts";
+import { createProfileRoute } from "../paseo-plugin/shared/routes.ts";
+import { syncProfiles } from "../src/profiles.ts";
+
+// The model's UI answer must survive parsing without a second paid call; low
+// confidence and cached old answers must not be presented as new UI evidence.
+test("package Decisions records UI independently and preserves optional uncertainty and legacy cache", async () => {
+  const store = new Store(":memory:");
+  try {
+    const config = configSchema.parse({
+      ...JSON.parse(readFileSync("config/controller.local.example.json", "utf8")),
+      budgets: { decisions: 1000000, implementation: 0, "premium-api": 0, emergency: 0 },
+      decisions: {
+        ...defaultDecisionSettings(),
+        enabled: true,
+        fundsConfirmed: true,
+        monthlyBudgetMicroUsd: 1000000,
+        validUntil: "2099-01-01T00:00:00Z",
+        dataScopes: ["public"],
+      },
+    });
+    let calls = 0,
+      workConfidence = 0.95;
+    const classifier = new Decisions(store, {
+      credential: () => "synthetic-unit-credential",
+      credentialRevision: () => "fixture",
+      fetcher: async (_url, init) => {
+        calls++;
+        const request = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            model: "gpt-6-luna",
+            answers: request.questions.map(
+              (question: { name: string; choices: { value: string | boolean }[] }) => {
+                let choice: string | boolean = false;
+                if (question.name === "workKind") choice = "ui";
+                else if (question.name === "complexity") choice = "normal";
+                const confidence = question.name === "workKind" ? workConfidence : 0.95;
+                return {
+                  type: "choice",
+                  name: question.name,
+                  choice,
+                  confidence,
+                  probabilities: question.choices.map((option) => ({
+                    value: option.value,
+                    probability:
+                      option.value === choice
+                        ? confidence
+                        : (1 - confidence) / (question.choices.length - 1),
+                  })),
+                };
+              },
+            ),
+            usage: {
+              input_tokens: 100,
+              input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+            },
+          }),
+        );
+      },
+    });
+    const facts = packageFactsSchema.parse({
+      mainAgentId: "ui-model-main",
+      intakeId: "a".repeat(64),
+      packageId: "ui-package",
+      repository: process.cwd(),
+      baseCommit: "b".repeat(40),
+      dataScope: "public",
+      goal: "Implement the interface",
+      acceptance: ["Interface works"],
+      files: ["screen.tsx"],
+      mutation: true,
+      uiChanged: false,
+      checks: { build: [process.execPath, "--version"], test: [process.execPath, "--version"] },
+    });
+    const ui = await classifier.classifyPackage(facts, config);
+    assert.equal(ui.source, "decisions");
+    assert.equal(
+      ui.result.workKind,
+      "ui",
+      "the real Decisions response supplies UI without a Main flag",
+    );
+    assert.equal(ui.result.complexity, "normal");
+    assert.deepEqual(await classifier.classifyPackage(facts, config), ui);
+    assert.equal(calls, 1, "cached UI classification never creates a second call");
+    workConfidence = 0.1;
+    const uncertain = await classifier.classifyPackage(
+      { ...facts, packageId: "uncertain-ui" },
+      config,
+    );
+    assert.equal(uncertain.source, "decisions");
+    assert.equal(
+      uncertain.result.workKind,
+      undefined,
+      "uncertain UI is not fabricated as a model decision",
+    );
+    assert.match(uncertain.reason, /OPTIONAL_FALLBACK/);
+    const legacyFacts = { ...facts, packageId: "legacy-ui" };
+    const { workKind: _omitted, ...legacyResult } = ui.result;
+    insertAssessment(
+      store,
+      {
+        id: packageIdentity(legacyFacts),
+        kind: "package",
+        version: "package-v3",
+        factsHash: hash(legacyFacts),
+        source: "decisions",
+        reason: "DECISIONS_PACKAGE",
+        result: legacyResult,
+      },
+      legacyFacts,
+      facts.mainAgentId,
+    );
+    const old = await classifier.classifyPackage(legacyFacts, config);
+    assert.equal(old.result.workKind, undefined);
+    assert.equal(calls, 2, "legacy assessments keep their immutable result and call identity");
+  } finally {
+    store.close();
+  }
+});
 
 test("explicit model confirmation preserves the original human intake and cannot cover newer input", async (t) => {
   for (const blocked of [
@@ -407,6 +530,7 @@ class FixtureClassifier implements Classifier {
         | undefined;
     if (existing?.result_json) return JSON.parse(existing.result_json) as Assessment<PackageResult>;
     const result: PackageResult = {
+      workKind: facts.goal === "UI initial objective" ? "ui" : "general",
       complexity: "normal",
       additionalPlanning: false,
       advisorNeeded: false,
@@ -825,6 +949,12 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
         models: [{ id: "fixture-ui-model", thinking: ["high"] }],
         modes: [],
       },
+      {
+        provider: "claude-private",
+        status: "ready",
+        models: [{ id: "fixture-ui-model", thinking: ["high"] }],
+        modes: [],
+      },
     ],
     refresh: async (id: string): Promise<Snapshot> => ({
       id,
@@ -862,13 +992,37 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
   // Concrete regression: a saved UI preference was ignored because assessment
   // assigns implement-normal. Exercise real save/readback, V3 package binding
   // and Engine.plan; no paid Decisions or provider executions are needed.
+  const privateProfile = {
+    id: "private-ui-profile",
+    name: "OpusP fixture",
+    provider: "claude-private",
+    model: "fixture-ui-model",
+    thinkingOptionId: "high",
+  };
+  const privateRoute = createProfileRoute(
+    privateProfile,
+    [{ id: "fixture-ui-model", thinkingOptions: [{ id: "high" }] }],
+    config.routes,
+  );
+  assert.equal(privateRoute.access, "claude-personal-pro");
+  assert.equal(privateRoute.enabled, false, "adding a profile never grants activation");
+  assert.equal(privateRoute.bucket, undefined, "a native private subscription has no API bucket");
+  const approvedPrivate = {
+    ...privateRoute,
+    enabled: true,
+    repositoryRoots: [root],
+    dataScopes: ["public", "company"],
+  };
+  assert.equal(routeSchema.parse(approvedPrivate).provider, "claude-private");
+  assert.throws(() => routeSchema.parse({ ...approvedPrivate, access: "claude-company-pro" }));
+  assert.throws(() => routeSchema.parse({ ...approvedPrivate, bucket: "implementation" }));
   const savedView = (await settingsOperation(
     {
       operation: "save",
       revision: hash(config),
       config: {
         ...config,
-        roleRoutes: { ...config.roleRoutes, ui: ["test-claude-ui", "test-codex"] },
+        roleRoutes: { ...config.roleRoutes, ui: ["test-claude-ui", privateRoute.id, "test-codex"] },
         routes: [
           ...config.routes,
           {
@@ -880,13 +1034,14 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
             tier: 2,
             repositoryRoots: [root],
           },
+          approvedPrivate,
         ],
       },
     },
     options,
   )) as { config: Config };
-  const savedConfig = readConfig(configFile);
-  assert.deepEqual(savedConfig.roleRoutes?.ui, ["test-claude-ui", "test-codex"]);
+  const savedConfig = syncProfiles(readConfig(configFile), [privateProfile]);
+  assert.deepEqual(savedConfig.roleRoutes?.ui, ["test-claude-ui", privateRoute.id, "test-codex"]);
   assert.deepEqual(savedView.config.roleRoutes?.ui, savedConfig.roleRoutes?.ui);
   editAutomation(
     agentId,
@@ -982,7 +1137,7 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
       operation: "auto-task",
       agentId,
       directory: repo,
-      contract: { ...taskRequest("initial", "initial objective"), uiChanged: true },
+      contract: taskRequest("initial", "UI initial objective"),
     },
     options,
   )) as { key: string; state: string };
@@ -1003,32 +1158,50 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
       );
       assert.equal(originalContract.role, "implement-normal");
       assert.equal(originalContract.minTier, 2);
+      assert.equal(originalContract.uiChanged, false);
+      assert.equal(originalContract.workKind, "ui");
       const uiPlan = await routingEngine.plan(originalResult.key);
       assert.equal(uiPlan.route?.provider, "claude", "UI work uses the saved provider preference");
       assert.equal(uiPlan.routing?.category, "ui");
       assert.throws(
-        () => assertTaskAssessment(store, savedConfig, { ...originalContract, uiChanged: false }),
+        () => assertTaskAssessment(store, savedConfig, { ...originalContract, uiChanged: true }),
         /PACKAGE_EXECUTION_FACTS_MISMATCH/,
         "routing work kind cannot diverge from assessed execution facts",
       );
-      store.blockAccess("route:test-claude-ui", "fixture-unavailable", null);
+      assert.throws(
+        () =>
+          assertTaskAssessment(store, savedConfig, { ...originalContract, workKind: "general" }),
+        /PACKAGE_WORK_KIND_MISMATCH/,
+      );
+      store.blockAccess("claude-company-pro", "fixture-unavailable", null);
+      const privateFallback = await routingEngine.plan(originalResult.key);
+      assert.equal(
+        privateFallback.route?.provider,
+        "claude-private",
+        "company quota cannot suppress the separate private account",
+      );
+      assert.equal(privateFallback.route?.access, "claude-personal-pro");
+      store.blockAccess("claude-personal-pro", "fixture-unavailable", null);
       const uiFallback = await routingEngine.plan(originalResult.key);
       assert.equal(uiFallback.route?.id, "test-codex");
       assert.deepEqual(uiFallback.routing?.skipped, [
         { routeId: "test-claude-ui", reason: "confirmed-provider-or-route-circuit" },
+        { routeId: privateRoute.id, reason: "confirmed-provider-or-route-circuit" },
       ]);
       store.blockAccess("route:test-codex", "fixture-unavailable", null);
       const uiWaiting = await routingEngine.plan(originalResult.key);
       assert.equal(uiWaiting.action, "wait");
       assert.equal(uiWaiting.reason, "ui-no-safe-and-funded-candidate");
-      assert.equal(uiWaiting.routing?.skipped?.length, 2);
+      assert.equal(uiWaiting.routing?.skipped?.length, 3);
       store.db.prepare("DELETE FROM circuits WHERE reason=?").run("fixture-unavailable");
 
       // A UI route below the assessed tier must not be selected merely due to priority.
       const lowTierConfig = configSchema.parse({
         ...savedConfig,
         routes: savedConfig.routes.map((candidate) =>
-          candidate.provider === "claude" ? { ...candidate, tier: 1 } : candidate,
+          candidate.provider === "claude" || candidate.provider === "claude-private"
+            ? { ...candidate, tier: 1 }
+            : candidate,
         ),
       });
       // Separate legacy admissions never change the immutable V3 task/configuration

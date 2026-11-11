@@ -14,7 +14,10 @@ export interface AgentBackgroundWorkInput {
 export interface AgentBackgroundWorkObservationInput {
   providerSessionId: string;
   observationId: string;
-  coverage: "codex_background_terminals";
+  coverage: "codex_background_terminals" | "claude_background_tasks";
+  queryGeneration?: string;
+  stateRevision?: number;
+  foregroundActive?: boolean;
   queriedProviderSessionIds: string[];
   items: AgentBackgroundWorkInput[];
 }

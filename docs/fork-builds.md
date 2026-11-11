@@ -233,16 +233,21 @@ and packaged runtime evidence; the Windows package smoke is a separate gate.
 
 The fork SDK exports `PaseoAgentBackgroundWorkObservation`. Controllers must
 negotiate `server_info.features.agentBackgroundWorkRefresh === true` and await
-`agent.backgroundWork.refresh()` after the worker becomes idle. This invokes
-Codex's native `thread/backgroundTerminals/list` after the request, including
-when an unchanged empty inventory emits no store update. The response contains:
+`agent.backgroundWork.refresh()` after the worker becomes idle. Codex queries native
+`thread/backgroundTerminals/list` after that request. Native Claude additionally
+requires `agentBackgroundWorkClaudeRefresh`; the SDK acknowledges that negotiated
+coverage with the optional request field `claudeBackgroundTasks`. Claude uses public
+`Query.reinitialize()` and a fresh full task snapshot processed in the same native
+Query generation. An unchanged empty inventory still produces a fresh response:
 
 ```typescript
 {
   agentId: string;
   providerSessionId: string;
   observationId: string;
-  coverage: "codex_background_terminals";
+  coverage: "codex_background_terminals" | "claude_background_tasks";
+  queryGeneration?: string;
+  foregroundActive?: boolean;
   queriedProviderSessionIds: string[];
   items: AgentBackgroundWorkItem[];
   providerSubagents: ProviderSubagentDescriptorPayload[];
@@ -250,13 +255,21 @@ when an unchanged empty inventory emits no store update. The response contains:
 ```
 
 Compare `providerSessionId` exactly with the refreshed agent's
-`runtimeInfo.sessionId`; reject a changed or unavailable session. A native thread
-without a first saved turn can still have `runtimeInfo.sessionId: null`, so its
-empty observation alone cannot establish worker completion. Require no active
-foreground turn, no returned work items and no known running provider subagent.
-The coverage names Codex-reported terminals, not arbitrary OS processes;
-provider subagents are separate known state, outside that native terminal query.
-Items preserve the native `providerSessionId` and `processId` when supplied.
+`runtimeInfo.sessionId`; reject a null, changed or unavailable session. For Claude,
+also match `queryGeneration` exactly with
+`runtimeInfo.extra.backgroundWorkGeneration` and require `foregroundActive: false`.
+The existing initialized Query is consumed without creating a replacement process
+to certify earlier work; a missing or retired Query is unavailable.
+
+Completion requires no foreground turn, pending permission, returned work item or
+known running provider subagent. Claude's full native roster includes subagent and
+workflow work and pending task notifications; it is separate from the UI/stop list.
+The controller also requires final stable projected tool history and matching live
+native Bash or structured task-notification provenance before accepting Claude tool
+completion. It does not manufacture an exit code or infer native provenance for
+unmarked legacy history. This covers provider-reported work, not arbitrary OS
+processes; raw detached commands remain blocked. Codex items preserve native
+`providerSessionId` and `processId` when supplied.
 
 Missing capability, unsupported provider/native method, query failure, timeout
 or a changed session rejects the refresh. Never fall back to `list()`, a cached
@@ -264,16 +277,15 @@ or a changed session rejects the refresh. Never fall back to `list()`, a cached
 The ordinary cached list/subscription and stop-token behavior remain available
 for display and control.
 
-Private runtime evidence on 2026-11-10 used the compiled fork daemon/client with
-local Codex 0.167.0 and one subscription `codex/gpt-6-luna` turn at `max` effort.
-Agent `29e63ae8-127c-4e8e-be99-3dabcccf8ac4` was idle with native session
-`01a1c512-0336-7e72-8b6c-1741f490375f`. Fresh observation
-`43bc8127-4a41-49fd-8494-837a06390e03` still reported its active
-`Start-Sleep -Seconds 90` process `77182`; the public snapshot session matched.
-After public `backgroundWork.stop`, observation
-`620e665b-53d6-47fa-933b-60567b082e65` reported no work for the same session.
-The isolated daemon was then stopped. This is native API evidence; integrated
-controller routing and COMPLETE acceptance remain separate, pending gates.
+An isolated native subscription probe observed a running Bash task block the actual
+completion assessor with `WAITING_PROCESSES`. After natural completion, matching
+fresh native coverage and actual projected tool evidence produced `VERIFY`.
+Closing the native Query then rejected refresh without creating a replacement.
+This establishes the native mechanism; full real Composer-to-COMPLETE acceptance
+remains pending. Private runtime evidence stays local and is not packaged.
+
+This capability requires the matching full app, daemon, SDK and controller bundle.
+An older three-file plugin overlay cannot provide it.
 
 Projected Codex `shell` and `terminal` tool calls now preserve
 `metadata.nativeThreadId` and `metadata.parentCallId`; the latter is the native

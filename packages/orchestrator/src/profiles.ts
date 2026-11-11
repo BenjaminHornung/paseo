@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isClaudeProvider } from "../paseo-plugin/shared/providers.ts";
 import { configSchema, hash, type Config } from "./contracts.ts";
 
 const profileSchema = z.object({
@@ -26,7 +27,7 @@ export function syncProfiles(config: Config, input: unknown): Config {
         !p ||
         !model ||
         provider !== route.provider ||
-        (!p.thinkingOptionId && route.provider !== "claude")
+        (!p.thinkingOptionId && !isClaudeProvider(route.provider))
       )
         throw Error(`Profile unavailable or provider changed for ${route.id}`);
       if (model !== route.model)

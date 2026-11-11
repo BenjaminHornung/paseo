@@ -2077,6 +2077,7 @@ export const AgentBackgroundWorkRefreshRequestMessageSchema = z.object({
   type: z.literal("agent.background_work.refresh.request"),
   agentId: z.string(),
   requestId: z.string(),
+  claudeBackgroundTasks: z.boolean().optional(),
 });
 
 export const AgentBackgroundWorkStopRequestMessageSchema = z.object({
@@ -4050,6 +4051,7 @@ export const ServerInfoStatusPayloadSchema = z
         agentBackgroundWork: z.boolean().optional(),
         // COMPAT(agentBackgroundWorkRefresh): added by Advanced 1.15.4, remove gate after 2027-05-10.
         agentBackgroundWorkRefresh: z.boolean().optional(),
+        agentBackgroundWorkClaudeRefresh: z.boolean().optional(),
         // COMPAT(agentBackgroundWorkStop): added after v0.15.0, remove after 2027-05-03.
         agentBackgroundWorkStop: z.boolean().optional(),
         // COMPAT(projectedSubagentTimeline): added after v0.8.0, remove gates after 2027-03-14; retain wire field.
@@ -5170,7 +5172,9 @@ export const AgentBackgroundWorkObservationSchema = z.object({
   agentId: z.string(),
   providerSessionId: z.string().min(1),
   observationId: z.string().min(1),
-  coverage: z.literal("codex_background_terminals"),
+  coverage: z.enum(["codex_background_terminals", "claude_background_tasks"]),
+  queryGeneration: z.string().min(1).optional(),
+  foregroundActive: z.boolean().optional(),
   queriedProviderSessionIds: z.array(z.string()),
   items: z.array(AgentBackgroundWorkItemSchema),
   // Separately reported known state; the native terminal query does not enumerate subagents.

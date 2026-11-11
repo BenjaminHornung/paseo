@@ -4089,7 +4089,13 @@ export class DaemonClient {
       await this.sendNamespacedCorrelatedSessionRequest<"agent.background_work.refresh.response">({
         requestId: options.requestId,
         timeout: options.timeout ?? 35_000,
-        message: { type: "agent.background_work.refresh.request", agentId },
+        message: {
+          type: "agent.background_work.refresh.request",
+          agentId,
+          ...(this.lastServerInfoMessage?.features?.agentBackgroundWorkClaudeRefresh === true
+            ? { claudeBackgroundTasks: true }
+            : {}),
+        },
       });
     if (payload.error) throw new Error(payload.error);
     if (!payload.observation) throw new Error("BACKGROUND_WORK_OBSERVATION_MISSING");

@@ -68,6 +68,7 @@ export const packageFactsSchema = z.strictObject({
 });
 export type PackageFacts = z.infer<typeof packageFactsSchema>;
 export const packageResultSchema = z.strictObject({
+  workKind: z.enum(["ui", "general"]).optional(),
   complexity: z.enum(["simple", "normal", "complex", "unknown"]),
   additionalPlanning: z.boolean(),
   advisorNeeded: z.boolean(),
@@ -184,7 +185,7 @@ export function fallbackPackage(): PackageResult {
 export function effectiveImplementation(
   result: PackageResult,
   contract: Contract,
-): { role: Contract["role"]; minTier: 1 | 2 | 3; highRisk: boolean } {
+): { role: Contract["role"]; minTier: 1 | 2 | 3; highRisk: boolean; workKind?: "ui" | "general" } {
   if (result.complexity === "unknown") throw Error("PACKAGE_CLASSIFICATION_REQUIRED");
   if (result.additionalPlanning) throw Error("PACKAGE_ADDITIONAL_PLANNING_REQUIRED");
   const hardRisk =
@@ -196,6 +197,7 @@ export function effectiveImplementation(
     );
   const complexity = hardRisk ? "complex" : result.complexity;
   return {
+    ...(result.workKind ? { workKind: result.workKind } : {}),
     role:
       complexity === "simple"
         ? "implement-simple"

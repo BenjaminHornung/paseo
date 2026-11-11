@@ -7,6 +7,7 @@ import {
 } from "../../provider-launch-config.js";
 import { buildSelfNodeCommand, createExternalProcessEnv } from "../../../paseo-env.js";
 import { spawnProcess } from "../../../../utils/spawn.js";
+import type { ClaudeBackgroundInventory } from "./background-inventory.js";
 
 // Keep the raw SDK query import in this module only. Claude process launch behavior
 // must stay shared between production and tests so Windows .cmd/.bat handling cannot
@@ -22,6 +23,7 @@ export interface ClaudeQueryContext {
   queryFactory?: ClaudeQueryFactory;
   /** Called with the spawned child process so the caller can tree-kill it on close. */
   onChildProcess?: (child: ChildProcess) => void;
+  backgroundInventory?: ClaudeBackgroundInventory;
 }
 
 function isChildProcessWithStreams(child: ChildProcess): child is ChildProcessWithoutNullStreams {
@@ -103,7 +105,7 @@ function applyRuntimeSettingsToClaudeOptions(
       if (!isChildProcessWithStreams(child)) {
         throw new Error("Claude process was spawned without stdio streams");
       }
-      return child;
+      return context.backgroundInventory?.attach(child) ?? child;
     },
   };
 }

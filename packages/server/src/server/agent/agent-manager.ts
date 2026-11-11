@@ -1424,7 +1424,10 @@ export class AgentManager {
     return this.backgroundWork.list(agentId);
   }
 
-  async refreshAgentBackgroundWork(agentId: string): Promise<AgentBackgroundWorkObservation> {
+  async refreshAgentBackgroundWork(
+    agentId: string,
+    claudeBackgroundTasks = false,
+  ): Promise<AgentBackgroundWorkObservation> {
     const agent = this.requirePublicAgent(agentId);
     const session = agent.session;
     if (!session) {
@@ -1433,6 +1436,8 @@ export class AgentManager {
     if (!session.refreshBackgroundWork) {
       throw new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_REFRESH_UNSUPPORTED");
     }
+    if (session.backgroundWorkGeneration !== undefined && !claudeBackgroundTasks)
+      throw new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_REFRESH_UNSUPPORTED");
     const observation = await session.refreshBackgroundWork();
     if (
       this.requirePublicAgent(agentId).session !== session ||
@@ -1440,21 +1445,37 @@ export class AgentManager {
     ) {
       throw new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_SESSION_CHANGED");
     }
-    const changed = this.backgroundWork.apply(agentId, observation.items);
+    const changed =
+      observation.coverage === "codex_background_terminals"
+        ? this.backgroundWork.apply(agentId, observation.items)
+        : null;
     if (changed) this.dispatch({ type: "background_work", agentId, items: changed });
-    const items = this.backgroundWork.list(agentId);
+    const items =
+      observation.coverage === "codex_background_terminals"
+        ? this.backgroundWork.list(agentId)
+        : observation.items.map((item) => ({ ...item, startedAt: new Date().toISOString() }));
     // Native terminal inventory and known provider subagents are distinct evidence.
     // Drain events received during the awaited read before collecting the latter.
     await this.refreshRuntimeInfo(agent);
     await this.drainSessionEvents(agentId);
     if (
       this.requirePublicAgent(agentId).session !== session ||
-      session.id !== observation.providerSessionId
+      session.id !== observation.providerSessionId ||
+      (observation.coverage === "claude_background_tasks" &&
+        (!observation.queryGeneration ||
+          observation.stateRevision === undefined ||
+          session.backgroundWorkGeneration !== observation.queryGeneration ||
+          session.backgroundWorkRevision !== observation.stateRevision))
     ) {
       throw new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_SESSION_CHANGED");
     }
     return {
-      ...observation,
+      providerSessionId: observation.providerSessionId,
+      observationId: observation.observationId,
+      coverage: observation.coverage,
+      queryGeneration: observation.queryGeneration,
+      foregroundActive: observation.foregroundActive,
+      queriedProviderSessionIds: observation.queriedProviderSessionIds,
       agentId,
       items,
       providerSubagents: this.providerSubagents.list(agentId),

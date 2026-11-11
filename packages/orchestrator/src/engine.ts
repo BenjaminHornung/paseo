@@ -29,11 +29,12 @@ import { assertTaskAssessment, hasAuditedOwnerApproval } from "./intake.ts";
 import { taskDispatchAllowed } from "./automation.ts";
 import { appRoot } from "./settings-files.ts";
 import { z } from "zod";
+import { isClaudeProvider } from "../paseo-plugin/shared/providers.ts";
 
 type AmendmentAdmissionResult =
   | { state: "READY"; key: string }
   | { state: "WAITING"; reason: string };
-type ReviewerRoute = RuntimeRoute & { provider: "codex" | "claude" };
+type ReviewerRoute = RuntimeRoute & { provider: "codex" | "claude" | "claude-private" };
 interface ReviewerRouteSelection {
   eligible: RuntimeRoute[];
   completionBoundaryUnavailable: RuntimeRoute[];
@@ -475,7 +476,7 @@ export class Engine {
     // UI is a work kind, independent of the assessed complexity and quality tier.
     // Apply its explicit candidate list to both fresh dispatch and session reuse.
     const uiPreference =
-      c.mutation && c.uiChanged && c.role.startsWith("implement-")
+      c.mutation && (c.uiChanged || c.workKind === "ui") && c.role.startsWith("implement-")
         ? this.config.roleRoutes?.ui
         : undefined;
     const preference = uiPreference ?? this.config.roleRoutes?.[c.role] ?? routePreference[c.role];
@@ -1237,7 +1238,7 @@ export class Engine {
       );
       return;
     }
-    if (c.uiChanged) {
+    if (c.uiChanged || c.workKind === "ui") {
       this.store.db
         .prepare(
           "UPDATE tasks SET state='NEEDS_CONFIRMATION' WHERE key=? AND EXISTS(SELECT 1 FROM attempts WHERE id=? AND status='VERIFY')",
@@ -1321,7 +1322,7 @@ export class Engine {
       .filter(
         (route): route is ReviewerRoute =>
           !!route &&
-          (route.provider === "codex" || route.provider === "claude") &&
+          (route.provider === "codex" || isClaudeProvider(route.provider)) &&
           route.enabled &&
           route.revision !== "discovery-required" &&
           route.id !== implementationRouteId &&
@@ -1365,12 +1366,12 @@ export class Engine {
       )
         continue;
       if (
-        route.provider === "claude"
+        isClaudeProvider(route.provider)
           ? !provider.modes.includes("plan")
           : route.modeId && !provider.modes.includes(route.modeId)
       )
         continue;
-      eligible.push(route.provider === "claude" ? { ...route, modeId: "plan" } : route);
+      eligible.push(isClaudeProvider(route.provider) ? { ...route, modeId: "plan" } : route);
     }
     return { eligible, completionBoundaryUnavailable, discoveryPending: false };
   }
@@ -1448,11 +1449,13 @@ export class Engine {
     const circuitOpen =
       this.store.circuitOpen(currentRoute.access, Date.now()) ||
       this.store.circuitOpen(`route:${currentRoute.id}`, Date.now());
-    const currentRouteEligible = selection.eligible.some(
+    const currentRouteEligible = selection.eligible.find(
       (candidate) => candidate.id === currentRoute.id,
     );
-    if (!circuitOpen && currentRouteEligible) return { row, route: currentRoute };
-    const next = selection.eligible[0];
+    if (!circuitOpen && currentRouteEligible && hash(currentRouteEligible) === hash(currentRoute))
+      return { row, route: currentRoute };
+    const next =
+      !circuitOpen && currentRouteEligible ? currentRouteEligible : selection.eligible[0];
     if (!next)
       return {
         waiting: {
@@ -1463,7 +1466,6 @@ export class Engine {
             : "no-qualified-independent-read-only-reviewer",
         },
       };
-    if (next.id === currentRoute.id) return { row, route: currentRoute };
 
     const requestKey = `${id}/review/${hash({ previous: row.request_key, next: next.id }).slice(0, 20)}`;
     const updated = this.store.transaction(() => {
@@ -1474,7 +1476,12 @@ export class Engine {
         )
         .run(JSON.stringify(next), requestKey, id).changes;
       if (!changes) return false;
-      this.store.event(`REVIEW_FALLBACK:${currentRoute.id}:${next.id}`, id);
+      this.store.event(
+        next.id === currentRoute.id
+          ? `REVIEW_ROUTE_REVALIDATED:${next.id}`
+          : `REVIEW_FALLBACK:${currentRoute.id}:${next.id}`,
+        id,
+      );
       return true;
     });
     const updatedRow = this.store.db
@@ -1484,7 +1491,7 @@ export class Engine {
     if (
       updatedRow.state === "INTENT" &&
       !updatedRow.agent_id &&
-      JSON.parse(updatedRow.route_json).id !== next.id
+      hash(JSON.parse(updatedRow.route_json)) !== hash(next)
     )
       return {
         waiting: {
@@ -1700,7 +1707,7 @@ export class Engine {
       testExit: test.exit || e.testExit,
       diffHash: after.diffHash,
       reviewedDiffHash: e.reviewedDiffHash,
-      uiChanged: c.uiChanged,
+      uiChanged: c.uiChanged || c.workKind === "ui",
       visualAcceptance: e.visualAcceptance,
       highRisk: c.highRisk,
       ownerApproved:

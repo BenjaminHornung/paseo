@@ -1,6 +1,7 @@
 export type Access =
   | "codex-pro200"
   | "claude-company-pro"
+  | "claude-personal-pro"
   | "opencode-go"
   | "openai-api"
   | "anthropic-api";

@@ -29,7 +29,7 @@ export interface Route {
   id: string;
   name?: string;
   access: string;
-  provider: "codex" | "claude" | "pi";
+  provider: "codex" | "claude" | "claude-private" | "pi";
   model: string;
   revision: string;
   reasoning: string;

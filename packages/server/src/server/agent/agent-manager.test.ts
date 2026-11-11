@@ -27,6 +27,44 @@ import type { ProviderOptions } from "@getpaseo/protocol/agent-types";
 import { projectTimelineRows } from "./timeline-projection.js";
 import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import { startAgentRun } from "./agent-prompt.js";
+
+test("rejects a newer Claude roster observed while the manager drains runtime events", async () => {
+  let revision = 1;
+  let changesDuringDrain = false;
+  const session = {
+    id: "native-session",
+    backgroundWorkGeneration: "generation",
+    get backgroundWorkRevision() {
+      return revision;
+    },
+    refreshBackgroundWork: async () => ({
+      providerSessionId: "native-session",
+      observationId: "fresh",
+      queryGeneration: "generation",
+      stateRevision: revision,
+      coverage: "claude_background_tasks",
+      queriedProviderSessionIds: ["native-session"],
+      foregroundActive: false,
+      items: [],
+    }),
+  };
+  const apply = vi.fn();
+  const manager = Object.assign(Object.create(AgentManager.prototype), {
+    requirePublicAgent: () => ({ session }),
+    backgroundWork: { apply },
+    refreshRuntimeInfo: async () => {},
+    drainSessionEvents: async () => {
+      if (changesDuringDrain) revision++;
+    },
+    providerSubagents: { list: () => [] },
+  }) as AgentManager;
+  expect((await manager.refreshAgentBackgroundWork("agent", true)).items).toEqual([]);
+  expect(apply).not.toHaveBeenCalled();
+  changesDuringDrain = true;
+  await expect(manager.refreshAgentBackgroundWork("agent", true)).rejects.toThrow(
+    "BACKGROUND_WORK_SESSION_CHANGED",
+  );
+});
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
 import type { StoredAgentRecord } from "./agent-storage.js";

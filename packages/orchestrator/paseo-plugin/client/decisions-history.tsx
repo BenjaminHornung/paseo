@@ -15,6 +15,7 @@ const labels: Record<string, string> = {
   needImplementation: "Implementierung",
   extraReviewRecommended: "Zusätzliches Review",
   complexity: "Komplexität",
+  workKind: "Arbeitsart",
   additionalPlanning: "Weitere Planung",
   advisorNeeded: "Advisor",
   shouldSplit: "Paket aufteilen",

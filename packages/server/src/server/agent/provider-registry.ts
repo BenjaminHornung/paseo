@@ -474,6 +474,12 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
     interrupt: () => inner.interrupt(),
     refreshBackgroundWork: inner.refreshBackgroundWork?.bind(inner),
     stopBackgroundWork: inner.stopBackgroundWork?.bind(inner),
+    get backgroundWorkGeneration() {
+      return inner.backgroundWorkGeneration;
+    },
+    get backgroundWorkRevision() {
+      return inner.backgroundWorkRevision;
+    },
     close: () => inner.close(),
     canStopRuntime: inner.canStopRuntime?.bind(inner),
     listCommands: inner.listCommands?.bind(inner),

@@ -11,6 +11,39 @@ export interface CompletionCapability {
   assess(snapshot: Snapshot): Promise<{ state: CompletionState; reason: string }>;
 }
 
+export interface NativeCompletionEvidence {
+  agentId: string;
+  providerSessionId: string;
+  queryGeneration: string;
+  observationId: string;
+}
+export interface BackgroundInventory {
+  supported: boolean;
+  verified: boolean;
+  items: unknown[];
+  nativeCompletion?: NativeCompletionEvidence;
+}
+
+export function nativeCompletionMatches(
+  handle: Pick<BackgroundHandle, "id" | "runtimeInfo">,
+  proof?: NativeCompletionEvidence,
+  expected?: NativeCompletionEvidence,
+): boolean {
+  if (
+    !proof ||
+    proof.agentId !== handle.id ||
+    proof.providerSessionId !== handle.runtimeInfo?.sessionId ||
+    proof.queryGeneration !== handle.runtimeInfo?.extra?.backgroundWorkGeneration
+  )
+    return false;
+  if (!expected) return true;
+  return (
+    proof.agentId === expected.agentId &&
+    proof.providerSessionId === expected.providerSessionId &&
+    proof.queryGeneration === expected.queryGeneration
+  );
+}
+
 /** Known background state comes from the public SDK, supervised execution,
  * or a recorded operator confirmation of the exact completed turn. */
 export class CurrentPaseoCompletion implements CompletionCapability {
@@ -29,7 +62,7 @@ export class CurrentPaseoCompletion implements CompletionCapability {
     if (s.backgroundActive === null)
       return { state: "NEEDS_CONFIRMATION", reason: "process-coverage-unavailable" };
     if (this.provider.foregroundEvidence) {
-      const trace = await this.provider.foregroundEvidence(s.id);
+      const trace = await this.provider.foregroundEvidence(s.id, s.nativeCompletion);
       if (!trace.complete)
         return {
           state: "NEEDS_CONFIRMATION",
@@ -44,7 +77,7 @@ export class CurrentPaseoCompletion implements CompletionCapability {
 // the SDK checks the daemon's negotiated feature gates.
 export interface BackgroundHandle {
   id?: string;
-  runtimeInfo?: { sessionId?: string | null } | null;
+  runtimeInfo?: { sessionId?: string | null; extra?: Record<string, unknown> } | null;
   backgroundWork?: {
     list?(): Promise<unknown[]>;
     refresh?(options?: { requestId?: string; timeout?: number }): Promise<unknown>;
@@ -59,13 +92,32 @@ const backgroundObservationSchema = z.object({
   agentId: z.string().min(1),
   providerSessionId: z.string().min(1),
   observationId: z.string().min(1),
-  coverage: z.literal("codex_background_terminals"),
+  coverage: z.enum(["codex_background_terminals", "claude_background_tasks"]),
+  queryGeneration: z.string().min(1).optional(),
+  foregroundActive: z.boolean().optional(),
   queriedProviderSessionIds: z.array(z.string()),
   items: z.array(z.unknown()),
   providerSubagents: z.array(
     z.object({ id: z.string(), status: z.enum(["running", "completed", "failed", "canceled"]) }),
   ),
 });
+function nativeCompletionFromObservation(
+  observation: z.infer<typeof backgroundObservationSchema>,
+  items: readonly unknown[],
+): NativeCompletionEvidence | undefined {
+  if (
+    observation.coverage !== "claude_background_tasks" ||
+    !observation.queryGeneration ||
+    items.length > 0
+  )
+    return undefined;
+  return {
+    agentId: observation.agentId,
+    providerSessionId: observation.providerSessionId,
+    queryGeneration: observation.queryGeneration,
+    observationId: observation.observationId,
+  };
+}
 export async function verifiedProviderSessionId(handle: BackgroundHandle): Promise<string> {
   const savedSessionId = handle.runtimeInfo?.sessionId;
   if (savedSessionId) return savedSessionId;
@@ -94,7 +146,7 @@ export class OptionalBackgroundCapability {
   get available(): boolean {
     return typeof this.handle.backgroundWork?.refresh === "function";
   }
-  async inventory(): Promise<{ supported: boolean; verified: boolean; items: unknown[] }> {
+  async inventory(): Promise<BackgroundInventory> {
     if (!this.available) return { supported: false, verified: false, items: [] };
     try {
       const sessionId = this.handle.runtimeInfo?.sessionId;
@@ -106,6 +158,11 @@ export class OptionalBackgroundCapability {
       );
       if (
         observation.agentId !== this.handle.id ||
+        (observation.coverage === "claude_background_tasks" &&
+          (!observation.queryGeneration ||
+            observation.foregroundActive !== false ||
+            this.handle.runtimeInfo?.extra?.backgroundWorkGeneration !==
+              observation.queryGeneration)) ||
         observation.providerSessionId !== sessionId ||
         !observation.queriedProviderSessionIds.includes(sessionId) ||
         this.handle.runtimeInfo?.sessionId !== sessionId
@@ -114,10 +171,13 @@ export class OptionalBackgroundCapability {
       const runningSubagents = observation.providerSubagents.filter(
         (agent) => agent.status === "running",
       );
+      const items = [...observation.items, ...runningSubagents];
+      const nativeCompletion = nativeCompletionFromObservation(observation, items);
       return {
         supported: true,
         verified: true,
-        items: [...observation.items, ...runningSubagents],
+        items,
+        ...(nativeCompletion ? { nativeCompletion } : {}),
       };
     } catch {
       return { supported: true, verified: false, items: [] };

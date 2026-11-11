@@ -134,6 +134,26 @@ export class ClaudeRuntimeSafety {
     );
   }
 
+  completionInventory(sessionId: string): AgentBackgroundWorkInput[] {
+    if (this.inventoryState !== "supported") throw new Error("BACKGROUND_WORK_SESSION_UNAVAILABLE");
+    const items: AgentBackgroundWorkInput[] = this.liveTasks.map((task) => ({
+      id: task.task_id,
+      kind: task.task_type,
+      description: typeof task.description === "string" ? task.description : null,
+      providerSessionId: sessionId,
+    }));
+    for (const id of this.awaitingNotifications) {
+      if (!this.liveTasks.some((task) => task.task_id === id))
+        items.push({
+          id: `notification:${id}`,
+          kind: "notification",
+          description: null,
+          providerSessionId: sessionId,
+        });
+    }
+    return items;
+  }
+
   canStop(id: string): boolean {
     return this.buildInventory().some((item) => item.id === id && item.canStop);
   }

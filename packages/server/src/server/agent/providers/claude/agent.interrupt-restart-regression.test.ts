@@ -276,6 +276,52 @@ afterEach(() => {
   queryFactory.mockReset();
 });
 
+test("cancel during native safety preflight never writes the withdrawn prompt", async () => {
+  const queries: ScriptedQuery[] = [];
+  queryFactory.mockImplementation(({ prompt }: { prompt: AsyncIterable<unknown> }) => {
+    const query = createScriptedQuery({ prompt, sessionId: "preflight-cancel" });
+    queries.push(query);
+    return query;
+  });
+  const session = await new ClaudeAgentClient({
+    logger: createTestLogger(),
+    queryFactory,
+    resolveBinary: async () => "/test/claude/bin",
+  }).createSession({
+    provider: "claude",
+    cwd: process.cwd(),
+    providerOptions: { requireBackgroundWorkRefresh: true },
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let preflight = false;
+  vi.spyOn(session, "refreshBackgroundWork").mockImplementation(async () => {
+    preflight = true;
+    await gate;
+    return {
+      providerSessionId: "preflight-cancel",
+      observationId: "preflight",
+      coverage: "claude_background_tasks",
+      queryGeneration: "generation",
+      queriedProviderSessionIds: ["preflight-cancel"],
+      items: [],
+    };
+  });
+  try {
+    const pending = session.startTurn!("WITHDRAWN MUTATING INPUT");
+    await waitFor(() => preflight);
+    await session.interrupt();
+    release();
+    await pending;
+    expect(queries[0]?.prompts).toEqual([]);
+  } finally {
+    release();
+    await session.close();
+  }
+});
+
 test("interrupt only calls query.interrupt and leaves the query open", async () => {
   const logger = createTestLogger();
   const queries: ScriptedQuery[] = [];

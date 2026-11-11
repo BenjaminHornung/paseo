@@ -1,17 +1,56 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { contractSchema, canonicalPath, type RuntimeRoute } from "../src/contracts.ts";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 
 const fixture = mkdtempSync(path.join(process.cwd(), ".provider-placement-"));
 process.env.ORCHESTRATOR_STATE = path.join(fixture, "controller.sqlite");
-const { PaseoProvider, taskPrompt } = await import("../src/provider.ts");
+const { PaseoProvider, taskPrompt, assertSeparateClaudeConfiguration } =
+  await import("../src/provider.ts");
 const { Store } = await import("../src/store.ts");
 const store = new Store(process.env.ORCHESTRATOR_STATE);
 after(() => {
   store.close();
   rmSync(fixture, { recursive: true, force: true });
+});
+
+// A company launcher inherits process.env when its own directory is absent.
+// Ignoring that environment would let both account routes use the same login.
+test("private Claude separation compares the effective inherited company directory", () => {
+  const companyDirectory = path.join(fixture, "company");
+  const privateDirectory = path.join(fixture, "private");
+  mkdirSync(companyDirectory);
+  mkdirSync(privateDirectory);
+  assert.throws(
+    () =>
+      assertSeparateClaudeConfiguration(
+        { CLAUDE_CONFIG_DIR: companyDirectory },
+        {},
+        { CLAUDE_CONFIG_DIR: companyDirectory },
+        process.cwd(),
+      ),
+    /Separate private Claude configuration directory required/,
+    "an inherited company directory cannot also serve the private account",
+  );
+  assert.doesNotThrow(() =>
+    assertSeparateClaudeConfiguration(
+      { CLAUDE_CONFIG_DIR: privateDirectory },
+      {},
+      { CLAUDE_CONFIG_DIR: companyDirectory },
+      process.cwd(),
+    ),
+  );
+  assert.doesNotThrow(
+    () =>
+      assertSeparateClaudeConfiguration(
+        { CLAUDE_CONFIG_DIR: privateDirectory },
+        { CLAUDE_CONFIG_DIR: companyDirectory },
+        { CLAUDE_CONFIG_DIR: privateDirectory },
+        process.cwd(),
+      ),
+    "the company's explicit provider override wins over inherited environment",
+  );
 });
 
 // Parent labels alone previously created children in a different workspace.
@@ -81,11 +120,38 @@ test("provider creates a child through its pinned workspace with explicit isolat
   );
   assert.ok(String(options!.prompt).includes(`SOURCE AND COMMAND DIRECTORY is ${root}`));
   assert.ok(taskPrompt(contract).includes("Modify only allowedPaths"));
+  const privateRoute: RuntimeRoute = {
+    ...route,
+    provider: "claude-private",
+    access: "claude-personal-pro",
+    repositoryRoots: [root],
+    modeId: "plan",
+  };
+  await provider.create(
+    privateRoute,
+    { ...contract, mutation: false, role: "advisor" },
+    "workflow/advisor/1",
+  );
+  const readonlyConfig = options!.config as {
+    provider: string;
+    options: { disallowedTools: string[] };
+  };
+  assert.ok(readonlyConfig.provider.startsWith("claude-private/"));
+  assert.deepEqual(
+    readonlyConfig.options.disallowedTools,
+    ["Write", "Edit", "Bash", "Agent", "Task"],
+    "native private read-only roles retain the reviewer tool restriction",
+  );
+  await provider.create(privateRoute, contract, "workflow/private-writer/1");
+  assert.deepEqual(
+    (options!.config as { options: { disallowedTools: string[] } }).options.disallowedTools,
+    ["Agent", "Task"],
+  );
   placementDirectory = canonicalPath(path.dirname(root));
   options = undefined;
   await assert.rejects(provider.create(route, contract, "workflow/task/2"), /workspace changed/);
   assert.equal(options, undefined);
-  assert.equal(childCreates, 1, "workspace drift must not start another worker");
+  assert.equal(childCreates, 3, "workspace drift must not start another worker");
   placementDirectory = root;
   Object.assign(provider, {
     client: {

@@ -169,3 +169,135 @@ test("recovery reconciles a completed turn through public waitForFinish despite 
   assert.equal(snapshot?.status, "running");
   assert.equal(snapshot?.backgroundActive, true);
 });
+
+// Native Bash reports terminal tool_result/is_error, not a numeric exit code.
+// Exercise the real provider foreground scan and completion assessor together.
+test("native Claude Bash and structured notifications settle only under their matching fresh process proof", async () => {
+  const sessionId = "native-session",
+    generation = "native-generation";
+  let active = false;
+  const agent = {
+    cwd: process.cwd(),
+    provider: "claude-private",
+    model: "claude-haiku-5-5",
+    status: "idle",
+    activeTurn: null,
+    pendingPermissions: [],
+    runtimeInfo: {
+      sessionId,
+      extra: { backgroundWorkGeneration: generation },
+      modeId: "auto",
+      thinkingOptionId: "medium",
+    },
+  };
+  const native = { providerSessionId: sessionId, queryGeneration: generation };
+  const shell = {
+    type: "tool_call",
+    callId: "bash",
+    name: "Bash",
+    status: "completed",
+    detail: { type: "shell", command: "node -e \"process.stdout.write('ok')\"", output: "ok" },
+    metadata: {
+      claudeNativeResult: { ...native, kind: "tool_result", toolUseId: "bash", isError: false },
+    },
+  };
+  const notification = {
+    type: "tool_call",
+    callId: "notification",
+    name: "task_notification",
+    status: "completed",
+    detail: { type: "plain_text", text: "Finished" },
+    metadata: {
+      source: "claude_task_notification",
+      taskId: "job",
+      claudeNativeResult: { ...native, kind: "task_notification", taskId: "job" },
+    },
+  };
+  let tools: unknown[] = [shell, notification];
+  let timelineObserved = false;
+  let appendUnsafeDuringReadback = false;
+  const handle = {
+    id: "agent",
+    status: "idle",
+    activeTurn: null,
+    pendingPermissions: [],
+    runtimeInfo: agent.runtimeInfo,
+    current: () => agent,
+    refresh: async () => ({ agent }),
+    timeline: {
+      refetch: async () => {
+        timelineObserved = true;
+        return {
+          entries: tools.map((item) => ({ item })),
+          error: null,
+          gap: false,
+          hasOlder: false,
+          hasNewer: false,
+        };
+      },
+    },
+    backgroundWork: {
+      refresh: async () => {
+        if (timelineObserved && appendUnsafeDuringReadback) {
+          tools = [
+            ...tools,
+            {
+              ...shell,
+              callId: "unsafe",
+              detail: { ...shell.detail, command: "Start-Process detached.exe" },
+              metadata: {
+                claudeNativeResult: { ...shell.metadata.claudeNativeResult, toolUseId: "unsafe" },
+              },
+            },
+          ];
+          appendUnsafeDuringReadback = false;
+        }
+        return {
+          agentId: "agent",
+          providerSessionId: sessionId,
+          observationId: "fresh",
+          coverage: "claude_background_tasks",
+          queryGeneration: generation,
+          foregroundActive: false,
+          queriedProviderSessionIds: [sessionId],
+          items: active ? [{ id: "job" }] : [],
+          providerSubagents: [],
+        };
+      },
+    },
+    waitForFinish: async () => ({ status: "idle", final: agent }),
+  };
+  const provider: PaseoProvider = Object.assign(Object.create(PaseoProvider.prototype), {
+    client: { agents: { ref: () => handle } },
+  });
+  const assess = async () =>
+    new CurrentPaseoCompletion(provider).assess((await provider.refresh("agent"))!);
+  assert.equal((await assess()).state, "VERIFY");
+  active = true;
+  assert.equal((await assess()).state, "WAITING_PROCESSES");
+  active = false;
+  for (const invalid of [
+    { ...shell, metadata: undefined },
+    {
+      ...shell,
+      metadata: {
+        claudeNativeResult: {
+          ...shell.metadata.claudeNativeResult,
+          queryGeneration: "old-generation",
+        },
+      },
+    },
+    { ...notification, metadata: { ...notification.metadata, source: "user-text" } },
+  ]) {
+    tools = [invalid];
+    assert.equal((await assess()).state, "NEEDS_CONFIRMATION");
+  }
+  tools = [shell, notification];
+  timelineObserved = false;
+  appendUnsafeDuringReadback = true;
+  assert.equal(
+    (await assess()).state,
+    "NEEDS_CONFIRMATION",
+    "a new unsafe shell during native readback cannot escape the foreground scan",
+  );
+});

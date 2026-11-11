@@ -1184,6 +1184,7 @@ export function assertTaskAssessment(store: Store, config: Config, contract: Con
   )
     throw Error("PACKAGE_EXECUTION_FACTS_MISMATCH");
   if (contract.mutation) {
+    if (contract.workKind !== assessment.result.workKind) throw Error("PACKAGE_WORK_KIND_MISMATCH");
     const effective = effectiveImplementation(assessment.result, {
       ...contract,
       highRisk: facts.risks?.includes("DECLARED_HIGH_RISK") ?? false,

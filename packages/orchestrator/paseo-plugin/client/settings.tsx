@@ -32,6 +32,12 @@ import {
 import { createProfileRoute, reasoningOptions, routeLabel } from "../shared/routes";
 
 type Tab = "routes" | "decisions" | "keys";
+const accessHints: Partial<Record<Route["access"], string>> = {
+  "openai-api": "Luna über Pi; benötigt API-Freigabe, Taskbudget und Repository-Grenze.",
+  "claude-company-pro": "Firmen-Abo; nur innerhalb der explizit freigegebenen Repository-Grenzen.",
+  "claude-personal-pro":
+    "Privates Abo; separates Konto, nur gespeicherte Datenfreigaben und Repository-Grenzen.",
+};
 const defaults: DecisionSettings = {
   enabled: false,
   model: "gpt-6-luna",
@@ -266,7 +272,8 @@ export function OrchestratorSettings({
     (m) =>
       m.isSelectable !== false &&
       (m.thinkingOptions?.some((t) => efforts.includes(t.id)) ||
-        (route?.provider === "claude" && !m.thinkingOptions?.length)),
+        ((route?.provider === "claude" || route?.provider === "claude-private") &&
+          !m.thinkingOptions?.length)),
   );
   const model = models.find((m) => m.id === route?.model);
   const profiles = (catalog.data?.profiles ?? []).filter(
@@ -282,10 +289,17 @@ export function OrchestratorSettings({
       change((c) => ({ ...c, routes: [...c.routes, added] }));
       setRouteId(added.id);
       setNewProfileId("");
-    } catch {
-      setError(
-        "Das Profil enthält ein nicht verfügbares Modell oder eine nicht unterstützte Reasoning-Stufe.",
-      );
+    } catch (caughtError) {
+      const code = caughtError instanceof Error ? caughtError.message : "";
+      const messages: Record<string, string> = {
+        PROFILE_PROVIDER_UNSUPPORTED: "Dieser Provider wird vom Orchestrator nicht unterstützt.",
+        PROFILE_MODEL_UNAVAILABLE: "Das Modell dieses Profils ist beim Provider nicht verfügbar.",
+        PROFILE_REASONING_UNSUPPORTED:
+          "Die Reasoning-Stufe dieses Profils wird vom Modell nicht unterstützt.",
+        PROFILE_FEATURE_UNSUPPORTED:
+          "Das Profil enthält eine nicht unterstützte Feature-Einstellung.",
+      };
+      setError(messages[code] ?? "Die Profilroute konnte nicht angelegt werden.");
     }
   };
   const invalid =
@@ -648,13 +662,7 @@ export function OrchestratorSettings({
                     )}
                   <SettingsSwitch
                     label="Route aktiviert"
-                    hint={
-                      route.access === "openai-api"
-                        ? "Luna über Pi; benötigt API-Freigabe, Taskbudget und Repository-Grenze."
-                        : route.access === "claude-company-pro"
-                          ? "Firmen-Abo; nur innerhalb der explizit freigegebenen Repository-Grenzen."
-                          : undefined
-                    }
+                    hint={accessHints[route.access]}
                     value={route.enabled}
                     onValueChange={(v) => updateRoute({ enabled: v })}
                   />

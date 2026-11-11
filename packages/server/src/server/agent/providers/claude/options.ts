@@ -47,6 +47,8 @@ export const ClaudeProviderOptionsSchema = z
   .object({
     /** Composer control, not a Claude SDK option: the provider reads it and keeps it out of the SDK options. */
     fast_mode: z.boolean().optional(),
+    /** Requires a native fresh-inventory preflight before submitting a prompt. */
+    requireBackgroundWorkRefresh: z.boolean().optional(),
     allowedTools: z.array(z.string()).optional(),
     disallowedTools: z.array(z.string()).optional(),
     additionalDirectories: z.array(z.string()).optional(),

@@ -134,6 +134,19 @@ Never select a model, route, provider or reasoning effort; the controller applie
 const packageQuestions: Choice[] = [
   {
     type: "choice",
+    name: "workKind",
+    instructions:
+      "Classify the work kind independently of complexity. Choose ui for implementation of user interfaces, visual layout, interaction, accessibility or frontend components. Choose general for other work. Use the actual package goal, acceptance and evidence, not a model/provider preference. Never select models, routes or reasoning effort. A declared uiChanged fact still requires UI review even if this answer is general.",
+    choices: [
+      {
+        value: "ui",
+        description: "User interface implementation or visible/interactive UI changes.",
+      },
+      { value: "general", description: "Other implementation, infrastructure or analysis work." },
+    ],
+  },
+  {
+    type: "choice",
     name: "complexity",
     instructions: complexityRules,
     choices: [
@@ -299,6 +312,9 @@ export class Decisions implements Classifier, DecisionSelector {
     localOnlyReason?: string,
   ): Promise<Assessment<T>> {
     const factsHash = hash(facts),
+      // v3 identifies the durable call/assessment lifecycle. Extending the optional
+      // package result must not re-address existing PENDING/UNKNOWN reservations.
+      // Prior immutable answers without workKind stay legacy, never reclassified.
       version = `${kind}-v3`,
       now = this.now(),
       cycle = new Date(now).toISOString().slice(0, 7);
@@ -506,6 +522,7 @@ export class Decisions implements Classifier, DecisionSelector {
         }
       } else if (accepted && kind === "package") {
         const pkg = facts as PackageFacts;
+        if (uncertain("workKind")) delete answers.workKind;
         if (uncertain("additionalPlanning"))
           answers.additionalPlanning =
             pkg.unknowns.length > 0 || !pkg.checks?.build.length || !pkg.checks?.test.length;

@@ -1,4 +1,5 @@
 import type { Route } from "./settings.ts";
+import { claudeSubscriptionAccess, isClaudeProvider } from "./providers.ts";
 
 export interface RouteProfile {
   id: string;
@@ -27,7 +28,7 @@ export function createProfileRoute(
   existing: readonly Route[],
 ): Route {
   const provider = profile.provider.split("/")[0];
-  if (provider !== "codex" && provider !== "claude" && provider !== "pi")
+  if (provider !== "codex" && !isClaudeProvider(provider) && provider !== "pi")
     throw Error("PROFILE_PROVIDER_UNSUPPORTED");
   const modelId = profile.model ?? profile.provider.split("/").slice(1).join("/");
   const model = models.find((model) => model.id === modelId);
@@ -41,7 +42,7 @@ export function createProfileRoute(
     throw Error("PROFILE_REASONING_UNSUPPORTED");
   if (!model.thinkingOptions?.length) {
     if (profile.thinkingOptionId) throw Error("PROFILE_REASONING_UNSUPPORTED");
-    if (provider !== "claude") throw Error("PROFILE_REASONING_UNSUPPORTED");
+    if (!isClaudeProvider(provider)) throw Error("PROFILE_REASONING_UNSUPPORTED");
     reasoning = "";
   }
   const featureValues: NonNullable<Route["featureValues"]> = {};
@@ -50,14 +51,11 @@ export function createProfileRoute(
       throw Error("PROFILE_FEATURE_UNSUPPORTED");
     featureValues[key] = value as string | boolean | number | null;
   }
-  const access =
-    provider === "codex"
-      ? "codex-pro200"
-      : provider === "claude"
-        ? "claude-company-pro"
-        : modelId.startsWith("opencode-go/")
-          ? "opencode-go"
-          : "openai-api";
+  let access: Route["access"];
+  if (provider === "codex") access = "codex-pro200";
+  else if (isClaudeProvider(provider)) access = claudeSubscriptionAccess[provider];
+  else if (modelId.startsWith("opencode-go/")) access = "opencode-go";
+  else access = "openai-api";
   const stem = `${provider}-${modelId}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 60);
   let id = stem;
   let suffix = 1;

@@ -44,6 +44,8 @@ export function decisionView(input: {
       };
       const classification = value.intent ?? value.complexity;
       if (typeof classification === "string") summary = labels[classification] ?? classification;
+      const workKinds: Record<string, string> = { ui: "UI", general: "Allgemein" };
+      summary = [workKinds[value.workKind], summary].filter(Boolean).join(" · ");
       const actions = [
         ["needExplorer", "Recherche"],
         ["needPlanner", "Planung"],

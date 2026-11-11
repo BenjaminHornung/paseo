@@ -1,12 +1,15 @@
 import type { PaseoAgentHandle } from "@getpaseo/client";
 import { hash } from "./contracts.ts";
 
-type Page = Awaited<ReturnType<PaseoAgentHandle["timeline"]["refetch"]>>;
+export type TimelineObservation = Awaited<ReturnType<PaseoAgentHandle["timeline"]["refetch"]>>;
+export function timelineReadbackHash(page: TimelineObservation): string {
+  return hash({ entries: page.entries, head: page.endCursor, start: page.startCursor });
+}
 export async function observedTimeline(
   handle: PaseoAgentHandle,
   projection: "canonical" | "projected",
-  reached?: (entries: Page["entries"]) => boolean,
-): Promise<Page> {
+  reached?: (entries: TimelineObservation["entries"]) => boolean,
+): Promise<TimelineObservation> {
   let page = await handle.timeline.refetch({ direction: "tail", limit: 200, projection });
   if (page.error || page.gap || page.hasNewer) throw Error("TIMELINE_HISTORY_INCOMPLETE");
   const tail = page;

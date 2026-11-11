@@ -1,5 +1,7 @@
 import { setImmediate } from "node:timers/promises";
 import { ClaudeRuntimeSafety } from "./runtime-safety.js";
+import { ClaudeBackgroundInventory } from "./background-inventory.js";
+import { AgentBackgroundWorkRefreshError } from "../../background-work/index.js";
 import type { ProviderOptions } from "@getpaseo/protocol/agent-types";
 import { applyProviderOptionsPatch } from "../../option-controls.js";
 import { assertChangesAreLive, validateProviderOptions } from "../../provider-options.js";
@@ -372,7 +374,14 @@ type ClaudeConversationRewindTarget =
   | { kind: "fresh-session" }
   | { kind: "fork"; messageId: string };
 
+interface ForegroundInputBinding {
+  turnId: string;
+  query: Query | null;
+  input: AsyncMessageInput<SDKUserMessage>;
+}
+
 const CLAUDE_CAPABILITIES: AgentCapabilityFlags = {
+  supportsBackgroundWorkRefresh: true,
   supportsStreaming: true,
   supportsSessionPersistence: true,
   supportsSessionListing: true,
@@ -2302,6 +2311,7 @@ class ClaudeAgentSession implements AgentSession {
   private readonly resolveBinary: () => Promise<string>;
   private query: Query | null = null;
   private readonly runtimeSafety = new ClaudeRuntimeSafety();
+  private readonly backgroundInventory = new ClaudeBackgroundInventory();
   private readonly backgroundStops = new Map<string, (outcome: string) => void>();
   private processingSdkMessages = 0;
   private readonly harnessEnvironment: Record<string, string>;
@@ -2478,7 +2488,14 @@ class ClaudeAgentSession implements AgentSession {
 
   async getRuntimeInfo(): Promise<AgentRuntimeInfo> {
     if (this.cachedRuntimeInfo) {
-      return { ...this.cachedRuntimeInfo };
+      return {
+        ...this.cachedRuntimeInfo,
+        sessionId: this.claudeSessionId,
+        extra: {
+          ...this.cachedRuntimeInfo.extra,
+          backgroundWorkGeneration: this.backgroundInventory.queryGeneration,
+        },
+      };
     }
     const info: AgentRuntimeInfo = {
       provider: "claude",
@@ -2494,7 +2511,10 @@ class ClaudeAgentSession implements AgentSession {
         : {}),
     };
     this.cachedRuntimeInfo = info;
-    return { ...info };
+    return {
+      ...info,
+      extra: { ...info.extra, backgroundWorkGeneration: this.backgroundInventory.queryGeneration },
+    };
   }
 
   async run(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<AgentRunResult> {
@@ -2589,7 +2609,7 @@ class ClaudeAgentSession implements AgentSession {
     this.notifySubscribers({ type: "turn_started", provider: "claude" });
 
     try {
-      await this.ensureQuery();
+      const query = await this.ensureQuery();
       if (cancelIssued) {
         // Stopped while Claude was still starting up: withdrawn by never sending it.
         if (sdkUserMessageId) this.unstartedMessageUuids.delete(sdkUserMessageId);
@@ -2598,11 +2618,25 @@ class ClaudeAgentSession implements AgentSession {
       if (!this.input) {
         throw new Error("Claude session input stream not initialized");
       }
-      this.activeForegroundQuery = this.query;
+      this.activeForegroundQuery = query;
       this.activeForegroundInput = this.input;
-      this.startQueryPump();
+      const sending = { turnId, query, input: this.input };
+      this.startQueryPump(query);
+      if (this.config.providerOptions.requireBackgroundWorkRefresh)
+        await this.refreshBackgroundWork(true);
+      if (cancelIssued || !this.ownsForegroundInput(sending)) {
+        if (sdkUserMessageId) {
+          this.unstartedMessageUuids.delete(sdkUserMessageId);
+          this.permissionClearingSteerUuids.delete(sdkUserMessageId);
+        }
+        if (this.activeForegroundTurnId === turnId)
+          this.finishForegroundTurn(
+            this.buildTurnFailedEvent("Claude query changed during native preflight"),
+          );
+        return { turnId };
+      }
       this.runtimeSafety.notePromptSent();
-      this.input.push(sdkMessage);
+      sending.input.push(sdkMessage);
       setTimeout(() => {
         if (this.activeForegroundTurnId === turnId) {
           void this.emitSubmittedUserMessage(sdkMessage, turnId, options?.clientMessageId).catch(
@@ -3054,6 +3088,7 @@ class ClaudeAgentSession implements AgentSession {
 
   async canStopRuntime(): Promise<boolean> {
     return (
+      !this.backgroundInventory.refreshing &&
       !this.activeForegroundTurnId &&
       !this.autonomousTurn &&
       !this.mainTurnInFlight &&
@@ -3065,6 +3100,7 @@ class ClaudeAgentSession implements AgentSession {
   }
 
   async close(): Promise<void> {
+    this.backgroundInventory.invalidate();
     this.logger.trace(
       {
         agentId: this.agentId,
@@ -3539,6 +3575,7 @@ class ClaudeAgentSession implements AgentSession {
   }
 
   private async retireQuery(): Promise<void> {
+    this.backgroundInventory.invalidate();
     const oldQuery = this.query;
     if (!oldQuery) return;
     const oldInput = this.input;
@@ -3618,6 +3655,7 @@ class ClaudeAgentSession implements AgentSession {
           this.childProcess = child;
           child.once("exit", (code, signal) => this.handleRuntimeExit(child, code, signal));
         },
+        backgroundInventory: this.backgroundInventory,
       },
     );
     this.queryStarting = false;
@@ -3741,7 +3779,11 @@ class ClaudeAgentSession implements AgentSession {
     const { thinking, effort, ultracode } = this.resolveThinkingConfig();
     const appendedSystemPrompt = this.buildAppendedSystemPrompt();
     // `fast_mode` is a composer control the provider applies through flag settings.
-    const { fast_mode: _fastMode, ...sdkProviderOptions } = this.config.providerOptions;
+    const {
+      fast_mode: _fastMode,
+      requireBackgroundWorkRefresh: _requireRefresh,
+      ...sdkProviderOptions
+    } = this.config.providerOptions;
     const providerOptions = applyClaudeToolPolicy(sdkProviderOptions, this.config.toolPolicy);
     const settingsOptions = await this.buildSettingsOptions(providerOptions, { ultracode });
     const sdkEnv = this.harnessEnvironment;
@@ -4201,6 +4243,7 @@ class ClaudeAgentSession implements AgentSession {
   }
 
   private failRunningRuntimeTasks(): void {
+    this.backgroundInventory.invalidate();
     for (const finish of this.backgroundStops.values()) finish("connection lost");
     this.runtimeSafety.retire();
     this.dispatchEvents([
@@ -4212,12 +4255,12 @@ class ClaudeAgentSession implements AgentSession {
     ]);
   }
 
-  private startQueryPump(): void {
-    if (this.closed || this.queryPumpPromise) {
+  private startQueryPump(query: Query): void {
+    if (!this.ownsQuery(query) || this.queryPumpPromise) {
       return;
     }
 
-    const pump = this.runQueryPump().catch((error) => {
+    const pump = this.runQueryPump(query).catch((error) => {
       this.logger.trace(
         {
           agentId: this.agentId,
@@ -4238,24 +4281,8 @@ class ClaudeAgentSession implements AgentSession {
     });
   }
 
-  private async runQueryPump(): Promise<void> {
-    let activeQuery: Query;
-    try {
-      activeQuery = await this.ensureQuery();
-    } catch (error) {
-      this.logger.trace(
-        {
-          agentId: this.agentId,
-          provider: "claude",
-          sessionId: this.claudeSessionId,
-          turnId: this.activeForegroundTurnId ?? this.autonomousTurn?.id ?? undefined,
-          err: error,
-        },
-        "provider.claude.query_pump.init_failed",
-      );
-      this.failActiveTurns(error instanceof Error ? error.message : "Claude stream failed");
-      return;
-    }
+  private async runQueryPump(activeQuery: Query): Promise<void> {
+    if (!this.ownsQuery(activeQuery)) return;
 
     let consecutiveInterruptAbortRecoveries = 0;
     const logRawMessage = (message: SDKMessage): void => {
@@ -4290,10 +4317,27 @@ class ClaudeAgentSession implements AgentSession {
           this.dispatchEvents([
             { type: "background_work", provider: "claude", items: backgroundWork },
           ]);
-        return false;
+        if (
+          message.type === "system" &&
+          message.subtype === "background_tasks_changed" &&
+          this.claudeSessionId === null
+        ) {
+          const capture = this.captureSessionIdFromMessage(message);
+          if (capture.threadStartedSessionId)
+            this.dispatchEvents([
+              {
+                type: "thread_started",
+                provider: "claude",
+                sessionId: capture.threadStartedSessionId,
+              },
+            ]);
+        }
       } finally {
         this.processingSdkMessages--;
       }
+      // A proof must also observe that normal foreground processing has finished.
+      this.backgroundInventory.processed(message);
+      return false;
     };
     const drainActiveQuery = async (): Promise<boolean> => {
       for await (const message of activeQuery) {
@@ -4411,6 +4455,58 @@ class ClaudeAgentSession implements AgentSession {
 
   private ownsQuery(query: Query): boolean {
     return !this.closed && this.query === query;
+  }
+
+  private ownsForegroundInput(binding: ForegroundInputBinding): boolean {
+    return (
+      !!binding.query &&
+      this.ownsQuery(binding.query) &&
+      this.activeForegroundTurnId === binding.turnId &&
+      this.activeForegroundQuery === binding.query &&
+      this.input === binding.input &&
+      this.activeForegroundInput === binding.input
+    );
+  }
+
+  get backgroundWorkGeneration(): string | null {
+    return this.backgroundInventory.queryGeneration;
+  }
+  get backgroundWorkRevision(): number | null {
+    return this.backgroundInventory.stateRevision;
+  }
+
+  async refreshBackgroundWork(beforePrompt = false) {
+    const query = this.query;
+    if (
+      !query ||
+      this.closed ||
+      this.pendingPermissions.size > 0 ||
+      (!beforePrompt &&
+        (this.activeForegroundTurnId || this.autonomousTurn || this.mainTurnInFlight))
+    )
+      throw new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_SESSION_UNAVAILABLE");
+    this.startQueryPump(query);
+    return this.backgroundInventory.refresh({
+      query,
+      sessionId: this.claudeSessionId,
+      isCurrent: () => this.ownsQuery(query),
+      observation: (sessionId) => {
+        if (
+          this.claudeSessionId !== sessionId ||
+          this.pendingPermissions.size > 0 ||
+          this.processingSdkMessages !== 0
+        )
+          throw new AgentBackgroundWorkRefreshError("BACKGROUND_WORK_SESSION_CHANGED");
+        return {
+          providerSessionId: sessionId,
+          coverage: "claude_background_tasks",
+          queriedProviderSessionIds: [sessionId],
+          foregroundActive:
+            !!this.activeForegroundTurnId || !!this.autonomousTurn || this.mainTurnInFlight,
+          items: this.runtimeSafety.completionInventory(sessionId),
+        };
+      },
+    });
   }
 
   private async routeSdkMessageFromPump(message: SDKMessage): Promise<void> {
@@ -4954,6 +5050,23 @@ class ClaudeAgentSession implements AgentSession {
       return;
     }
     const taskNotificationItem = mapTaskNotificationSystemRecordToToolCall(message);
+    if (
+      taskNotificationItem &&
+      !this.replayingHistory &&
+      this.query &&
+      this.claudeSessionId === message.session_id &&
+      this.backgroundInventory.queryGeneration
+    ) {
+      taskNotificationItem.metadata = {
+        ...taskNotificationItem.metadata,
+        claudeNativeResult: {
+          kind: "task_notification",
+          providerSessionId: message.session_id,
+          queryGeneration: this.backgroundInventory.queryGeneration,
+          taskId: message.task_id,
+        },
+      };
+    }
     const ownerSubagentId = this.taskProtocolSource.resolveTaskOwner(message.task_id, taskUseId);
     if (taskNotificationItem && ownerSubagentId) {
       events.push({
@@ -5893,6 +6006,7 @@ class ClaudeAgentSession implements AgentSession {
     // one as an assistant_message markdown image after the tool_call (matching how Codex emits).
     const { images, text } = splitClaudeToolResultImages(block.content);
     const output = this.buildToolOutput(text, block, entry);
+    const metadata = this.nativeToolResultMetadata({ entry, block });
 
     const settledToolCall = block.is_error
       ? mapClaudeFailedToolCall({
@@ -5901,12 +6015,14 @@ class ClaudeAgentSession implements AgentSession {
           input: entry?.input ?? null,
           output: output ?? null,
           error: { ...block, content: text },
+          metadata,
         })
       : mapClaudeCompletedToolCall({
           name: toolName,
           callId,
           input: entry?.input ?? null,
           output: output ?? null,
+          metadata,
         });
     this.pushToolCall(settledToolCall, items);
     this.rememberSettledSubagentToolCall(settledToolCall, entry);
@@ -5923,6 +6039,31 @@ class ClaudeAgentSession implements AgentSession {
     if (typeof block.tool_use_id === "string") {
       this.toolUseCache.delete(block.tool_use_id);
     }
+  }
+
+  private nativeToolResultMetadata(input: {
+    entry: ToolUseCacheEntry | undefined;
+    block: ClaudeContentChunk;
+  }): AgentMetadata | undefined {
+    const generation = this.backgroundInventory.queryGeneration;
+    if (
+      this.replayingHistory ||
+      !this.query ||
+      !this.claudeSessionId ||
+      !generation ||
+      input.entry?.name !== "Bash" ||
+      input.block.tool_use_id !== input.entry.id
+    )
+      return undefined;
+    return {
+      claudeNativeResult: {
+        kind: "tool_result",
+        providerSessionId: this.claudeSessionId,
+        queryGeneration: generation,
+        toolUseId: input.entry.id,
+        isError: input.block.is_error === true,
+      },
+    };
   }
 
   private rememberSettledSubagentToolCall(

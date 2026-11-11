@@ -2162,6 +2162,7 @@ export class VoiceAssistantWebSocketServer {
         // COMPAT(agentBackgroundWork): added after v0.11.0-beta.5, remove gate after 2027-04-06.
         agentBackgroundWork: true,
         agentBackgroundWorkRefresh: true,
+        agentBackgroundWorkClaudeRefresh: true,
         // COMPAT(agentBackgroundWorkStop): added after v0.15.0, remove after 2027-05-03.
         agentBackgroundWorkStop: true,
         // COMPAT(projectedSubagentTimeline): added after v0.8.0, remove gates after 2027-03-14; retain advertisement.
