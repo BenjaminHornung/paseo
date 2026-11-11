@@ -15,7 +15,8 @@ import { settingsOperation } from "./settings.ts";
 import { randomUUID } from "node:crypto";
 import { automaticTaskKeys, taskDispatchAllowed } from "./automation.ts";
 import { acquireWatchLease } from "./watch-lock.ts";
-import { assertTaskAssessment, approveLowConfidenceIntake, captureHumanIntake } from "./intake.ts";
+import { intakeConfirmationSchema } from "../paseo-plugin/shared/intake-confirmation.ts";
+import { assertTaskAssessment, approveIntakeModelAnswer } from "./intake.ts";
 import { bindLegacyIntakeIdentity, rebaseLegacyIntakeCursor } from "./intake-identity.ts";
 import { readAutomation } from "./automation.ts";
 
@@ -217,16 +218,14 @@ try {
         const main = readAutomation().mains.find((main) => main.agentId === subcommand);
         if (!main) throw Error("INTAKE_MIGRATION_MAIN_NOT_REGISTERED");
         const p = await connection();
-        const snapshot = (await p.client.agents.ref(main.agentId).refresh())?.agent;
-        if (
-          !snapshot ||
-          snapshot.status !== "idle" ||
-          snapshot.activeTurn ||
-          snapshot.pendingPermissions.length
-        )
-          throw Error("AUTOMATION_MAIN_MUST_BE_IDLE");
-        await captureHumanIntake(store, config, p.client, main);
-        approveLowConfidenceIntake(store, main.agentId, argument, process.argv[5], process.argv[6]);
+        await approveIntakeModelAnswer(store, p.client, main, {
+          assessmentId: argument,
+          messageId: process.argv[5],
+          reason: process.argv[6],
+          confirmation: process.argv[7]
+            ? intakeConfirmationSchema.parse(JSON.parse(process.argv[7]))
+            : undefined,
+        });
         print({ approved: true, assessmentId: argument });
       } else if (command === "intake-rebase" && subcommand && argument && process.argv[5]) {
         const main = readAutomation().mains.find((main) => main.agentId === subcommand);

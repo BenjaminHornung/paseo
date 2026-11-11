@@ -15,7 +15,13 @@ import {
   type PackageResult,
 } from "../src/assessments.ts";
 import { Engine } from "../src/engine.ts";
-import { approveLowConfidenceIntake, assertTaskAssessment, currentIntake } from "../src/intake.ts";
+import {
+  approveLowConfidenceIntake,
+  approveIntakeModelAnswer,
+  assertTaskAssessment,
+  currentIntake,
+  markIntakeClassificationPending,
+} from "../src/intake.ts";
 import {
   canonicalPath,
   configSchema,
@@ -28,6 +34,268 @@ import { PaseoProvider, type Snapshot } from "../src/provider.ts";
 import { settingsOperation } from "../src/settings.ts";
 import { Store } from "../src/store.ts";
 import { CredentialVault } from "../src/secrets.ts";
+import { decisionHistory } from "../src/decision-history.ts";
+
+test("explicit model confirmation preserves the original human intake and cannot cover newer input", async (t) => {
+  for (const blocked of [
+    undefined,
+    "new-pending",
+    "changed-reply",
+    "newer-input",
+    "unverified-original",
+    "unseen-timeline",
+  ] as const) {
+    await t.test(
+      blocked ?? "bound confirmation supersedes only older legacy observations",
+      async () => {
+        const store = new Store(":memory:");
+        try {
+          const agentId = "confirmed-main";
+          const facts: IntakeFacts = {
+            mainAgentId: agentId,
+            messageId: "original-human-message",
+            origin: blocked === "unverified-original" ? "unverified" : "human",
+            directory: process.cwd(),
+            text: "Implement the public pilot fixture",
+            dataScope: "public",
+            knownFacts: [],
+            messageRevision: 1,
+            factsRevision: 1,
+          };
+          markIntakeClassificationPending(store, agentId, "legacy-transport-id");
+          store.db
+            .prepare("INSERT INTO internal_messages VALUES(?,?,?)")
+            .run(agentId, facts.messageId, `human:${hash(facts.text)}`);
+          store.event(
+            `HUMAN_INPUT_RECEIPT:${JSON.stringify({ agentId, messageId: facts.messageId })}`,
+          );
+          const result: IntakeResult = {
+            intent: "other",
+            needImplementation: false,
+            needExplorer: false,
+            needPlanner: true,
+            needAdvisor: false,
+            extraReviewRecommended: false,
+          };
+          const original: Assessment<IntakeResult> = {
+            id: intakeIdentity(facts),
+            kind: "intake",
+            factsHash: hash(facts),
+            version: "intake-v3",
+            source: "fallback",
+            reason: "DECISIONS_LOW_CONFIDENCE",
+            result,
+            answers: [
+              { name: "intent", value: "new-task", confidence: 0.74 },
+              { name: "needImplementation", value: true, confidence: 0.1 },
+            ],
+          };
+          insertAssessment(store, original, facts, agentId);
+          const replyFacts: IntakeFacts = {
+            ...facts,
+            messageId: "actual-question-answer",
+            text: "Confirm exactly this assessment",
+            origin: "unverified",
+          };
+          const reply: Assessment<IntakeResult> = {
+            id: intakeIdentity(replyFacts),
+            kind: "intake",
+            factsHash: hash(replyFacts),
+            version: "intake-v3",
+            source: "fallback",
+            reason: "INTAKE_HUMAN_ORIGIN_UNCONFIRMED",
+            result,
+          };
+          insertAssessment(store, reply, replyFacts, agentId);
+          store.db
+            .prepare("INSERT INTO main_checkpoints(agent_id,message_id) VALUES(?,?)")
+            .run(agentId, replyFacts.messageId);
+          const confirmation = {
+            assessmentId: reply.id,
+            messageId: replyFacts.messageId,
+            assessmentHash: blocked === "changed-reply" ? "0".repeat(64) : hash(reply),
+          };
+          assert.throws(
+            () =>
+              approveLowConfidenceIntake(
+                store,
+                agentId,
+                original.id,
+                facts.messageId,
+                "explicit user confirmation",
+              ),
+            /INTAKE_APPROVAL_SUPERSEDED/,
+          );
+          if (blocked === "new-pending")
+            markIntakeClassificationPending(store, agentId, "unobserved-new-input");
+          if (blocked === "newer-input") {
+            const newerFacts = { ...replyFacts, messageId: "newer-unverified-input" };
+            insertAssessment(
+              store,
+              { ...reply, id: intakeIdentity(newerFacts), factsHash: hash(newerFacts) },
+              newerFacts,
+              agentId,
+            );
+          }
+          const client = {
+            agents: {
+              ref: () => ({
+                id: agentId,
+                runtimeInfo: { sessionId: "fixture-native-session" },
+                refresh: async () => ({
+                  agent: {
+                    id: agentId,
+                    provider: "codex",
+                    cwd: facts.directory,
+                    status: "idle",
+                    activeTurn: false,
+                    pendingPermissions: [],
+                    runtimeInfo: { sessionId: "fixture-native-session" },
+                  },
+                }),
+                timeline: {
+                  refetch: async ({ projection }: { projection: string }) => ({
+                    entries: [
+                      {
+                        timestamp: new Date().toISOString(),
+                        seqStart: 1,
+                        seqEnd: 1,
+                        item: {
+                          type: "user_message",
+                          messageId:
+                            blocked === "unseen-timeline"
+                              ? "not-yet-classified-answer"
+                              : replyFacts.messageId,
+                          text: replyFacts.text,
+                        },
+                      },
+                      {
+                        timestamp: new Date().toISOString(),
+                        seqStart: 2,
+                        seqEnd: 2,
+                        item:
+                          projection === "projected"
+                            ? {
+                                type: "tool_call",
+                                callId: "paseo-agent-message:operator-report",
+                                name: "agent_message",
+                                status: "completed",
+                                error: null,
+                                detail: {
+                                  type: "plain_text",
+                                  text: "Operator result; no human authorization",
+                                  icon: "bot",
+                                },
+                                agentMessage: {
+                                  event: "finished",
+                                  sender: { id: "existing-operator" },
+                                  text: "Operator result; no human authorization",
+                                },
+                              }
+                            : {
+                                type: "user_message",
+                                messageId: "operator-report",
+                                text: "Native agent report envelope",
+                              },
+                      },
+                    ],
+                    error: false,
+                    gap: false,
+                    hasOlder: false,
+                    hasNewer: false,
+                  }),
+                },
+              }),
+            },
+          } as unknown as Parameters<typeof approveIntakeModelAnswer>[1];
+          const approve = () =>
+            approveIntakeModelAnswer(
+              store,
+              client,
+              { agentId, directory: facts.directory },
+              {
+                assessmentId: original.id,
+                messageId: facts.messageId,
+                reason: "explicit user confirmation",
+                confirmation,
+              },
+            );
+          if (blocked) {
+            const errors = {
+              "new-pending": /INTAKE_PENDING/,
+              "changed-reply": /INTAKE_CONFIRMATION_IDENTITY_MISMATCH/,
+              "unverified-original": /INTAKE_HUMAN_ORIGIN_UNCONFIRMED/,
+              "newer-input": /INTAKE_APPROVAL_SUPERSEDED/,
+              "unseen-timeline": /INTAKE_APPROVAL_SUPERSEDED/,
+            };
+            const error = errors[blocked];
+            await assert.rejects(approve, error);
+            assert.equal(
+              store.db
+                .prepare(
+                  "SELECT count(*) AS n FROM events WHERE kind LIKE 'OPERATOR_INTAKE_APPROVED:%'",
+                )
+                .get()!.n,
+              0,
+            );
+            return;
+          }
+          await approve();
+          await approve();
+          const active = currentIntake(store, agentId, true);
+          assert.equal(
+            active.id,
+            original.id,
+            "confirmation must authorize the original human request, never create replacement work",
+          );
+          assert.equal(active.source, "operator-confirmed");
+          assert.equal(active.result.intent, "new-task");
+          assert.equal(active.result.needImplementation, true);
+          assert.equal(currentIntake(store, agentId, false).id, original.id);
+          assert.equal(
+            store.db
+              .prepare("SELECT count(*) AS n FROM internal_messages WHERE message_id=?")
+              .get(replyFacts.messageId)!.n,
+            0,
+            "confirmation must not manufacture a human receipt",
+          );
+          assert.deepEqual(
+            JSON.parse(
+              (
+                store.db
+                  .prepare("SELECT result_json FROM assessments WHERE id=?")
+                  .get(original.id) as { result_json: string }
+              ).result_json,
+            ),
+            original,
+          );
+          assert.equal(
+            store.db
+              .prepare(
+                "SELECT count(*) AS n FROM events WHERE kind LIKE 'OPERATOR_INTAKE_APPROVED:%'",
+              )
+              .get()!.n,
+            1,
+          );
+          const newerFacts = { ...replyFacts, messageId: "later-real-input" };
+          insertAssessment(
+            store,
+            { ...reply, id: intakeIdentity(newerFacts), factsHash: hash(newerFacts) },
+            newerFacts,
+            agentId,
+          );
+          assert.throws(
+            () => currentIntake(store, agentId, true),
+            /INTAKE_HUMAN_ORIGIN_UNCONFIRMED/,
+            "a prior confirmation cannot cover a subsequent input",
+          );
+        } finally {
+          store.close();
+        }
+      },
+    );
+  }
+});
 
 function gitExecutable(): string {
   const command =
@@ -645,6 +913,24 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
   const effectiveApproval = currentIntake(riskStore, agentId, false);
   assert.equal(effectiveApproval.source, "operator-confirmed");
   assert.equal(effectiveApproval.result.intent, "approval");
+  const history = decisionHistory(
+    riskStore,
+    repo,
+    agentId,
+    lowConfidenceApprovalRow.id,
+    undefined,
+    vaultRoot,
+  );
+  assert.equal(
+    history.detail?.source,
+    "operator-confirmed",
+    "history must show the effective confirmation alongside immutable model diagnostics",
+  );
+  assert.equal(
+    history.detail?.approval,
+    undefined,
+    "a confirmed model answer must not offer another approval action",
+  );
   const riskApproval = (await settingsOperation(
     {
       operation: "auto-task",

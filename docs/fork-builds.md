@@ -78,7 +78,7 @@ still explicitly selects that home; from an upstream Paseo terminal use
 `paseo-advanced.cmd --home C:/Users/<user>/.paseo-advanced ...` or clear that override
 in the calling process. This does not change the user's global environment.
 
-For an existing Advanced `bfa2fe1a2` installation, the successful run also provides
+For plugin-only changes to an existing Advanced installation, the successful run provides
 `paseo-advanced-plugin-repair-<commit>`. Check its `pluginFileSha256` values against
 the three files in `paseo-plugin/` and confirm `pluginCompatibleControllerInputSha256`
 includes the installed `resources/orchestrator/dist/build-info.json`'s
@@ -90,6 +90,46 @@ data/configuration, then run the Advanced CLI with its explicit home:
 `plugin reload paseo-orchestrator`, followed by `plugin ls --json` and require `running`.
 This repairs the bundled plugin without replacing the renderer or restarting the
 daemon. The full installer/ZIP includes the same fix for new installations.
+
+### Confirm an uncertain intake assessment
+
+Open the main's Orchestrator panel, expand the Decisions history and select the
+original human intake. **Modellbewertung bestätigen…** shows the model answer
+and any single following unverified answer. Confirm only when that following
+answer belongs to this assessment. The second button explicitly confirms the
+selected assessment; it sends no chat message and starts no task or model call.
+The original message, model response and human-origin evidence remain immutable.
+The controller records a separate confirmation bound to the exact assessment and
+the following answer's assessment hash. Another input, changed answer, different
+scope, pending decision or non-idle main blocks the action.
+Intake reads use the daemon's projected timeline: native agent reports are tool
+messages, not new human requests. Human-origin receipts are still mandatory for
+the original task; text that merely resembles a report is never sufficient proof.
+
+An explicitly confirmed **new task** supersedes legacy classification markers
+created before that task's original human-input receipt. This does not classify
+those old observations, grant their instructions authority or clear newer pending
+input. Change requests and approvals cannot supersede those markers.
+
+The operator CLI uses the same identity/idle/head checks:
+`intake-approve <agentId> <assessmentId> <originalMessageId> <reason> [confirmationJson]`.
+The optional JSON has exactly `assessmentId`, `messageId` and `assessmentHash` for
+the single following unverified assessment. It is an explicit classification of
+that answer as confirmation, never a manufactured human receipt or a new grant.
+
+This fix requires the matching controller **and** plugin. Use the successful
+run's `paseo-advanced-controller-repair-<commit>` or full Windows package. The old
+three-file plugin repair cannot upgrade an older controller for this operation;
+its compatibility list deliberately excludes those old controller hashes.
+The controller repair contains only compiled `dist/` code and verification metadata,
+including the three compiled plugin files under `paseo-plugin/` inside that dist
+tree. After independent source/artifact review and choosing an idle installation
+time, back up the existing code, replace `resources/orchestrator/dist/`, and copy
+its three `dist/paseo-plugin/` entries to `resources/orchestrator/paseo-plugin/`.
+Preserve `~/.paseo-advanced/orchestrator` entirely. Public plugin reload applies the
+code; no renderer replacement or daemon restart is required. An existing running
+controller watch process must be verified stopped through its supported lifecycle
+before replacing code; do not stop unrelated or unidentified processes.
 
 ### Prepare an existing main for the normal composer
 

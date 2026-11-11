@@ -11,7 +11,11 @@ import {
 } from "./shared/settings";
 import { AutomationRuntime, orchestrationTools } from "./server/automation";
 import { loadStatus, autoRouting, submitInput, abandonInput, prepareInput } from "./shared/status";
-import { decisionsHistory, decisionsHistorySchema } from "./shared/decisions-history";
+import {
+  decisionsHistory,
+  decisionsHistorySchema,
+  approveIntake,
+} from "./shared/decisions-history";
 import { prepareSession } from "./shared/preparation";
 import { prepareOrchestratorSession } from "./server/preparation";
 
@@ -73,6 +77,9 @@ export default function contribute(server: PluginServerContext) {
   });
   server.handle(decisionsHistory, async (input) =>
     decisionsHistorySchema.parse(await controller({ operation: "decision-history", ...input })),
+  );
+  server.handle(approveIntake, async (input) =>
+    approveIntake.output.parse(await controller({ operation: "intake-approve", ...input })),
   );
   server.handle(autoRouting, async (input, { paseo }) =>
     automation.toggle(input.agentId, input.enabled, paseo),

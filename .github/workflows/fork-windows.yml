@@ -141,6 +141,14 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Upload controller and plugin repair without user data
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: paseo-advanced-controller-repair-${{ github.sha }}
+          path: packages/orchestrator/dist/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Upload packaged smoke evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -1,4 +1,4 @@
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi, PaseoAgentHandle } from "@getpaseo/client";
 import path from "node:path";
 import { z } from "zod";
 import { canonicalPath, contractSchema, hash, type Config, type Contract } from "./contracts.ts";
@@ -16,6 +16,7 @@ import {
 import { Store } from "./store.ts";
 import { observedTimeline } from "./timeline.ts";
 import { verifiedProviderSessionId } from "./completion.ts";
+import type { IntakeConfirmation } from "../paseo-plugin/shared/intake-confirmation.ts";
 import {
   intakeIdentities,
   rememberIntakeIdentity,
@@ -37,6 +38,36 @@ const taskApprovalLinkSchema = z.strictObject({
 });
 type TaskApprovalLink = z.infer<typeof taskApprovalLinkSchema>;
 const approvalLinkPrefix = "TASK_APPROVAL_LINK:";
+
+interface ModelAnswerApproval {
+  agentId: string;
+  assessmentId: string;
+  messageId: string;
+  assessmentHash: string;
+  effectiveResult: IntakeResult;
+  confirmation?: IntakeConfirmation;
+  supersededPendingSequences?: number[];
+}
+function modelAnswerApprovals(store: Store): ModelAnswerApproval[] {
+  const rows = store.db
+    .prepare(
+      "SELECT kind FROM events WHERE kind LIKE 'OPERATOR_INTAKE_APPROVED:%' ORDER BY sequence DESC",
+    )
+    .all() as { kind: string }[];
+  return rows.map((row) => JSON.parse(row.kind.slice("OPERATOR_INTAKE_APPROVED:".length)));
+}
+
+function approvedOriginal(
+  store: Store,
+  approval: ModelAnswerApproval,
+): Assessment<IntakeResult> | undefined {
+  const row = store.db
+    .prepare("SELECT result_json FROM assessments WHERE id=? AND owner_id=? AND kind='intake'")
+    .get(approval.assessmentId, approval.agentId) as { result_json: string | null } | undefined;
+  if (!row?.result_json) return;
+  const original = JSON.parse(row.result_json) as Assessment<IntakeResult>;
+  return hash(original) === approval.assessmentHash ? original : undefined;
+}
 
 export function recordInternalMessage(
   store: Store,
@@ -194,7 +225,7 @@ export async function captureHumanIntake(
     );
   const timeline = await observedTimeline(
     handle,
-    "canonical",
+    "projected",
     emptyBaseline || staleReceipts.length
       ? undefined
       : checkpoint?.message_id
@@ -410,7 +441,7 @@ export async function captureHumanIntake(
       .get(main.agentId) as { result_json: string | null } | undefined;
     if (prior?.result_json) latest = JSON.parse(prior.result_json) as Assessment<IntakeResult>;
   }
-  return latest;
+  return effectiveIntakeAssessment(store, latest);
 }
 export function currentIntake(
   store: Store,
@@ -442,7 +473,7 @@ export function currentIntake(
     .get(assessment.id) as { facts_json: string };
   const facts = intakeFactsSchema.parse(JSON.parse(origin.facts_json));
   assertHumanReceipt(store, facts, !forMutation);
-  if (forMutation && checkpoint?.work_intake_id && checkpoint.work_intake_id !== assessment.id) {
+  if (forMutation && checkpoint?.work_intake_id) {
     const latestRow = store.db
       .prepare(
         "SELECT id,facts_json,result_json FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY rowid DESC LIMIT 1",
@@ -450,18 +481,20 @@ export function currentIntake(
       .get(agentId) as { id: string; facts_json: string; result_json: string | null } | undefined;
     if (latestRow?.id !== assessment.id) {
       if (!latestRow?.result_json) throw Error("INTAKE_PENDING");
-      const latestFacts = intakeFactsSchema.parse(JSON.parse(latestRow.facts_json));
-      assertHumanReceipt(store, latestFacts);
       const latest = effectiveIntakeAssessment(
         store,
         JSON.parse(latestRow.result_json) as Assessment<IntakeResult>,
       );
+      const latestFactsRow = store.db
+        .prepare("SELECT facts_json FROM assessments WHERE id=?")
+        .get(latest.id) as { facts_json: string };
+      assertHumanReceipt(store, intakeFactsSchema.parse(JSON.parse(latestFactsRow.facts_json)));
       const isInformational = ["question", "status"].includes(latest.result.intent);
       const isApprovedContinuation =
         latest.result.intent === "approval" &&
         latest.result.needImplementation &&
         hasTaskApprovalLink(store, agentId, checkpoint.work_intake_id, latest);
-      if (!isInformational && !isApprovedContinuation) {
+      if (latest.id !== assessment.id && !isInformational && !isApprovedContinuation) {
         if (latest.result.intent === "approval" && latest.result.needImplementation)
           throw Error("APPROVAL_TARGET_REQUIRED");
         throw Error("INTAKE_SUPERSEDED");
@@ -478,18 +511,32 @@ export function currentIntake(
   return assessment;
 }
 
-function effectiveIntakeAssessment(
+export function effectiveIntakeAssessment(
   store: Store,
   assessment: Assessment<IntakeResult>,
-): Assessment<IntakeResult> {
-  const rows = store.db
-    .prepare(
-      "SELECT kind FROM events WHERE kind LIKE 'OPERATOR_INTAKE_APPROVED:%' ORDER BY sequence DESC",
-    )
-    .all() as { kind: string }[];
-  const approval = rows
-    .map((row) => JSON.parse(row.kind.slice("OPERATOR_INTAKE_APPROVED:".length)))
-    .find((row) => row.assessmentId === assessment.id && row.assessmentHash === hash(assessment));
+): Assessment<IntakeResult>;
+export function effectiveIntakeAssessment(
+  store: Store,
+  assessment: Assessment<IntakeResult> | undefined,
+): Assessment<IntakeResult> | undefined;
+export function effectiveIntakeAssessment(
+  store: Store,
+  assessment: Assessment<IntakeResult> | undefined,
+): Assessment<IntakeResult> | undefined {
+  if (!assessment) return;
+  const approvals = modelAnswerApprovals(store);
+  const confirmation = approvals.find(
+    (row) =>
+      row.confirmation?.assessmentId === assessment.id &&
+      row.confirmation.assessmentHash === hash(assessment),
+  );
+  if (confirmation) {
+    const original = approvedOriginal(store, confirmation);
+    if (original) return effectiveIntakeAssessment(store, original);
+  }
+  const approval = approvals.find(
+    (row) => row.assessmentId === assessment.id && row.assessmentHash === hash(assessment),
+  );
   return approval
     ? {
         ...assessment,
@@ -682,51 +729,197 @@ export function linkApprovalToOutstandingTask(
 
 // Operator-only confirmation of the model's own low-confidence answer. The
 // immutable model response remains available alongside the effective approval.
+type ApprovalMainSnapshot = NonNullable<Awaited<ReturnType<PaseoAgentHandle["refresh"]>>>["agent"];
+function assertIdleApprovalMain(
+  snapshot: ApprovalMainSnapshot | undefined,
+  directory: string,
+): void {
+  if (
+    !snapshot ||
+    snapshot.status !== "idle" ||
+    snapshot.activeTurn ||
+    snapshot.pendingPermissions.length
+  )
+    throw Error("AUTOMATION_MAIN_MUST_BE_IDLE");
+  if (
+    canonicalPath(snapshot.cwd) !== canonicalPath(directory) ||
+    snapshot.provider.split("/")[0] !== "codex"
+  )
+    throw Error("INTAKE_MAIN_IDENTITY_MISMATCH");
+}
+export async function approveIntakeModelAnswer(
+  store: Store,
+  paseo: PaseoApi,
+  main: { agentId: string; directory: string },
+  request: {
+    assessmentId: string;
+    messageId: string;
+    reason: string;
+    confirmation?: IntakeConfirmation;
+  },
+): Promise<void> {
+  const handle = paseo.agents.ref(main.agentId);
+  const before = (await handle.refresh())?.agent;
+  assertIdleApprovalMain(before, main.directory);
+  const sessionId = await verifiedProviderSessionId(handle);
+  // The daemon projects genuine agent reports to tool calls. Canonical provider
+  // envelopes are transport text and must not be mistaken for new human input.
+  const timeline = await observedTimeline(handle, "projected");
+  const entries = resolveIntakeIdentities(
+    timeline.entries,
+    intakeIdentities(store, main.agentId, sessionId),
+    !timeline.hasOlder,
+  );
+  const head = entries.findLast(
+    (entry) =>
+      entry.item.type === "user_message" &&
+      !store.db
+        .prepare(
+          "SELECT 1 FROM internal_messages WHERE agent_id=? AND message_id=? AND kind NOT LIKE 'human:%' AND kind NOT LIKE 'operator-readonly-advisor:%'",
+        )
+        .get(main.agentId, entry.item.clientMessageId ?? entry.item.messageId ?? ""),
+  );
+  const expected = request.confirmation?.messageId ?? request.messageId;
+  const row = store.db
+    .prepare("SELECT facts_json FROM assessments WHERE id=? AND owner_id=? AND kind='intake'")
+    .get(request.confirmation?.assessmentId ?? request.assessmentId, main.agentId) as
+    | { facts_json: string }
+    | undefined;
+  const facts = row ? intakeFactsSchema.parse(JSON.parse(row.facts_json)) : undefined;
+  if (
+    !head ||
+    head.item.type !== "user_message" ||
+    (head.item.clientMessageId ?? head.item.messageId) !== expected ||
+    !facts ||
+    hash(head.item.text) !== hash(facts.text)
+  )
+    throw Error("INTAKE_APPROVAL_SUPERSEDED");
+  const after = (await handle.refresh())?.agent;
+  assertIdleApprovalMain(after, main.directory);
+  if ((await verifiedProviderSessionId(handle)) !== sessionId)
+    throw Error("INTAKE_HISTORY_SESSION_CHANGED");
+  approveLowConfidenceIntake(
+    store,
+    main.agentId,
+    request.assessmentId,
+    request.messageId,
+    request.reason,
+    request.confirmation,
+  );
+}
+
+interface IntakeAssessmentRecord {
+  rowid: number;
+  id: string;
+  facts_json: string;
+  result_json: string;
+}
+
+function assertApprovalReply(
+  store: Store,
+  agentId: string,
+  original: IntakeAssessmentRecord,
+  latest: IntakeAssessmentRecord,
+  facts: IntakeFacts,
+  confirmation: IntakeConfirmation,
+): void {
+  const replyFacts = intakeFactsSchema.parse(JSON.parse(latest.facts_json));
+  const reply = JSON.parse(latest.result_json) as Assessment<IntakeResult>;
+  const intervening = store.db
+    .prepare(
+      "SELECT 1 FROM assessments WHERE owner_id=? AND kind='intake' AND rowid>? AND rowid<? LIMIT 1",
+    )
+    .get(agentId, original.rowid, latest.rowid);
+  if (
+    latest.rowid <= original.rowid ||
+    intervening ||
+    replyFacts.messageId !== confirmation.messageId ||
+    hash(reply) !== confirmation.assessmentHash ||
+    reply.reason !== "INTAKE_HUMAN_ORIGIN_UNCONFIRMED" ||
+    reply.source !== "fallback" ||
+    replyFacts.origin !== "unverified" ||
+    replyFacts.directory !== facts.directory ||
+    replyFacts.dataScope !== facts.dataScope
+  )
+    throw Error("INTAKE_CONFIRMATION_IDENTITY_MISMATCH");
+}
+
+function approvedModelAnswer(
+  assessment: Assessment<IntakeResult>,
+  facts: IntakeFacts,
+): IntakeResult {
+  const intent = assessment.answers?.find((answer) => answer.name === "intent")?.value;
+  if (
+    assessment.source !== "fallback" ||
+    assessment.reason !== "DECISIONS_LOW_CONFIDENCE" ||
+    assessment.answers?.find((answer) => answer.name === "needImplementation")?.value !== true ||
+    !["new-task", "change-request", "approval"].includes(String(intent))
+  )
+    throw Error("INTAKE_MODEL_ANSWER_NOT_APPROVABLE");
+  return intakeResultSchema.parse({
+    intent,
+    needImplementation: true,
+    needPlanner: false,
+    needAdvisor: false,
+    extraReviewRecommended: false,
+    needExplorer: /\b[^\s]+\.(?:md|zip|ts|tsx|js|cs|sql)\b|\b[A-Z][A-Z0-9]+-\d+\b/.test(facts.text),
+  });
+}
+
 export function approveLowConfidenceIntake(
   store: Store,
   agentId: string,
   assessmentId: string,
   messageId: string,
   reason: string,
+  confirmation?: IntakeConfirmation,
 ): void {
   store.transaction(() => {
-    assertIntakeSettled(store, agentId);
     const row = store.db
       .prepare(
-        "SELECT id,facts_json,result_json FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY rowid DESC LIMIT 1",
+        "SELECT rowid,id,facts_json,result_json FROM assessments WHERE owner_id=? AND kind='intake' AND id=?",
       )
-      .get(agentId) as { id: string; facts_json: string; result_json: string } | undefined;
+      .get(agentId, assessmentId) as IntakeAssessmentRecord | undefined;
+    const latest = store.db
+      .prepare(
+        "SELECT rowid,id,facts_json,result_json FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY rowid DESC LIMIT 1",
+      )
+      .get(agentId) as typeof row;
     const checkpoint = store.db
       .prepare("SELECT message_id,work_intake_id FROM main_checkpoints WHERE agent_id=?")
       .get(agentId) as { message_id: string | null; work_intake_id: string | null } | undefined;
-    if (row?.id !== assessmentId || checkpoint?.message_id !== messageId)
+    if (
+      !row ||
+      !latest ||
+      latest.id !== (confirmation?.assessmentId ?? assessmentId) ||
+      checkpoint?.message_id !== (confirmation?.messageId ?? messageId)
+    )
       throw Error("INTAKE_APPROVAL_SUPERSEDED");
     const facts = intakeFactsSchema.parse(JSON.parse(row.facts_json));
     if (facts.messageId !== messageId || !reason.trim())
       throw Error("INTAKE_APPROVAL_IDENTITY_MISMATCH");
     assertHumanReceipt(store, facts);
+    if (confirmation) assertApprovalReply(store, agentId, row, latest, facts, confirmation);
     const assessment = JSON.parse(row.result_json) as Assessment<IntakeResult>;
-    const intent = assessment.answers?.find((answer) => answer.name === "intent")?.value;
-    if (
-      assessment.source !== "fallback" ||
-      assessment.reason !== "DECISIONS_LOW_CONFIDENCE" ||
-      assessment.answers?.find((answer) => answer.name === "needImplementation")?.value !== true ||
-      !["new-task", "change-request", "approval"].includes(String(intent))
-    )
-      throw Error("INTAKE_MODEL_ANSWER_NOT_APPROVABLE");
-    const effectiveResult = intakeResultSchema.parse({
-      intent,
-      needImplementation: true,
-      needPlanner: false,
-      needAdvisor: false,
-      extraReviewRecommended: false,
-      needExplorer: /\b[^\s]+\.(?:md|zip|ts|tsx|js|cs|sql)\b|\b[A-Z][A-Z0-9]+-\d+\b/.test(
-        facts.text,
-      ),
-    });
-    store.event(
-      `OPERATOR_INTAKE_APPROVED:${JSON.stringify({ agentId, assessmentId, messageId, assessmentHash: hash(assessment), effectiveResult, reasonHash: hash(reason) })}`,
-    );
+    const effectiveResult = approvedModelAnswer(assessment, facts);
+    // An explicitly confirmed NEW task replaces older, unreceipted legacy
+    // observations. A pending decision/receipt or any newer observation still
+    // blocks. This records supersession, never a fabricated classification.
+    const receiptKind = `HUMAN_INPUT_RECEIPT:${JSON.stringify({ agentId, messageId })}`;
+    const receipt = store.db
+      .prepare("SELECT sequence FROM events WHERE kind=? ORDER BY sequence LIMIT 1")
+      .get(receiptKind) as { sequence: number } | undefined;
+    const pendingPrefix = `INTAKE_CLASSIFICATION_PENDING:${agentId}:`;
+    const priorPending =
+      effectiveResult.intent === "new-task" && receipt
+        ? (store.db
+            .prepare("SELECT sequence FROM events WHERE substr(kind,1,?)=? AND sequence<?")
+            .all(pendingPrefix.length, pendingPrefix, receipt.sequence) as { sequence: number }[])
+        : [];
+    const supersededPendingSequences = priorPending.map((pending) => pending.sequence);
+    assertIntakeSettled(store, agentId, supersededPendingSequences);
+    const event = `OPERATOR_INTAKE_APPROVED:${JSON.stringify({ agentId, assessmentId, messageId, assessmentHash: hash(assessment), effectiveResult, reasonHash: hash(reason), ...(confirmation ? { confirmation } : {}), ...(supersededPendingSequences.length ? { supersededPendingSequences } : {}) })}`;
+    if (!store.db.prepare("SELECT 1 FROM events WHERE kind=?").get(event)) store.event(event);
     if (effectiveResult.intent !== "approval")
       store.db
         .prepare("UPDATE main_checkpoints SET work_intake_id=? WHERE agent_id=?")
@@ -822,7 +1015,11 @@ export function confirmExistingWork(
     );
   });
 }
-function assertIntakeSettled(store: Store, agentId: string): void {
+function assertIntakeSettled(
+  store: Store,
+  agentId: string,
+  supersedingSequences: number[] = [],
+): void {
   if (
     store.db
       .prepare(
@@ -840,7 +1037,20 @@ function assertIntakeSettled(store: Store, agentId: string): void {
   const pending = store.db
     .prepare("SELECT sequence,kind FROM events WHERE substr(kind,1,?)=? ORDER BY sequence")
     .all(pendingPrefix.length, pendingPrefix) as { sequence: number; kind: string }[];
+  const approvedSupersession = modelAnswerApprovals(store).filter(
+    (approval) =>
+      approval.agentId === agentId &&
+      approval.effectiveResult.intent === "new-task" &&
+      approvedOriginal(store, approval),
+  );
   for (const row of pending) {
+    if (
+      supersedingSequences.includes(row.sequence) ||
+      approvedSupersession.some((approval) =>
+        approval.supersededPendingSequences?.includes(row.sequence),
+      )
+    )
+      continue;
     const settled = row.kind.replace(
       "INTAKE_CLASSIFICATION_PENDING:",
       "INTAKE_CLASSIFICATION_SETTLED:",

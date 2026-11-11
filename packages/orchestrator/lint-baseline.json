@@ -158,7 +158,7 @@
       "file": "packages/orchestrator/paseo-plugin/client/decisions-history.tsx",
       "rule": "eslint(complexity)",
       "message": "function `DecisionsHistory` has a complexity of 37. Maximum allowed is 20.",
-      "sourceSha256": "71029c9ea5486d87d1fa6590be7fccb1a1a463bce5527135c764ea95955791dc",
+      "sourceSha256": "841ee119bf89fef823bd3cf4a3d5b2e46074d4e5f082f5fddcdc893d92680f51",
       "count": 1
     },
     {
@@ -1362,13 +1362,6 @@
       "file": "packages/orchestrator/src/cli.ts",
       "rule": "eslint(max-depth)",
       "message": "Blocks are nested too deeply (5). Maximum allowed is 4.",
-      "sourceSha256": "6421fb5edf230e9c023b459f3b52bfe01af1e04848f0ae02b182b4c604483028",
-      "count": 1
-    },
-    {
-      "file": "packages/orchestrator/src/cli.ts",
-      "rule": "eslint(max-depth)",
-      "message": "Blocks are nested too deeply (5). Maximum allowed is 4.",
       "sourceSha256": "7b4c8150e50516c5526d35298842340c03f7cbba766c13b313aa8c77ae6c6315",
       "count": 1
     },
@@ -1481,7 +1474,7 @@
       "file": "packages/orchestrator/src/decision-history.ts",
       "rule": "eslint(complexity)",
       "message": "function `decisionHistory` has a complexity of 34. Maximum allowed is 20.",
-      "sourceSha256": "1019b8faaf86c49835737f3e6892acb2d1789b9d406197c0b6b6235e22c1ef94",
+      "sourceSha256": "c3f9797d8aeb344133590e0abccef7de5278b73448c6f7fa265852ee190be0a7",
       "count": 1
     },
     {
@@ -1628,7 +1621,7 @@
       "file": "packages/orchestrator/src/intake.ts",
       "rule": "eslint(complexity)",
       "message": "async function `captureHumanIntake` has a complexity of 79. Maximum allowed is 20.",
-      "sourceSha256": "0018f176453e542344b582079a805b9e65e820f708e826043cde6f0b4f33e6fb",
+      "sourceSha256": "240565ef71e09819fc5e26eb216952434d8d36095a3617ca8ea53bbbfa7ea1de",
       "count": 1
     },
     {
@@ -1642,7 +1635,7 @@
       "file": "packages/orchestrator/src/intake.ts",
       "rule": "eslint(complexity)",
       "message": "function `currentIntake` has a complexity of 25. Maximum allowed is 20.",
-      "sourceSha256": "58e252b3689768931e1b0000e7da8456ba7e66a4742c6e2ac07133dd980d1354",
+      "sourceSha256": "57a8ab3b0a4ad204331c5f7838a3b095510a1233e6b325b89a3d69c082e68357",
       "count": 1
     },
     {
@@ -1802,8 +1795,8 @@
     {
       "file": "packages/orchestrator/src/settings.ts",
       "rule": "eslint(complexity)",
-      "message": "async function `settingsOperation` has a complexity of 219. Maximum allowed is 20.",
-      "sourceSha256": "eff6530e760d69ff89d9b1d895e069c673b60d92b7cc06a2c27f95588515f85a",
+      "message": "async function `settingsOperation` has a complexity of 218. Maximum allowed is 20.",
+      "sourceSha256": "987b503b856996197a5552bc42ad513176091887dab9ebd4dbdb7b52899c308c",
       "count": 1
     },
     {

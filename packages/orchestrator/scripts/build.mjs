@@ -95,6 +95,14 @@ for (const input of inputs) {
   hash.update(await readFile(path.resolve(root, input)));
 }
 const compiledInputSha256 = hash.digest("hex");
+const controllerFileSha256 = {};
+for (const output of Object.keys(result.metafile.outputs).sort()) {
+  const file = path.resolve(root, output);
+  const relative = path.relative(path.join(root, "dist"), file).replaceAll("\\", "/");
+  controllerFileSha256[relative] = createHash("sha256")
+    .update(await readFile(file))
+    .digest("hex");
+}
 await mkdir(path.join(root, "dist"), { recursive: true });
 await writeFile(
   path.join(root, "dist/package.json"),
@@ -105,14 +113,28 @@ await writeFile(
   JSON.stringify(
     {
       candidateRevision: "80c9ef3a278d8be4fea59ce9b79cc9ab37a71075df0ce60f59b9aad350da9390",
+      sourceCommit: process.env.GITHUB_SHA ?? null,
+      sourceRepository: process.env.GITHUB_REPOSITORY ?? null,
       compiledInputSha256,
-      // The plugin bundles its additive SDK label action; the existing daemon
-      // already implements that wire operation. No controller source/schema or
-      // renderer change is needed when repairing these reviewed base builds.
-      pluginCompatibleControllerInputSha256: [
-        compiledInputSha256,
-        "176685ed8dce0112d082940dc24dcf839ab0ab190d34134a1673cdba8d8fbd7b",
-      ],
+      controllerFileSha256,
+      // Intake confirmation adds a controller RPC. A plugin-only repair must
+      // never advertise compatibility with a controller lacking that operation.
+      pluginCompatibleControllerInputSha256: [compiledInputSha256],
+      controllerRepair: {
+        compatibleBaseInputSha256: [
+          "176685ed8dce0112d082940dc24dcf839ab0ab190d34134a1673cdba8d8fbd7b",
+          "f144eecf2e112f76c1a7af4f6ff4a965ae211b3f58f1a4f59f8b35c36641f9ec",
+        ],
+        minimumNodeMajor: 24,
+        scope: [
+          "dist/",
+          "paseo-plugin/index.client.ts",
+          "paseo-plugin/index.server.ts",
+          "paseo-plugin/paseo-plugin.json",
+        ],
+        includesUserState: false,
+        daemonRestartRequired: false,
+      },
       pluginPreparationConnection: { requiresPasswordlessLoopback: true, credentialLookup: false },
       pluginCompiledInputSha256: pluginHash.digest("hex"),
       pluginFileSha256,

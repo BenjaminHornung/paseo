@@ -1,10 +1,11 @@
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { Loading } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { Text, View } from "react-native";
 import { decisionsHistory } from "../shared/decisions-history";
 import { CompactAction } from "./compact-action";
+import { IntakeConfirmationAction } from "./intake-confirmation";
 
 const labels: Record<string, string> = {
   intent: "Intention",
@@ -75,6 +76,10 @@ export function DecisionsHistory(
     item = items[index],
     detail = detailQuery.data?.detail;
   const colors = props.theme.colors;
+  const onApproved = useCallback(() => {
+    void query.refetch();
+    void detailQuery.refetch();
+  }, [query, detailQuery]);
   const plain = (text: string) => (
     <Text style={{ color: colors.foregroundMuted, fontSize: 12, lineHeight: 18 }}>{text}</Text>
   );
@@ -200,6 +205,15 @@ export function DecisionsHistory(
                 title="3 · Wirksames Controller-Ergebnis"
                 value={detail.result ?? "Noch nicht abgeschlossen"}
                 theme={props.theme}
+              />
+              <IntakeConfirmationAction
+                key={detail.id}
+                theme={props.theme}
+                directory={props.directory}
+                agentId={props.agentId}
+                assessmentId={detail.id}
+                approval={detail.approval}
+                onApproved={onApproved}
               />
               {plain(
                 "Verbindliche Reviews und Schreibgates gelten zusätzlich. Decisions bestimmt keine Modellroute; dafür gilt deine gespeicherte Priorität.",

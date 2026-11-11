@@ -3,6 +3,56 @@ import type { Store } from "./store.ts";
 import { readAutomation, workflowStatus } from "./automation.ts";
 import { appRoot } from "./settings-files.ts";
 import type { Assessment, IntakeResult, PackageResult } from "./assessments.ts";
+import { effectiveIntakeAssessment } from "./intake.ts";
+import { intakeFactsSchema } from "./assessments.ts";
+
+function displayAssessment(store: Store, result?: Assessment<IntakeResult | PackageResult>) {
+  if (result?.kind !== "intake") return result;
+  const effective = effectiveIntakeAssessment(store, result as Assessment<IntakeResult>);
+  return effective.id === result.id ? effective : result;
+}
+
+function followingConfirmation(store: Store, agentId: string, assessmentId: string) {
+  const latest = store.db
+    .prepare(
+      "SELECT id,facts_json,result_json FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY rowid DESC LIMIT 1",
+    )
+    .get(agentId) as { id: string; facts_json: string; result_json: string | null } | undefined;
+  if (!latest?.result_json || latest.id === assessmentId) return;
+  const reply = JSON.parse(latest.result_json) as Assessment<IntakeResult>;
+  const facts = intakeFactsSchema.parse(JSON.parse(latest.facts_json));
+  if (reply.reason !== "INTAKE_HUMAN_ORIGIN_UNCONFIRMED" || facts.origin !== "unverified") return;
+  return {
+    assessmentId: latest.id,
+    messageId: facts.messageId,
+    assessmentHash: hash(reply),
+    input: JSON.stringify(redacted(facts), null, 2),
+  };
+}
+
+function intakeApprovalView(
+  store: Store,
+  agentId: string,
+  result: Assessment<IntakeResult | PackageResult> | undefined,
+  input: unknown,
+) {
+  if (
+    result?.kind !== "intake" ||
+    result.source !== "fallback" ||
+    result.reason !== "DECISIONS_LOW_CONFIDENCE"
+  )
+    return;
+  const facts = intakeFactsSchema.parse(input);
+  if (
+    facts.origin !== "human" ||
+    !result.answers?.some((answer) => answer.name === "needImplementation" && answer.value === true)
+  )
+    return;
+  return {
+    messageId: facts.messageId,
+    confirmation: followingConfirmation(store, agentId, result.id),
+  };
+}
 
 // This detailed view is returned only on an explicit local GUI request. It must
 // never be added to workflowStatus, model context or a published timeline row.
@@ -75,9 +125,10 @@ export function decisionHistory(
       | undefined;
     if (!row) throw Error("DECISION_NOT_IN_MAIN");
     const facts = JSON.parse(row.facts_json),
-      result = row.result_json
+      stored = row.result_json
         ? (JSON.parse(row.result_json) as Assessment<IntakeResult | PackageResult>)
         : undefined;
+    const result = displayAssessment(store, stored);
     const call = store.db
       .prepare("SELECT state,reserved,charged FROM decision_calls WHERE key=?")
       .get(hash({ id: assessmentId, version: result?.version ?? `${row.kind}-v3` })) as
@@ -97,6 +148,7 @@ export function decisionHistory(
       reservedMicroUsd: call?.reserved ?? 0,
       chargedMicroUsd: call?.charged ?? null,
       inputHash: result?.factsHash ?? hash(facts),
+      approval: intakeApprovalView(store, view.mainAgentId, result, facts),
       provenance: result?.request
         ? "REQUEST_ATTEMPT_RECORDED"
         : call

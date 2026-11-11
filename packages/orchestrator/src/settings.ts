@@ -36,6 +36,7 @@ import { Engine } from "./engine.ts";
 import { Git } from "./git.ts";
 import {
   abandonHumanInput,
+  approveIntakeModelAnswer,
   captureHumanIntake,
   currentIntake,
   linkApprovalToOutstandingTask,
@@ -47,10 +48,19 @@ import { effectiveImplementation, packageFactsSchema, type Classifier } from "./
 import { researchWithSynthesis, researchRequestSchema } from "./research.ts";
 import { processMonitorFile } from "./process-monitor.ts";
 import { verifiedProviderSessionId } from "./completion.ts";
+import { intakeConfirmationSchema } from "../paseo-plugin/shared/intake-confirmation.ts";
 
 export const settingsRequestSchema = z.discriminatedUnion("operation", [
   z.strictObject({ operation: z.literal("get") }),
   z.strictObject({ operation: z.literal("auto-list") }),
+  z.strictObject({
+    operation: z.literal("intake-approve"),
+    agentId: z.string(),
+    directory: z.string(),
+    assessmentId: z.string().regex(/^[a-f0-9]{64}$/),
+    messageId: z.string().min(1),
+    confirmation: intakeConfirmationSchema.optional(),
+  }),
   z.strictObject({
     operation: z.literal("auto-progress"),
     agentId: z.string(),
@@ -236,6 +246,37 @@ export function settingsView(store: Store, config: Config, vault = new Credentia
     activeAttempts: store.active().length,
   };
 }
+async function mainSettingsOperation(
+  request: z.infer<typeof settingsRequestSchema>,
+  context: {
+    store: Store;
+    config: Config;
+    root: string;
+    createProvider(daemonUrl: string): PaseoProvider;
+  },
+) {
+  const { store, config, root, createProvider } = context;
+  if (request.operation === "auto-list")
+    return { ...readAutomation(root), daemonUrl: config.daemonUrl };
+  if (request.operation === "auto-progress")
+    return mainProgress(store, requireAutomaticMain(request.agentId, request.directory, root));
+  if (request.operation !== "intake-approve") return;
+  const main = requireAutomaticMain(request.agentId, request.directory, root);
+  const provider = createProvider(config.daemonUrl);
+  await provider.connect();
+  try {
+    // Confirmation checks public identity and the frozen input head; it never
+    // captures new input or starts a Decisions request.
+    await approveIntakeModelAnswer(store, provider.client, main, {
+      ...request,
+      reason: "User confirmed this model answer in the Decisions history",
+    });
+    return { approved: true, assessmentId: request.assessmentId };
+  } finally {
+    await provider.close();
+  }
+}
+
 export async function settingsOperation(
   input: unknown,
   options: {
@@ -279,13 +320,13 @@ export async function settingsOperation(
     store = new Store(database);
   try {
     const classifier = options.classifierFactory?.(store) ?? new Decisions(store);
-    if (request.operation === "auto-list")
-      return { ...readAutomation(vault.root), daemonUrl: config.daemonUrl };
-    if (request.operation === "auto-progress")
-      return mainProgress(
-        store,
-        requireAutomaticMain(request.agentId, request.directory, vault.root),
-      );
+    const mainOperation = await mainSettingsOperation(request, {
+      store,
+      config,
+      root: vault.root,
+      createProvider,
+    });
+    if (mainOperation !== undefined) return mainOperation;
     if (request.operation === "auto-continue" || request.operation === "auto-inspect-task") {
       const main = requireAutomaticMain(request.agentId, request.directory, vault.root);
       if (!main.taskKeys.includes(request.key)) throw Error("CONTINUATION_TASK_NOT_IN_MAIN");
@@ -521,7 +562,7 @@ export async function settingsOperation(
           const timeline = await handle.timeline.refetch({
             direction: "tail",
             limit: 200,
-            projection: "canonical",
+            projection: "projected",
           });
           if (timeline.error || timeline.gap) throw Error("INTAKE_HISTORY_INCOMPLETE");
           const last = timeline.entries
