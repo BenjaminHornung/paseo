@@ -170,6 +170,98 @@ test("recovery reconciles a completed turn through public waitForFinish despite 
   assert.equal(snapshot?.backgroundActive, true);
 });
 
+// Upstream retry rows persist across turns. An old failed/canceled informational
+// row must not poison a later settled turn, or impersonate process completion.
+test("native Codex retry history settles only terminal rows with exact provenance", async () => {
+  const agent = {
+    cwd: process.cwd(),
+    provider: "codex",
+    status: "idle",
+    activeTurn: null,
+    pendingPermissions: [],
+    runtimeInfo: { sessionId: "codex-native" },
+  };
+  const retry = {
+    type: "tool_call",
+    callId: "older-retry",
+    name: "codex_retry",
+    status: "completed",
+    detail: { type: "plain_text", label: "Reconnected" },
+    metadata: { synthetic: true, source: "codex_stream_retry" },
+  };
+  const checkedShell = {
+    type: "tool_call",
+    callId: "later-check",
+    name: "shell",
+    status: "completed",
+    detail: { type: "shell", command: "node check.mjs", exitCode: 0, output: "ok" },
+  };
+  let row: unknown = retry;
+  const handle = {
+    id: "codex-agent",
+    status: "idle",
+    activeTurn: null,
+    pendingPermissions: [],
+    runtimeInfo: agent.runtimeInfo,
+    current: () => agent,
+    refresh: async () => ({ agent }),
+    waitForFinish: async () => ({ status: "idle", final: agent }),
+    timeline: {
+      refetch: async () => ({
+        entries: [row, checkedShell].map((item) => ({ item })),
+        error: null,
+        gap: false,
+        hasOlder: false,
+        hasNewer: false,
+      }),
+    },
+    backgroundWork: {
+      refresh: async () => ({
+        agentId: "codex-agent",
+        providerSessionId: "codex-native",
+        observationId: "fresh",
+        coverage: "codex_background_terminals",
+        queriedProviderSessionIds: ["codex-native"],
+        items: [],
+        providerSubagents: [],
+      }),
+    },
+  };
+  const provider: PaseoProvider = Object.assign(Object.create(PaseoProvider.prototype), {
+    client: { agents: { ref: () => handle } },
+  });
+  const assess = async () =>
+    new CurrentPaseoCompletion(provider).assess((await provider.refresh(handle.id))!);
+  for (const status of ["completed", "failed", "canceled"]) {
+    row = {
+      ...retry,
+      status,
+      detail: {
+        ...retry.detail,
+        label: status === "completed" ? "Reconnected" : "Earlier connection lost",
+      },
+    };
+    assert.equal((await assess()).state, "VERIFY", `historical ${status} native retry is settled`);
+  }
+  assert.equal((await provider.foregroundEvidence(handle.id)).toolCount, 2);
+  for (const invalid of [
+    { ...retry, status: "running" },
+    { ...retry, metadata: undefined },
+    { ...retry, metadata: { ...retry.metadata, synthetic: false } },
+    { ...retry, metadata: { ...retry.metadata, source: "user-text" } },
+  ]) {
+    row = invalid;
+    assert.equal((await assess()).state, "NEEDS_CONFIRMATION");
+  }
+  row = retry;
+  agent.provider = "opencode";
+  assert.equal(
+    (await assess()).state,
+    "NEEDS_CONFIRMATION",
+    "a foreign provider cannot supply native Codex retry evidence",
+  );
+});
+
 // Native Bash reports terminal tool_result/is_error, not a numeric exit code.
 // Exercise the real provider foreground scan and completion assessor together.
 test("native Claude Bash and structured notifications settle only under their matching fresh process proof", async () => {

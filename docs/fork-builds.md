@@ -368,17 +368,15 @@ page. The ordinary repository permission can already be enabled while that
 separate fork pause still rejects workflow dispatch with HTTP 422.
 
 Initial fork main: `1a1ff8828f002fce08e239bae3d46aff75e22f52`.
-Integrated upstream main: `f68480482197d1b415a41d6197072d275d926bfa`.
-This includes the 0.16.0-beta.1 release reconciliation, lockfile fix and subsequent
-plugin update-recovery test isolation. The last runtime change is still
-`e7432cb2a5968ecec5dbc3a9d66a218fbbdc306b`; the later commit changes one test file.
-The initial sync used main through `63ea3e55618ab0849cf0a45d5fee02f509b58c73`, already
-containing the beta's background-task and plugin features. The final refresh adds
-release metadata, changelog presentation and tests. The original fork main had no unique
-commits; subsequent fork implementation commits are preserved on the feature branch.
-The installed desktop archive was read-only verified as 0.15.2 and was not changed;
-the running daemon was not restarted or replaced. Fork client/plugin SDKs and
-bundled server are 0.16.0-beta.1.
+The previous upstream base was `f68480482197d1b415a41d6197072d275d926bfa`.
+This integration pins official `v0.16.0-beta.2`, annotated tag
+`b7605043878e509699bf2d8428253a257dda478d`, at release commit
+`23bae61535542a45ade7196a7b3c152705f16de3`. Later moving-main changes are outside
+this release checkpoint. The existing Advanced checkpoint
+`06b9f65c94338fa242d5b3bdd8382ecc55ca6c5a` remains in the feature-branch history.
+Fork client/plugin SDKs and bundled server are `0.16.0-beta.2`; the existing
+Advanced version mapping produces `1.16.0-beta.2`. Source integration does not
+update an installed application or restart its daemon.
 
 The focused composer regression file failed without the fix (four behavioral
 failures) and passed with it. An additional inclusive-maximum regression catches

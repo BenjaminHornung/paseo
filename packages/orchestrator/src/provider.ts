@@ -381,7 +381,8 @@ export class PaseoProvider implements Provider {
     await h.refresh();
     const t = await observedTimeline(h, "projected");
     const snapshot = h.current();
-    const nativeProvider = isClaudeProvider(snapshot?.provider ?? "");
+    const providerId = snapshot?.provider;
+    const nativeProvider = isClaudeProvider(providerId ?? "");
     const proof = await this.nativeForegroundCompletion(h, expectedNative, t);
     const nativeSafe = !!proof;
     const inventory =
@@ -406,7 +407,11 @@ export class PaseoProvider implements Provider {
         if (!["completed", "failed", "canceled"].includes(tool.status)) return false;
         const d = tool.detail;
         if (completedTerminalInteraction(tool, tools.slice(0, index))) return true;
-        if (completedAgentCommunication(tool, h.id) || failedLocalBrowserConnection(tool))
+        if (
+          completedAgentCommunication(tool, h.id) ||
+          failedLocalBrowserConnection(tool) ||
+          settledCodexStreamRetry(tool, providerId)
+        )
           return true;
         if (d.type === "unknown") {
           if (completedNonExecutingMcp(tool)) return true;
@@ -861,6 +866,20 @@ export function completedClaudeNativeTool(
     metadata.source === "claude_task_notification" &&
     !!native.taskId &&
     native.taskId === metadata.taskId
+  );
+}
+
+function settledCodexStreamRetry(tool: unknown, provider: string | undefined): boolean {
+  return (
+    provider === "codex" &&
+    z
+      .object({
+        name: z.literal("codex_retry"),
+        status: z.enum(["completed", "failed", "canceled"]),
+        detail: z.object({ type: z.literal("plain_text") }),
+        metadata: z.object({ synthetic: z.literal(true), source: z.literal("codex_stream_retry") }),
+      })
+      .safeParse(tool).success
   );
 }
 

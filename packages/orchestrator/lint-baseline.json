@@ -7,7 +7,8 @@
     "auditAnswerOrder": "One index key displays immutable stateless audit answer rows whose refusal names can be null; no mutable row state is keyed by the index.",
     "uiRouting": "The existing large settings and plan functions retain their established layers. Reviewed UI-category branches raise their complexity from 87 to 89 and 37 to 48 respectively; exact fingerprints are renewed only for those two functions. Routing safety filters remain shared and unchanged.",
     "sidebarIntegration": "Reconstructed sidebar retains the existing inline-style pattern and decreases total diagnostics from 71 to 46; exact fingerprints renewed, no new rule categories or allowances. Intake/scope preflight increases the existing settingsOperation complexity from 218 to 222; authorization gates are unchanged.",
-    "decisionsPrivateRouting": "Only inherited complexity diagnostics in the same functions are renewed. Account binding/launcher validation raises authorize 71 to 78; work-kind branches raise assess 65 to 66, contract validation 29 to 33, plan 48 to 49, advance 34 to 35, assertTaskAssessment 60 to 61. Readable access hints reduce Settings 89 to 87; route creation stays 31 and worker creation stays 29. Native-family/idle/proof checks raise snapshot 44 to 48; exact native Bash and notification alternatives raise the existing foreground tools.every callback 21 to 25. The actual before/after diagnostics are recorded in phase3-lint-renewals.json. New functions remain subject to the normal threshold; new shadowing/ternaries/promise defects are fixed rather than exempted. No rule changes or new categories."
+    "decisionsPrivateRouting": "Only inherited complexity diagnostics in the same functions are renewed. Account binding/launcher validation raises authorize 71 to 78; work-kind branches raise assess 65 to 66, contract validation 29 to 33, plan 48 to 49, advance 34 to 35, assertTaskAssessment 60 to 61. Readable access hints reduce Settings 89 to 87; route creation stays 31 and worker creation stays 29. Native-family/idle/proof checks raise snapshot 44 to 48; exact native Bash and notification alternatives raise the existing foreground tools.every callback 21 to 25. The actual before/after diagnostics are recorded in phase3-lint-renewals.json. New functions remain subject to the normal threshold; new shadowing/ternaries/promise defects are fixed rather than exempted. No rule changes or new categories.",
+    "beta2CodexRetry": "The existing foreground tools.every callback rises from complexity 25 to 26 solely for the exact native terminal codex_stream_retry alternative. Current idle, session, native-work, trace, configured-check and review gates are unchanged. No new baseline entry or rule change."
   },
   "entries": [
     {
@@ -1294,8 +1295,8 @@
     {
       "file": "packages/orchestrator/src/provider.ts",
       "rule": "eslint(complexity)",
-      "message": "function has a complexity of 25. Maximum allowed is 20.",
-      "sourceSha256": "066751d079c993b8b636ad20f918866071e321c71ad74f92ed1235da4f95e2e0",
+      "message": "function has a complexity of 26. Maximum allowed is 20.",
+      "sourceSha256": "5a984319e4ab8719a7914f1c6bb25d37bf9e655d27c8a8f9fd09296e12f4ab79",
       "count": 1
     },
     {
