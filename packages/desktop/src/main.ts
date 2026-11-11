@@ -718,12 +718,21 @@ async function createWindow(
     }),
     webPreferences: {
       preload: getPreloadPath(),
-      additionalArguments: [windowChromeModeArgument(DESKTOP_WINDOW_CHROME_MODE)],
+      additionalArguments: [
+        windowChromeModeArgument(DESKTOP_WINDOW_CHROME_MODE),
+        `--paseo-distribution=${desktopDistribution.id}`,
+      ],
       contextIsolation: true,
       nodeIntegration: false,
       webviewTag: true,
     },
   });
+  if (desktopDistribution.id === "advanced") {
+    mainWindow.on("page-title-updated", (event, pageTitle) => {
+      event.preventDefault();
+      mainWindow.setTitle(pageTitle.includes(APP_NAME) ? pageTitle : `${pageTitle} — ${APP_NAME}`);
+    });
+  }
   applyDesktopWindowChromeMode({ win: mainWindow, mode: DESKTOP_WINDOW_CHROME_MODE });
 
   const webContentsId = mainWindow.webContents.id;

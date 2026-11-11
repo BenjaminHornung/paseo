@@ -281,6 +281,27 @@ a valid stop token. It does not authenticate input or persist work inventory.
 
 ## Integration and verification
 
+### Advanced branding
+
+The Windows workflow sets `EXPO_PUBLIC_PASEO_DISTRIBUTION=advanced` before building
+the renderer. Advanced uses its own orange A icon for the executable, installer,
+notifications, app logo and browser/PWA assets. Visible product names and CLI
+instructions use the selected distribution; desktop preload identity takes
+precedence over the renderer build setting. Upstream builds retain their names.
+`packages/app/scripts/export-web.mjs` also writes Advanced manifest and Apple
+metadata into the exported HTML before JavaScript starts.
+
+The source icon is `packages/desktop/assets/advanced/icon.svg`. Regenerate its
+checked-in PNG and Windows ICO variants with `node scripts/generate-advanced-icons.mjs`.
+The Windows download's `build-info.json` records the source icon hashes alongside
+the source commit and existing package checksums. This Windows workflow does not
+publish or install a release.
+
+If Actions reports that workflows are paused on this fork because of usage scale,
+a repository maintainer must use the re-enable control on the repository's Actions
+page. The ordinary repository permission can already be enabled while that
+separate fork pause still rejects workflow dispatch with HTTP 422.
+
 Initial fork main: `1a1ff8828f002fce08e239bae3d46aff75e22f52`.
 Integrated upstream main: `f68480482197d1b415a41d6197072d275d926bfa`.
 This includes the 0.16.0-beta.1 release reconciliation, lockfile fix and subsequent

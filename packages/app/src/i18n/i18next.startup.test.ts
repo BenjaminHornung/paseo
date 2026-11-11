@@ -34,12 +34,13 @@ beforeAll(async () => {
   bundle = result.outputFiles[0].text;
 });
 
-function runStartupProbe(actions = "") {
+function runStartupProbe(actions = "", setup = "") {
   return JSON.parse(
     execFileSync(process.execPath, ["-"], {
       cwd: path.resolve(import.meta.dirname, "../.."),
       encoding: "utf8",
       input: `globalThis.evaluatedLocales = [];
+         ${setup}
          (function () { ${bundle} })();
          const { i18n } = module.exports;
          ${actions}
@@ -55,6 +56,33 @@ function runStartupProbe(actions = "") {
 }
 
 describe("bundled translation startup", () => {
+  it("uses the selected distribution name across languages and honors the desktop identity", () => {
+    const assertNames = (expected: string) => `
+      for (const locale of ["en", "ar", "es", "fr", "ja", "ko", "pt-BR", "ru", "zh-CN"]) {
+        i18n.changeLanguage(locale);
+        for (const key of ["sidebar.help.appName", "onboarding.title", "rootError.title"]) {
+          if (!i18n.t(key).includes(${JSON.stringify(expected)})) throw new Error(locale + ": " + key);
+        }
+        if (!i18n.t("desktop.integrations.cli.keptForeign").includes("paseo-advanced")) {
+          throw new Error(locale + ": wrong CLI command");
+        }
+      }
+    `;
+    runStartupProbe(
+      assertNames("Paseo Advanced"),
+      'process.env.EXPO_PUBLIC_PASEO_DISTRIBUTION = "advanced";',
+    );
+    runStartupProbe(
+      assertNames("Paseo Advanced"),
+      'delete process.env.EXPO_PUBLIC_PASEO_DISTRIBUTION; globalThis.window = { paseoDesktop: { distribution: "advanced" } };',
+    );
+    runStartupProbe(
+      `if (i18n.t("sidebar.help.appName") !== "Paseo") throw new Error("upstream identity was overridden");
+       if (!i18n.t("desktop.integrations.cli.keptForeign").includes("paseo command")) throw new Error("wrong upstream CLI command");`,
+      'process.env.EXPO_PUBLIC_PASEO_DISTRIBUTION = "advanced"; globalThis.window = { paseoDesktop: { distribution: "upstream" } };',
+    );
+  });
+
   it("evaluates and registers only English before a language is selected", () => {
     expect(runStartupProbe()).toMatchObject({
       evaluated: ["en"],

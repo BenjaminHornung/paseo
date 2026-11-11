@@ -1,4 +1,5 @@
 import path from "node:path";
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import {
   configureDesktopDistributionEnvironment,
@@ -7,6 +8,18 @@ import {
 } from "./distribution";
 
 describe("side-by-side desktop distribution", () => {
+  it("packages the Advanced window and installer with the Advanced icons", () => {
+    const config = createRequire(import.meta.url)("../electron-builder.advanced.cjs");
+    expect(config.productName).toBe("Paseo Advanced");
+    expect(config.win.icon).toBe("assets/advanced/icon.ico");
+    expect(config.win.extraResources).toEqual(
+      expect.arrayContaining([
+        { from: "assets/advanced/icon.ico", to: "icon.ico" },
+        { from: "assets/advanced/icon.png", to: "icon.png" },
+      ]),
+    );
+  });
+
   it("isolates the Advanced daemon and CLI while leaving upstream defaults alone", () => {
     const env: NodeJS.ProcessEnv = {};
     const executablePath = path.join("install", "PaseoAdvanced.exe");

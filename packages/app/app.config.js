@@ -9,6 +9,8 @@ const withPasteInput = require("./plugins/with-paste-input");
 const withAndroidScroll = require("./modules/paseo-scroll/app.plugin");
 const { getNativeReleaseVersion } = require("./native-release-version");
 const appVariant = process.env.APP_VARIANT ?? "production";
+const isAdvancedDistribution = process.env.EXPO_PUBLIC_PASEO_DISTRIBUTION === "advanced";
+const imageDirectory = isAdvancedDistribution ? "./assets/images/advanced" : "./assets/images";
 const isFdroidBuild = process.env.PASEO_FDROID_BUILD === "1";
 const isWatchdogBuild = process.env.PASEO_WATCHDOG_BUILD === "1";
 const isProfileBuild = process.env.PASEO_PROFILE_BUILD === "1";
@@ -46,7 +48,7 @@ const buildProfile = isFdroidBuild
         [
           "expo-notifications",
           {
-            icon: "./assets/images/notification-icon.png",
+            icon: `${imageDirectory}/notification-icon.png`,
             color: "#20744A",
           },
         ],
@@ -99,11 +101,11 @@ const nativeReleaseVersion = getNativeReleaseVersion(pkg.version);
 
 export default {
   expo: {
-    name: variant.name,
+    name: isAdvancedDistribution ? "Paseo Advanced" : variant.name,
     slug: "voice-mobile",
     version: nativeReleaseVersion.appVersion,
     orientation: "default",
-    icon: "./assets/images/icon.png",
+    icon: `${imageDirectory}/icon.png`,
     scheme: "paseo",
     userInterfaceStyle: "automatic",
     newArchEnabled: true,
@@ -121,8 +123,8 @@ export default {
     },
     android: {
       adaptiveIcon: {
-        backgroundColor: "#000000",
-        foregroundImage: "./assets/images/android-icon-foreground.png",
+        backgroundColor: isAdvancedDistribution ? "#C2410C" : "#000000",
+        foregroundImage: `${imageDirectory}/android-icon-foreground.png`,
       },
       edgeToEdgeEnabled: true,
       predictiveBackGestureEnabled: false,
@@ -136,7 +138,7 @@ export default {
     },
     web: {
       output: "single",
-      favicon: "./assets/images/favicon.png",
+      favicon: `${imageDirectory}/favicon.png`,
     },
     autolinking: {
       searchPaths: ["../../node_modules", "./node_modules"],
@@ -152,7 +154,7 @@ export default {
       [
         "expo-splash-screen",
         {
-          image: "./assets/images/splash-icon.png",
+          image: `${imageDirectory}/splash-icon.png`,
           imageWidth: 200,
           resizeMode: "contain",
           backgroundColor: "#ffffff",

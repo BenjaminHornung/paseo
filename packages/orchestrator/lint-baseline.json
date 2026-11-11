@@ -228,7 +228,7 @@
       "file": "packages/orchestrator/paseo-plugin/client/preparation.tsx",
       "rule": "eslint-plugin-react-perf(jsx-no-new-array-as-prop)",
       "message": "JSX attribute values should not contain Arrays created in the same scope.",
-      "sourceSha256": "d5a2824d65236fdfe6a35f747494992e723bc5f5fd0c294b7aa3d3db1121353c",
+      "sourceSha256": "6046740500f668da97fd24cbcc5726efbb6b3c9e529e7550663a631e09f61b43",
       "count": 1
     },
     {
@@ -333,7 +333,7 @@
       "file": "packages/orchestrator/paseo-plugin/client/preparation.tsx",
       "rule": "eslint(complexity)",
       "message": "function `PreparationForm` has a complexity of 55. Maximum allowed is 20.",
-      "sourceSha256": "ef3b1bb57a34a5d3a28b0aacef0bc7a78731e0c82f023fedc96af9becc92f7f7",
+      "sourceSha256": "cce70262bcdfbc99c8bce39271259199c294d4d2d8bf00002f7ab86baeec4b4d",
       "count": 1
     },
     {
@@ -669,7 +669,7 @@
       "file": "packages/orchestrator/paseo-plugin/client/settings.tsx",
       "rule": "eslint(complexity)",
       "message": "function `OrchestratorSettings` has a complexity of 87. Maximum allowed is 20.",
-      "sourceSha256": "6caa97c48eaea622776cc60f3793e41ae22f696cb4ed7192d8bd9f0eb329d1dc",
+      "sourceSha256": "40bacfdd720a5adcc9da983e313a0ba0da752f7e6b81ca6682a2b48e49c56c18",
       "count": 1
     },
     {

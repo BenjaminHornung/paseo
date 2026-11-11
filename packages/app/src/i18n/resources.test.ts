@@ -68,12 +68,22 @@ function countMatchingEnglishStrings(resource: unknown): number {
 
 function findInterpolationMismatches(resource: unknown): string[] {
   const interpolationPattern = /\{\{[^}]+\}\}/g;
+  // Some translations express these descriptions without naming the product.
+  const optionalProductNames = new Set([
+    "settings.metadataGeneration.description",
+    "settings.general.browserData.description",
+  ]);
   const englishStrings = flattenStrings(en);
   const localeStrings = flattenStrings(resource);
   return Object.entries(englishStrings).flatMap(([key, value]) => {
-    const expected = [...value.matchAll(interpolationPattern)].map((match) => match[0]).sort();
     const actual = [...(localeStrings[key] ?? "").matchAll(interpolationPattern)]
       .map((match) => match[0])
+      .sort();
+    const expected = [...value.matchAll(interpolationPattern)]
+      .map((match) => match[0])
+      .filter(
+        (name) => name !== "{{appName}}" || !optionalProductNames.has(key) || actual.includes(name),
+      )
       .sort();
     return expected.join("|") === actual.join("|")
       ? []
@@ -465,7 +475,7 @@ describe("translation resources", () => {
   });
 
   it("includes onboarding and direct connection keys for the Batch 4E migration", () => {
-    expect(en.onboarding.title).toBe("Welcome to Paseo");
+    expect(en.onboarding.title).toBe("Welcome to {{appName}}");
     expect(en.onboarding.actions.settings).toBe("Settings");
     expect(en.pairing.direct.title).toBe("Direct connection");
     expect(en.pairing.direct.fields.host).toBe("Host");
@@ -696,7 +706,7 @@ describe("translation resources", () => {
     expect(en.message.compaction.completed).toBe("Context compacted");
     expect(en.agentPanel.archived.callout).toBe("This agent is archived");
     expect(en.agentPanel.archived.unarchive).toBe("Unarchive");
-    expect(en.desktop.quitting.title).toBe("Quitting Paseo...");
+    expect(en.desktop.quitting.title).toBe("Quitting {{appName}}...");
     expect(en.desktop.quitting.detail).toBe("Stopping the local daemon.");
     expect(en.composer.attachments.dropImagesHere).toBe("Drop images here");
   });
@@ -757,7 +767,7 @@ describe("translation resources", () => {
     );
     expect(en.desktop.rosetta.title).toBe("Download the Apple Silicon build");
     expect(en.desktop.rosetta.runningIntel).toBe(
-      "You're running the Intel build of Paseo under Rosetta on Apple Silicon.",
+      "You're running the Intel build of {{appName}} under Rosetta on Apple Silicon.",
     );
     expect(en.desktop.rosetta.highCpu).toBe(
       "This causes high CPU usage. Download the Apple Silicon build to fix it.",
@@ -785,7 +795,7 @@ describe("translation resources", () => {
     expect(en.desktop.permissions.empty.notifications).toBe(
       "Notification status has not been checked yet.",
     );
-    expect(en.desktop.permissions.testNotification.title).toBe("Paseo notification test");
+    expect(en.desktop.permissions.testNotification.title).toBe("{{appName}} notification test");
     expect(en.desktop.permissions.testNotification.failed).toBe("Failed to send notification.");
   });
 
@@ -806,7 +816,9 @@ describe("translation resources", () => {
       "Failed to fetch daemon status: {{message}}",
     );
     expect(en.desktop.daemon.loadFailed).toBe("Unable to load desktop daemon status.");
-    expect(en.desktop.integrations.cli.installFailed).toBe("Unable to install the Paseo CLI.");
+    expect(en.desktop.integrations.cli.installFailed).toBe(
+      "Unable to install the {{appName}} CLI.",
+    );
   });
 
   it("includes remaining utility chrome keys for the Batch 4T migration", () => {

@@ -1291,7 +1291,7 @@ export const en = {
       discord: "Discord",
       github: "Create GitHub issue",
       whatsNew: "What's new",
-      appName: "Paseo",
+      appName: "{{appName}}",
     },
     sections: {
       sessions: "History",
@@ -1442,7 +1442,7 @@ export const en = {
       close: "Close window",
     },
     quitting: {
-      title: "Quitting Paseo...",
+      title: "Quitting {{appName}}...",
       detail: "Stopping the local daemon.",
     },
     daemon: {
@@ -1473,20 +1473,20 @@ export const en = {
       },
       management: {
         title: "Manage built-in daemon",
-        hint: "Let Paseo start and stop the built-in daemon",
+        hint: "Let {{appName}} start and stop the built-in daemon",
         pauseTitle: "Pause built-in daemon",
         pauseMessage:
           "This will stop the built-in daemon immediately. Running agents and terminals connected to the built-in daemon will be stopped.",
         pauseAndStop: "Pause and stop",
         registrationFailed:
-          "Built-in daemon started, but Paseo could not save the localhost connection. Toggle daemon management off and on again, or add localhost manually.",
+          "Built-in daemon started, but {{appName}} could not save the localhost connection. Toggle daemon management off and on again, or add localhost manually.",
         pausedStopFailed:
-          "Built-in daemon management was paused, but Paseo could not stop the daemon.",
+          "Built-in daemon management was paused, but {{appName}} could not stop the daemon.",
         updateFailed: "Unable to update built-in daemon management.",
       },
       keepRunning: {
         title: "Keep daemon running after quit",
-        hint: "Daemon keeps running when you quit Paseo",
+        hint: "Daemon keeps running when you quit {{appName}}",
       },
       logs: {
         title: "Log file",
@@ -1553,7 +1553,7 @@ export const en = {
     },
     rosetta: {
       title: "Download the Apple Silicon build",
-      runningIntel: "You're running the Intel build of Paseo under Rosetta on Apple Silicon.",
+      runningIntel: "You're running the Intel build of {{appName}} under Rosetta on Apple Silicon.",
       highCpu: "This causes high CPU usage. Download the Apple Silicon build to fix it.",
       download: "Download",
     },
@@ -1595,7 +1595,7 @@ export const en = {
         microphone: "Microphone status has not been checked yet.",
       },
       testNotification: {
-        title: "Paseo notification test",
+        title: "{{appName}} notification test",
         body: "If you can see this, desktop notifications work.",
         notDelivered: "Notification was not delivered. Check System Settings > Notifications.",
         failed: "Failed to send notification.",
@@ -1604,15 +1604,15 @@ export const en = {
     integrations: {
       cli: {
         statusFailed: "Unable to check CLI install status.",
-        installFailed: "Unable to install the Paseo CLI.",
-        uninstallFailed: "Unable to uninstall the Paseo CLI.",
+        installFailed: "Unable to install the {{appName}} CLI.",
+        uninstallFailed: "Unable to uninstall the {{appName}} CLI.",
         keptForeign:
-          "Kept a paseo command that Paseo didn't install. Remove it yourself to uninstall it.",
+          "Kept a {{cliName}} command that {{appName}} didn't install. Remove it yourself to uninstall it.",
       },
     },
   },
   rootError: {
-    title: "Paseo ran into a problem.",
+    title: "{{appName}} ran into a problem.",
     body: "Try again to reload the app. If this keeps happening, include the details below when you report it.",
     details: "Details",
   },
@@ -1715,7 +1715,7 @@ export const en = {
   },
   onboarding: {
     setup: {
-      title: "Paseo",
+      title: "{{appName}}",
       stepCounter: "Step {{current}} of {{total}}",
       skip: "Skip setup",
       continue: "Continue",
@@ -1723,13 +1723,13 @@ export const en = {
       steps: {
         appearance: {
           label: "Appearance",
-          title: "Welcome to Paseo",
+          title: "Welcome to {{appName}}",
           description: "Let's start by picking a look",
         },
         providers: {
           label: "Providers",
           title: "Your agents",
-          description: "Paseo runs the agent CLIs already on this computer",
+          description: "{{appName}} runs the agent CLIs already on this computer",
         },
         projects: {
           label: "Projects",
@@ -1749,7 +1749,7 @@ export const en = {
         },
         orchestration: {
           label: "Orchestration",
-          title: "Let agents use Paseo",
+          title: "Let agents use {{appName}}",
           description: "Let your agents create workspaces and talk to other agents",
         },
         phone: {
@@ -1768,7 +1768,7 @@ export const en = {
         },
       },
     },
-    title: "Welcome to Paseo",
+    title: "Welcome to {{appName}}",
     subtitle: "Connect your computer to get started",
     actions: {
       settings: "Settings",
@@ -1988,7 +1988,7 @@ export const en = {
         "Without relay, connect directly over TCP, Tailscale, or another VPN. No QR code is created.",
       tailscaleDocs: "Set up Tailscale",
       tailscaleDocsAccessibility: "Read how to connect over Tailscale",
-      updateRequired: "Update the host to enable relay from Paseo Desktop.",
+      updateRequired: "Update the host to enable relay from {{appName}} Desktop.",
       unavailable: "Pairing offer unavailable.",
       hint: "Scan this QR code with Paseo on your phone, or copy the link below.",
       securityWarning:
@@ -2025,7 +2025,7 @@ export const en = {
   serviceUrl: {
     title: "Open service URL",
     message: "Open {{url}}?",
-    inPaseo: "In Paseo",
+    inPaseo: "In {{appName}}",
     externalBrowser: "External browser",
     dontAskAgain: "Don't ask again",
   },
@@ -2175,8 +2175,8 @@ export const en = {
       other: "used {{count}} other tools",
     },
     paseoCalls: {
-      one: "called Paseo {{count}} time",
-      other: "called Paseo {{count}} times",
+      one: "called {{appName}} {{count}} time",
+      other: "called {{appName}} {{count}} times",
     },
     and: "and",
   },
@@ -2392,7 +2392,7 @@ export const en = {
       send: "Send",
       sending: "Sending...",
       sentTitle: "Test notification sent",
-      sentDescription: "Paseo handed the notification to the operating system.",
+      sentDescription: "{{appName}} handed the notification to the operating system.",
       sendFailedTitle: "Unable to send test notification",
     },
     hostSections: {
@@ -2475,14 +2475,14 @@ export const en = {
     metadataGeneration: {
       title: "Metadata generation",
       description:
-        "Choose the model Paseo uses for workspace titles, branch names, commit messages, and pull request drafts",
+        "Choose the model {{appName}} uses for workspace titles, branch names, commit messages, and pull request drafts",
       selection: "Model selection",
       automatic: "Automatic",
       preferred: "Manual",
-      automaticHint: "Paseo picks a fast available model",
-      preferredHint: "Choose the model Paseo uses",
+      automaticHint: "{{appName}} picks a fast available model",
+      preferredHint: "Choose the model {{appName}} uses",
       model: "Model",
-      modelHint: "Only this model is used. If it fails, Paseo does not try another model",
+      modelHint: "Only this model is used. If it fails, {{appName}} does not try another model",
       docs: "Docs",
       saveError: "Unable to update metadata generation",
     },
@@ -2560,7 +2560,7 @@ export const en = {
       browserData: {
         title: "Browser data",
         siteData: "Cookies and site data",
-        description: "Browser tabs share sign-ins and site data across Paseo.",
+        description: "Browser tabs share sign-ins and site data across {{appName}}.",
         clear: "Clear browser data",
         clearing: "Clearing...",
         confirmTitle: "Clear browser data?",
@@ -2599,7 +2599,7 @@ export const en = {
       serviceUrls: {
         options: {
           ask: "Ask",
-          inApp: "In Paseo",
+          inApp: "In {{appName}}",
           external: "External browser",
         },
       },
@@ -2679,7 +2679,7 @@ export const en = {
         label: "App updates",
         readyToInstall: "Ready to install: {{version}}",
         installTitle: "Install desktop update",
-        installMessage: "This updates Paseo on this computer",
+        installMessage: "This updates {{appName}} on this computer",
         installConfirm: "Install update",
         update: "Update",
         updateTo: "Update to {{version}}",
@@ -2849,7 +2849,7 @@ export const en = {
       commandLine: {
         title: "Command line",
         description: "Control and script agents from your terminal",
-        accessibilityLabel: "Install the Paseo CLI",
+        accessibilityLabel: "Install the {{appName}} CLI",
       },
     },
     permissions: {
@@ -3087,10 +3087,10 @@ export const en = {
             "This host is not connected. Wait for it to come online before restarting.",
           offlineTitle: "Host offline",
           offlineMessage:
-            "This host is offline. Paseo reconnects automatically-wait until it's back online before restarting.",
+            "This host is offline. {{appName}} reconnects automatically-wait until it's back online before restarting.",
           requestFailedTitle: "Error",
           requestFailedMessage:
-            "Failed to send the restart request. Paseo reconnects automatically-try again once the host shows as online.",
+            "Failed to send the restart request. {{appName}} reconnects automatically-try again once the host shows as online.",
           closeTerminals: "Restart and close terminals",
           closeTerminalsHint: "Restart and also close every terminal running on this host.",
           closeTerminalsConfirmMessage:
@@ -3269,7 +3269,7 @@ export const en = {
       },
       metadata: {
         title: "Metadata generation",
-        info: "Project-specific instructions injected into the AI prompts Paseo uses to generate metadata - use them to enforce your team's conventions like branch naming, commit style, or PR format",
+        info: "Project-specific instructions injected into the AI prompts {{appName}} uses to generate metadata - use them to enforce your team's conventions like branch naming, commit style, or PR format",
         branchName: "Branch names",
         branchNamePlaceholder: "Prefix branches with feat/ or fix/, mb/ for personal branches",
         commitMessage: "Commit messages",

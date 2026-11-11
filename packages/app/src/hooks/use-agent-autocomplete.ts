@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
+import { appDisplayName } from "@/constants/app-brand";
 import type { AutocompleteOption, AutocompleteStatus } from "@/components/ui/autocomplete";
 import { findHighlightRanges } from "@/components/ui/highlighted-text-segments";
 import {
@@ -197,7 +198,7 @@ function mapCommandToOption(
       command: entry.command,
       icon: CLIENT_COMMAND_ICONS[entry.command.kind],
       description: context.t(entry.command.descriptionKey),
-      tag: "Paseo",
+      tag: appDisplayName,
     };
   }
   if (entry.source === "plugin") {

@@ -1309,7 +1309,7 @@ export const ptBR: TranslationResources = {
       discord: "Discord",
       github: "Criar issue no GitHub",
       whatsNew: "Novidades",
-      appName: "Paseo",
+      appName: "{{appName}}",
     },
     sections: {
       sessions: "Histórico",
@@ -1460,7 +1460,7 @@ export const ptBR: TranslationResources = {
       close: "Fechar janela",
     },
     quitting: {
-      title: "Saindo do Paseo...",
+      title: "Saindo do {{appName}}...",
       detail: "Parando o daemon local.",
     },
     daemon: {
@@ -1475,20 +1475,20 @@ export const ptBR: TranslationResources = {
       },
       management: {
         title: "Gerenciar daemon integrado",
-        hint: "Permitir que o Paseo inicie e pare o daemon integrado",
+        hint: "Permitir que o {{appName}} inicie e pare o daemon integrado",
         pauseTitle: "Pausar daemon integrado",
         pauseMessage:
           "Isso vai parar o daemon integrado imediatamente. Agentes e terminais em execução conectados ao daemon integrado serão interrompidos.",
         pauseAndStop: "Pausar e parar",
         registrationFailed:
-          "O daemon integrado foi iniciado, mas o Paseo não conseguiu salvar a conexão localhost. Desative e reative o gerenciamento do daemon ou adicione localhost manualmente.",
+          "O daemon integrado foi iniciado, mas o {{appName}} não conseguiu salvar a conexão localhost. Desative e reative o gerenciamento do daemon ou adicione localhost manualmente.",
         pausedStopFailed:
-          "O gerenciamento do daemon integrado foi pausado, mas o Paseo não conseguiu parar o daemon.",
+          "O gerenciamento do daemon integrado foi pausado, mas o {{appName}} não conseguiu parar o daemon.",
         updateFailed: "Não foi possível atualizar o gerenciamento do daemon integrado.",
       },
       keepRunning: {
         title: "Manter daemon em execução ao sair",
-        hint: "O daemon continua em execução quando você sai do Paseo",
+        hint: "O daemon continua em execução quando você sai do {{appName}}",
       },
       logs: {
         title: "Arquivo de log",
@@ -1558,7 +1558,8 @@ export const ptBR: TranslationResources = {
     },
     rosetta: {
       title: "Baixar a build para Apple Silicon",
-      runningIntel: "Você está executando a build Intel do Paseo pelo Rosetta no Apple Silicon.",
+      runningIntel:
+        "Você está executando a build Intel do {{appName}} pelo Rosetta no Apple Silicon.",
       highCpu: "Isso causa alto uso de CPU. Baixe a build para Apple Silicon para corrigir.",
       download: "Baixar",
     },
@@ -1600,7 +1601,7 @@ export const ptBR: TranslationResources = {
         microphone: "O status do microfone ainda não foi verificado.",
       },
       testNotification: {
-        title: "Teste de notificação do Paseo",
+        title: "Teste de notificação do {{appName}}",
         body: "Se você consegue ver isto, as notificações desktop funcionam.",
         notDelivered:
           "A notificação não foi entregue. Verifique Ajustes do Sistema > Notificações.",
@@ -1610,15 +1611,15 @@ export const ptBR: TranslationResources = {
     integrations: {
       cli: {
         statusFailed: "Não foi possível verificar o status de instalação da CLI.",
-        installFailed: "Não foi possível instalar a CLI do Paseo.",
-        uninstallFailed: "Não foi possível desinstalar a CLI do Paseo.",
+        installFailed: "Não foi possível instalar a CLI do {{appName}}.",
+        uninstallFailed: "Não foi possível desinstalar a CLI do {{appName}}.",
         keptForeign:
-          "Um comando paseo que o Paseo não instalou foi mantido. Remova-o manualmente para desinstalar.",
+          "Um comando {{cliName}} que o {{appName}} não instalou foi mantido. Remova-o manualmente para desinstalar.",
       },
     },
   },
   rootError: {
-    title: "O Paseo encontrou um problema.",
+    title: "O {{appName}} encontrou um problema.",
     body: "Tente novamente para recarregar o app. Se isso continuar acontecendo, inclua os detalhes abaixo ao relatar o problema.",
     details: "Detalhes",
   },
@@ -1721,7 +1722,7 @@ export const ptBR: TranslationResources = {
   },
   onboarding: {
     setup: {
-      title: "Paseo",
+      title: "{{appName}}",
       stepCounter: "Etapa {{current}} de {{total}}",
       skip: "Pular configuração",
       continue: "Continuar",
@@ -1729,13 +1730,13 @@ export const ptBR: TranslationResources = {
       steps: {
         appearance: {
           label: "Aparência",
-          title: "Boas-vindas ao Paseo",
+          title: "Boas-vindas ao {{appName}}",
           description: "Vamos começar escolhendo uma aparência",
         },
         providers: {
           label: "Provedores",
           title: "Seus agentes",
-          description: "O Paseo usa as CLIs de agentes já instaladas neste computador",
+          description: "O {{appName}} usa as CLIs de agentes já instaladas neste computador",
         },
         projects: {
           label: "Projetos",
@@ -1755,7 +1756,7 @@ export const ptBR: TranslationResources = {
         },
         orchestration: {
           label: "Orquestração",
-          title: "Deixe os agentes usarem o Paseo",
+          title: "Deixe os agentes usarem o {{appName}}",
           description: "Deixe seus agentes criarem workspaces e conversarem com outros agentes",
         },
         phone: {
@@ -1774,7 +1775,7 @@ export const ptBR: TranslationResources = {
         },
       },
     },
-    title: "Bem-vindo ao Paseo",
+    title: "Bem-vindo ao {{appName}}",
     subtitle: "Conecte seu computador para começar",
     actions: {
       settings: "Configurações",
@@ -1996,7 +1997,7 @@ export const ptBR: TranslationResources = {
         "Sem relay, conecte diretamente por TCP, Tailscale ou outra VPN. Nenhum código QR é criado.",
       tailscaleDocs: "Configurar Tailscale",
       tailscaleDocsAccessibility: "Ler como conectar pelo Tailscale",
-      updateRequired: "Atualize o host para ativar o relay pelo Paseo Desktop.",
+      updateRequired: "Atualize o host para ativar o relay pelo {{appName}} Desktop.",
       unavailable: "Oferta de pareamento indisponível.",
       hint: "Escaneie este QR code com o Paseo no seu celular ou copie o link abaixo.",
       securityWarning:
@@ -2033,7 +2034,7 @@ export const ptBR: TranslationResources = {
   serviceUrl: {
     title: "Abrir URL do serviço",
     message: "Abrir {{url}}?",
-    inPaseo: "No Paseo",
+    inPaseo: "No {{appName}}",
     externalBrowser: "Navegador externo",
     dontAskAgain: "Não perguntar novamente",
   },
@@ -2183,8 +2184,8 @@ export const ptBR: TranslationResources = {
       other: "usou {{count}} outras ferramentas",
     },
     paseoCalls: {
-      one: "chamou o Paseo {{count}} vez",
-      other: "chamou o Paseo {{count}} vezes",
+      one: "chamou o {{appName}} {{count}} vez",
+      other: "chamou o {{appName}} {{count}} vezes",
     },
     and: "e",
   },
@@ -2362,7 +2363,7 @@ export const ptBR: TranslationResources = {
       send: "Enviar",
       sending: "Enviando...",
       sentTitle: "Notificação de teste enviada",
-      sentDescription: "O Paseo entregou a notificação ao sistema operacional.",
+      sentDescription: "O {{appName}} entregou a notificação ao sistema operacional.",
       sendFailedTitle: "Não foi possível enviar a notificação de teste",
     },
     hostSections: {
@@ -2382,14 +2383,14 @@ export const ptBR: TranslationResources = {
     metadataGeneration: {
       title: "Geração de metadados",
       description:
-        "Escolha o modelo usado pelo Paseo para títulos de espaços de trabalho, nomes de branches, mensagens de commit e rascunhos de pull request",
+        "Escolha o modelo usado pelo {{appName}} para títulos de espaços de trabalho, nomes de branches, mensagens de commit e rascunhos de pull request",
       selection: "Seleção de modelo",
       automatic: "Automática",
       preferred: "Manual",
-      automaticHint: "O Paseo escolhe um modelo rápido disponível",
-      preferredHint: "Escolha o modelo que o Paseo usa",
+      automaticHint: "O {{appName}} escolhe um modelo rápido disponível",
+      preferredHint: "Escolha o modelo que o {{appName}} usa",
       model: "Modelo",
-      modelHint: "Somente este modelo é usado. Se ele falhar, o Paseo não tenta outro modelo",
+      modelHint: "Somente este modelo é usado. Se ele falhar, o {{appName}} não tenta outro modelo",
       docs: "Documentação",
       saveError: "Não foi possível atualizar a geração de metadados",
     },
@@ -2467,7 +2468,7 @@ export const ptBR: TranslationResources = {
       browserData: {
         title: "Dados do navegador",
         siteData: "Cookies e dados de sites",
-        description: "As abas do navegador compartilham logins e dados de sites no Paseo.",
+        description: "As abas do navegador compartilham logins e dados de sites no {{appName}}.",
         clear: "Limpar dados do navegador",
         clearing: "Limpando...",
         confirmTitle: "Limpar dados do navegador?",
@@ -2509,7 +2510,7 @@ export const ptBR: TranslationResources = {
       serviceUrls: {
         options: {
           ask: "Perguntar",
-          inApp: "No Paseo",
+          inApp: "No {{appName}}",
           external: "Navegador externo",
         },
       },
@@ -2590,7 +2591,7 @@ export const ptBR: TranslationResources = {
         label: "Atualizações do app",
         readyToInstall: "Pronta para instalar: {{version}}",
         installTitle: "Instalar atualização desktop",
-        installMessage: "Isso atualiza o Paseo neste computador",
+        installMessage: "Isso atualiza o {{appName}} neste computador",
         installConfirm: "Instalar atualização",
         update: "Atualizar",
         updateTo: "Atualizar para {{version}}",
@@ -2763,7 +2764,7 @@ export const ptBR: TranslationResources = {
       commandLine: {
         title: "Linha de comando",
         description: "Controle agentes e execute scripts pelo terminal",
-        accessibilityLabel: "Instalar a CLI do Paseo",
+        accessibilityLabel: "Instalar a CLI do {{appName}}",
       },
     },
     permissions: {
@@ -3001,10 +3002,10 @@ export const ptBR: TranslationResources = {
             "Este host não está conectado. Aguarde até ele ficar online antes de reiniciar.",
           offlineTitle: "Host offline",
           offlineMessage:
-            "Este host está offline. O Paseo reconecta automaticamente. Aguarde ele voltar a ficar online antes de reiniciar.",
+            "Este host está offline. O {{appName}} reconecta automaticamente. Aguarde ele voltar a ficar online antes de reiniciar.",
           requestFailedTitle: "Erro",
           requestFailedMessage:
-            "Falha ao enviar a solicitação de reinício. O Paseo reconecta automaticamente. Tente novamente quando o host aparecer como online.",
+            "Falha ao enviar a solicitação de reinício. O {{appName}} reconecta automaticamente. Tente novamente quando o host aparecer como online.",
           closeTerminals: "Reiniciar e fechar terminais",
           closeTerminalsHint: "Reinicia e também fecha todos os terminais abertos neste host.",
           closeTerminalsConfirmMessage:
@@ -3184,7 +3185,7 @@ export const ptBR: TranslationResources = {
       },
       metadata: {
         title: "Geração de metadados",
-        info: "Instruções específicas do projeto injetadas nos prompts de IA que o Paseo usa para gerar metadados. Use-as para aplicar convenções da sua equipe, como nomes de branch, estilo de commit ou formato de PR",
+        info: "Instruções específicas do projeto injetadas nos prompts de IA que o {{appName}} usa para gerar metadados. Use-as para aplicar convenções da sua equipe, como nomes de branch, estilo de commit ou formato de PR",
         branchName: "Nomes de branch",
         branchNamePlaceholder: "Prefixe branches com feat/ ou fix/, mb/ para branches pessoais",
         commitMessage: "Mensagens de commit",

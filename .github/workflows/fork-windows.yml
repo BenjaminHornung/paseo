@@ -55,8 +55,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run test --workspace=@paseo-advanced/orchestrator
 
-      - name: Verify composer receipts and native attachments
-        run: npm run test --workspace=@getpaseo/app -- src/composer/actions.test.ts --bail=1
+      - name: Verify composer receipts, native attachments and distribution names
+        run: npm run test --workspace=@getpaseo/app -- src/composer/actions.test.ts src/i18n/i18next.startup.test.ts src/i18n/resources.test.ts --bail=1
 
       - name: Typecheck app
         run: npm run typecheck --workspace=@getpaseo/app
@@ -70,6 +70,7 @@ jobs:
       - name: Build and smoke unsigned Windows x64 installer and ZIP
         run: npm run build:desktop -- --publish never --win --x64 --config electron-builder.advanced.cjs
         env:
+          EXPO_PUBLIC_PASEO_DISTRIBUTION: advanced
           EP_GH_IGNORE_TIME: "true"
           PASEO_DESKTOP_SMOKE: "1"
           PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
@@ -117,6 +118,8 @@ jobs:
             architecture = 'x64'
             signed = $false
             published = $false
+            iconSha256 = (Get-FileHash -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packages/desktop/assets/advanced/icon.ico') -Algorithm SHA256).Hash.ToLowerInvariant()
+            appIconSha256 = (Get-FileHash -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packages/app/assets/images/advanced/icon.png') -Algorithm SHA256).Hash.ToLowerInvariant()
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $release 'build-info.json') -Encoding utf8
 
       - name: Upload Windows downloads

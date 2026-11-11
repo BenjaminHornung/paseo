@@ -484,7 +484,7 @@ export function OrchestratorSettings({
           <SettingsSection title="Profil als zusätzliche Route">
             <SettingsCard>
               <SettingsSelect
-                label="Paseo-Profil"
+                label="Paseo Advanced-Profil"
                 value={newProfileId}
                 options={[
                   { value: "", label: "Profil auswählen" },

@@ -1301,7 +1301,7 @@ export const ru: TranslationResources = {
       discord: "Discord",
       github: "Создать issue на GitHub",
       whatsNew: "Что нового",
-      appName: "Paseo",
+      appName: "{{appName}}",
     },
     sections: {
       sessions: "История",
@@ -1453,7 +1453,7 @@ export const ru: TranslationResources = {
       close: "Закрыть окно",
     },
     quitting: {
-      title: "Завершение работы Paseo...",
+      title: "Завершение работы {{appName}}...",
       detail: "Остановка локального демона.",
     },
     daemon: {
@@ -1468,20 +1468,20 @@ export const ru: TranslationResources = {
       },
       management: {
         title: "Управление встроенным демоном",
-        hint: "Разрешить Paseo запускать и останавливать встроенный демон",
+        hint: "Разрешить {{appName}} запускать и останавливать встроенный демон",
         pauseTitle: "Приостановить встроенный демон",
         pauseMessage:
           "Это немедленно остановит встроенный демон. Запущенные агенты и терминалы, подключенные к встроенному демону, будут остановлены.",
         pauseAndStop: "Приостановить управление и остановить демон",
         registrationFailed:
-          "Встроенный демон запущен, но Paseo не удалось сохранить подключение к localhost. Выключите и снова включите управление демоном или добавьте localhost вручную.",
+          "Встроенный демон запущен, но {{appName}} не удалось сохранить подключение к localhost. Выключите и снова включите управление демоном или добавьте localhost вручную.",
         pausedStopFailed:
-          "Встроенное управление демоном было приостановлено, но Paseo не смог остановить демон.",
+          "Встроенное управление демоном было приостановлено, но {{appName}} не смог остановить демон.",
         updateFailed: "Не удалось изменить настройки управления встроенным демоном.",
       },
       keepRunning: {
         title: "Продолжать работу демона после выхода",
-        hint: "Демон продолжит работать после выхода из Paseo",
+        hint: "Демон продолжит работать после выхода из {{appName}}",
       },
       logs: {
         title: "Файл журнала",
@@ -1552,7 +1552,7 @@ export const ru: TranslationResources = {
     },
     rosetta: {
       title: "Загрузите сборку Apple Silicon",
-      runningIntel: "Вы используете сборку Paseo для Intel через Rosetta на Apple Silicon.",
+      runningIntel: "Вы используете сборку {{appName}} для Intel через Rosetta на Apple Silicon.",
       highCpu:
         "Из-за этого процессор сильно загружен. Чтобы устранить проблему, скачайте сборку для Apple Silicon.",
       download: "Скачать",
@@ -1597,7 +1597,7 @@ export const ru: TranslationResources = {
         microphone: "Состояние микрофона ещё не проверялось.",
       },
       testNotification: {
-        title: "Тест уведомлений Paseo",
+        title: "Тест уведомлений {{appName}}",
         body: "Если вы это видите, уведомления на рабочем столе работают.",
         notDelivered:
           "Уведомление не доставлено. Проверьте раздел «Уведомления» в системных настройках.",
@@ -1607,15 +1607,15 @@ export const ru: TranslationResources = {
     integrations: {
       cli: {
         statusFailed: "Не удалось проверить состояние установки CLI.",
-        installFailed: "Не удалось установить Paseo CLI.",
-        uninstallFailed: "Не удалось удалить Paseo CLI.",
+        installFailed: "Не удалось установить {{appName}} CLI.",
+        uninstallFailed: "Не удалось удалить {{appName}} CLI.",
         keptForeign:
-          "Команда paseo, установленная не Paseo, оставлена. Чтобы удалить её, сделайте это вручную.",
+          "Команда {{cliName}}, установленная не {{appName}}, оставлена. Чтобы удалить её, сделайте это вручную.",
       },
     },
   },
   rootError: {
-    title: "В Paseo возникла проблема.",
+    title: "В {{appName}} возникла проблема.",
     body: "Попробуйте перезагрузить приложение. Если ошибка повторится, приложите приведённые ниже сведения к отчёту.",
     details: "Подробности",
   },
@@ -1719,7 +1719,7 @@ export const ru: TranslationResources = {
   },
   onboarding: {
     setup: {
-      title: "Paseo",
+      title: "{{appName}}",
       stepCounter: "Шаг {{current}} из {{total}}",
       skip: "Пропустить настройку",
       continue: "Продолжить",
@@ -1727,13 +1727,13 @@ export const ru: TranslationResources = {
       steps: {
         appearance: {
           label: "Оформление",
-          title: "Добро пожаловать в Paseo",
+          title: "Добро пожаловать в {{appName}}",
           description: "Начнём с выбора оформления",
         },
         providers: {
           label: "Провайдеры",
           title: "Ваши агенты",
-          description: "Paseo использует CLI агентов, уже установленные на этом компьютере",
+          description: "{{appName}} использует CLI агентов, уже установленные на этом компьютере",
         },
         projects: {
           label: "Проекты",
@@ -1753,7 +1753,7 @@ export const ru: TranslationResources = {
         },
         orchestration: {
           label: "Оркестрация",
-          title: "Дайте агентам доступ к Paseo",
+          title: "Дайте агентам доступ к {{appName}}",
           description:
             "Разрешите агентам создавать рабочие пространства и общаться с другими агентами",
         },
@@ -1773,7 +1773,7 @@ export const ru: TranslationResources = {
         },
       },
     },
-    title: "Добро пожаловать в Paseo",
+    title: "Добро пожаловать в {{appName}}",
     subtitle: "Подключите компьютер, чтобы начать",
     actions: {
       settings: "Настройки",
@@ -1996,7 +1996,7 @@ export const ru: TranslationResources = {
         "Без ретранслятора подключайтесь напрямую через TCP, Tailscale или другую VPN. QR-код создаваться не будет.",
       tailscaleDocs: "Настроить Tailscale",
       tailscaleDocsAccessibility: "Узнать, как подключиться через Tailscale",
-      updateRequired: "Обновите хост, чтобы включить ретранслятор из Paseo Desktop.",
+      updateRequired: "Обновите хост, чтобы включить ретранслятор из {{appName}} Desktop.",
       unavailable: "Данные для сопряжения недоступны.",
       hint: "Отсканируйте этот QR-код с помощью Paseo на телефоне или скопируйте ссылку ниже.",
       securityWarning:
@@ -2033,7 +2033,7 @@ export const ru: TranslationResources = {
   serviceUrl: {
     title: "Открыть URL сервиса",
     message: "Открыть {{url}}?",
-    inPaseo: "В Paseo",
+    inPaseo: "В {{appName}}",
     externalBrowser: "Внешний браузер",
     dontAskAgain: "Больше не спрашивать",
   },
@@ -2184,8 +2184,8 @@ export const ru: TranslationResources = {
       other: "использованы другие инструменты ({{count}})",
     },
     paseoCalls: {
-      one: "выполнен {{count}} вызов Paseo",
-      other: "выполнены вызовы Paseo ({{count}})",
+      one: "выполнен {{count}} вызов {{appName}}",
+      other: "выполнены вызовы {{appName}} ({{count}})",
     },
     and: "и",
   },
@@ -2363,7 +2363,7 @@ export const ru: TranslationResources = {
       send: "Отправить",
       sending: "Отправка...",
       sentTitle: "Тестовое уведомление отправлено",
-      sentDescription: "Paseo передал уведомление операционной системе.",
+      sentDescription: "{{appName}} передал уведомление операционной системе.",
       sendFailedTitle: "Не удалось отправить тестовое уведомление",
     },
     hostSections: {
@@ -2383,15 +2383,15 @@ export const ru: TranslationResources = {
     metadataGeneration: {
       title: "Генерация метаданных",
       description:
-        "Выберите модель, которую Paseo будет использовать для названий рабочих пространств и веток, сообщений коммитов и черновиков PR",
+        "Выберите модель, которую {{appName}} будет использовать для названий рабочих пространств и веток, сообщений коммитов и черновиков PR",
       selection: "Выбор модели",
       automatic: "Автоматически",
       preferred: "Вручную",
-      automaticHint: "Paseo выбирает быструю доступную модель",
-      preferredHint: "Выберите модель, которую использует Paseo",
+      automaticHint: "{{appName}} выбирает быструю доступную модель",
+      preferredHint: "Выберите модель, которую использует {{appName}}",
       model: "Модель",
       modelHint:
-        "Используется только эта модель. Если она не сработает, Paseo не будет пробовать другую модель",
+        "Используется только эта модель. Если она не сработает, {{appName}} не будет пробовать другую модель",
       docs: "Документация",
       saveError: "Не удалось обновить настройки генерации метаданных",
     },
@@ -2470,7 +2470,8 @@ export const ru: TranslationResources = {
       browserData: {
         title: "Данные браузера",
         siteData: "Файлы cookie и данные сайтов",
-        description: "Вкладки браузера в Paseo используют общие данные входа и данные сайтов.",
+        description:
+          "Вкладки браузера в {{appName}} используют общие данные входа и данные сайтов.",
         clear: "Очистить данные браузера",
         clearing: "Очистка...",
         confirmTitle: "Очистить данные браузера?",
@@ -2513,7 +2514,7 @@ export const ru: TranslationResources = {
       serviceUrls: {
         options: {
           ask: "Спрашивать",
-          inApp: "В Paseo",
+          inApp: "В {{appName}}",
           external: "Внешний браузер",
         },
       },
@@ -2596,7 +2597,7 @@ export const ru: TranslationResources = {
         label: "Обновления приложения",
         readyToInstall: "Версия {{version}} готова к установке",
         installTitle: "Установить обновление настольного приложения",
-        installMessage: "Это обновит Paseo на этом компьютере.",
+        installMessage: "Это обновит {{appName}} на этом компьютере.",
         installConfirm: "Установить обновление",
         update: "Обновить",
         updateTo: "Обновить до {{version}}",
@@ -2769,7 +2770,7 @@ export const ru: TranslationResources = {
       commandLine: {
         title: "Командная строка",
         description: "Управляйте агентами и автоматизируйте их работу из терминала",
-        accessibilityLabel: "Установить Paseo CLI",
+        accessibilityLabel: "Установить {{appName}} CLI",
       },
     },
     permissions: {
@@ -3011,10 +3012,10 @@ export const ru: TranslationResources = {
             "Этот хост не подключён. Дождитесь его появления в сети перед перезапуском.",
           offlineTitle: "Хост не в сети",
           offlineMessage:
-            "Этот хост не в сети. Paseo переподключится автоматически. Дождитесь подключения перед перезапуском.",
+            "Этот хост не в сети. {{appName}} переподключится автоматически. Дождитесь подключения перед перезапуском.",
           requestFailedTitle: "Ошибка",
           requestFailedMessage:
-            "Не удалось отправить запрос на перезапуск. Paseo переподключается автоматически. Повторите попытку, когда хост появится в сети.",
+            "Не удалось отправить запрос на перезапуск. {{appName}} переподключается автоматически. Повторите попытку, когда хост появится в сети.",
           closeTerminals: "Перезапустить и закрыть терминалы",
           closeTerminalsHint: "Перезапускает демон и закрывает все терминалы на этом хосте.",
           closeTerminalsConfirmMessage:
@@ -3195,7 +3196,7 @@ export const ru: TranslationResources = {
       },
       metadata: {
         title: "Генерация метаданных",
-        info: "Инструкции для этого проекта, добавляемые в промпты ИИ, с помощью которых Paseo генерирует метаданные. Используйте их, чтобы соблюдать принятые в команде правила именования веток, оформления коммитов и формата PR.",
+        info: "Инструкции для этого проекта, добавляемые в промпты ИИ, с помощью которых {{appName}} генерирует метаданные. Используйте их, чтобы соблюдать принятые в команде правила именования веток, оформления коммитов и формата PR.",
         branchName: "Названия веток",
         branchNamePlaceholder:
           "Добавляйте к веткам префиксы feat/ или fix/, а к личным веткам — mb/",

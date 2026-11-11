@@ -92,6 +92,7 @@ import { isElectronRuntime } from "@/desktop/host";
 import { useDesktopAppUpdater } from "@/desktop/updates/use-desktop-app-updater";
 import { formatVersionWithPrefix, getDesktopRuntimeInfo } from "@/desktop/updates/desktop-updates";
 import { resolveAppVersion } from "@/utils/app-version";
+import { appDisplayName, isAdvancedDistribution } from "@/constants/app-brand";
 import { openChangelog } from "@/changelog";
 import { useAppDiagnosticStore } from "@/diagnostics/store";
 import { settingsStyles } from "@/styles/settings";
@@ -492,7 +493,9 @@ function AboutSection({ appVersion, appVersionText, isDesktopApp }: AboutSection
         <View style={settingsStyles.card}>
           <View style={settingsStyles.row}>
             <View style={settingsStyles.rowContent}>
-              <Text style={settingsStyles.rowTitle}>{t("settings.about.appVersion")}</Text>
+              <Text style={settingsStyles.rowTitle}>
+                {isAdvancedDistribution ? appDisplayName : t("settings.about.appVersion")}
+              </Text>
               <Text style={settingsStyles.rowHint}>{t("settings.about.thisDevice")}</Text>
             </View>
             <Text style={styles.aboutValue}>{displayVersion}</Text>

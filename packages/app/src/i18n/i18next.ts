@@ -2,6 +2,7 @@ import { createInstance, type BackendModule } from "i18next";
 import { initReactI18next } from "react-i18next";
 import { observeI18nInit } from "./init";
 import { en } from "./resources/en";
+import { appCliName, appDisplayName } from "@/constants/app-brand";
 
 // Literal requires keep every locale bundled for offline use, while evaluating
 // its resource module only when selected. Synchronous reads preserve the language
@@ -60,6 +61,7 @@ observeI18nInit(
       },
       interpolation: {
         escapeValue: false,
+        defaultVariables: { appName: appDisplayName, cliName: appCliName },
       },
       react: {
         useSuspense: false,

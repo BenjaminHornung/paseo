@@ -1275,7 +1275,7 @@ export const zhCN: TranslationResources = {
       discord: "Discord",
       github: "创建 GitHub Issue",
       whatsNew: "新功能",
-      appName: "Paseo",
+      appName: "{{appName}}",
     },
     sections: {
       sessions: "历史",
@@ -1423,7 +1423,7 @@ export const zhCN: TranslationResources = {
       close: "关闭窗口",
     },
     quitting: {
-      title: "正在退出 Paseo...",
+      title: "正在退出 {{appName}}...",
       detail: "正在停止本地 daemon。",
     },
     daemon: {
@@ -1438,19 +1438,19 @@ export const zhCN: TranslationResources = {
       },
       management: {
         title: "管理内置 daemon",
-        hint: "让 Paseo 启动和停止内置 daemon",
+        hint: "让 {{appName}} 启动和停止内置 daemon",
         pauseTitle: "暂停内置 daemon",
         pauseMessage:
           "这会立即停止内置 daemon。连接到内置 daemon 的运行中 agents 和 terminals 会被停止。",
         pauseAndStop: "暂停并停止",
         registrationFailed:
-          "内置 daemon 已启动，但 Paseo 无法保存 localhost 连接。请关闭后重新开启 daemon 管理，或手动添加 localhost。",
-        pausedStopFailed: "内置 daemon 管理已暂停，但 Paseo 无法停止 daemon。",
+          "内置 daemon 已启动，但 {{appName}} 无法保存 localhost 连接。请关闭后重新开启 daemon 管理，或手动添加 localhost。",
+        pausedStopFailed: "内置 daemon 管理已暂停，但 {{appName}} 无法停止 daemon。",
         updateFailed: "无法更新内置 daemon 管理设置。",
       },
       keepRunning: {
         title: "退出后保持 daemon 运行",
-        hint: "退出 Paseo 后 daemon 会继续运行",
+        hint: "退出 {{appName}} 后 daemon 会继续运行",
       },
       logs: {
         title: "日志文件",
@@ -1515,7 +1515,7 @@ export const zhCN: TranslationResources = {
     },
     rosetta: {
       title: "下载 Apple Silicon 构建",
-      runningIntel: "你正在 Apple Silicon 上通过 Rosetta 运行 Paseo 的 Intel 构建。",
+      runningIntel: "你正在 Apple Silicon 上通过 Rosetta 运行 {{appName}} 的 Intel 构建。",
       highCpu: "这会导致较高 CPU 使用率。下载 Apple Silicon 构建即可修复。",
       download: "下载",
     },
@@ -1555,7 +1555,7 @@ export const zhCN: TranslationResources = {
         microphone: "尚未检查麦克风状态。",
       },
       testNotification: {
-        title: "Paseo 通知测试",
+        title: "{{appName}} 通知测试",
         body: "如果你能看到这条通知，说明桌面通知可用。",
         notDelivered: "通知未送达。请检查 System Settings > Notifications。",
         failed: "发送通知失败。",
@@ -1564,14 +1564,14 @@ export const zhCN: TranslationResources = {
     integrations: {
       cli: {
         statusFailed: "无法检查 CLI 安装状态。",
-        installFailed: "无法安装 Paseo CLI。",
-        uninstallFailed: "无法卸载 Paseo CLI。",
-        keptForeign: "已保留一个不是由 Paseo 安装的 paseo 命令。如需卸载，请手动删除。",
+        installFailed: "无法安装 {{appName}} CLI。",
+        uninstallFailed: "无法卸载 {{appName}} CLI。",
+        keptForeign: "已保留一个不是由 {{appName}} 安装的 {{cliName}} 命令。如需卸载，请手动删除。",
       },
     },
   },
   rootError: {
-    title: "Paseo 遇到了问题。",
+    title: "{{appName}} 遇到了问题。",
     body: "请重试以重新加载应用。如果问题持续发生，请在报告时附上下面的详细信息。",
     details: "详情",
   },
@@ -1672,7 +1672,7 @@ export const zhCN: TranslationResources = {
   },
   onboarding: {
     setup: {
-      title: "Paseo",
+      title: "{{appName}}",
       stepCounter: "第 {{current}} 步，共 {{total}} 步",
       skip: "跳过设置",
       continue: "继续",
@@ -1680,13 +1680,13 @@ export const zhCN: TranslationResources = {
       steps: {
         appearance: {
           label: "外观",
-          title: "欢迎使用 Paseo",
+          title: "欢迎使用 {{appName}}",
           description: "先选择一个外观",
         },
         providers: {
           label: "提供方",
           title: "你的代理",
-          description: "Paseo 使用这台电脑上已安装的代理 CLI",
+          description: "{{appName}} 使用这台电脑上已安装的代理 CLI",
         },
         projects: {
           label: "项目",
@@ -1706,7 +1706,7 @@ export const zhCN: TranslationResources = {
         },
         orchestration: {
           label: "编排",
-          title: "让代理使用 Paseo",
+          title: "让代理使用 {{appName}}",
           description: "让你的代理创建工作区并与其他代理对话",
         },
         phone: {
@@ -1724,7 +1724,7 @@ export const zhCN: TranslationResources = {
         },
       },
     },
-    title: "欢迎使用 Paseo",
+    title: "欢迎使用 {{appName}}",
     subtitle: "连接你的电脑即可开始",
     actions: {
       settings: "设置",
@@ -1940,7 +1940,7 @@ export const zhCN: TranslationResources = {
         "不使用中继时，请通过 TCP、Tailscale 或其他 VPN 直接连接。不会生成二维码。",
       tailscaleDocs: "设置 Tailscale",
       tailscaleDocsAccessibility: "了解如何通过 Tailscale 连接",
-      updateRequired: "请更新主机，以便从 Paseo Desktop 启用中继。",
+      updateRequired: "请更新主机，以便从 {{appName}} Desktop 启用中继。",
       unavailable: "配对 offer 不可用。",
       hint: "用手机上的 Paseo 扫描此二维码，或复制下方链接。",
       securityWarning: "请像保管密码一样保管此配对链接。任何获得此链接的人都可以访问此守护进程。",
@@ -1976,7 +1976,7 @@ export const zhCN: TranslationResources = {
   serviceUrl: {
     title: "打开服务 URL",
     message: "打开 {{url}}？",
-    inPaseo: "在 Paseo 中",
+    inPaseo: "在 {{appName}} 中",
     externalBrowser: "外部浏览器",
     dontAskAgain: "不再询问",
   },
@@ -2126,8 +2126,8 @@ export const zhCN: TranslationResources = {
       other: "使用了 {{count}} 个其他工具",
     },
     paseoCalls: {
-      one: "调用了 Paseo {{count}} 次",
-      other: "调用了 Paseo {{count}} 次",
+      one: "调用了 {{appName}} {{count}} 次",
+      other: "调用了 {{appName}} {{count}} 次",
     },
     and: "并",
   },
@@ -2305,7 +2305,7 @@ export const zhCN: TranslationResources = {
       send: "发送",
       sending: "正在发送...",
       sentTitle: "测试通知已发送",
-      sentDescription: "Paseo 已将通知交给操作系统。",
+      sentDescription: "{{appName}} 已将通知交给操作系统。",
       sendFailedTitle: "无法发送测试通知",
     },
     hostSections: {
@@ -2324,14 +2324,14 @@ export const zhCN: TranslationResources = {
     plugins: pluginSettings["zh-CN"],
     metadataGeneration: {
       title: "元数据生成",
-      description: "选择 Paseo 用于工作区标题、分支名称、提交消息和拉取请求草稿的模型",
+      description: "选择 {{appName}} 用于工作区标题、分支名称、提交消息和拉取请求草稿的模型",
       selection: "模型选择",
       automatic: "自动",
       preferred: "手动",
-      automaticHint: "Paseo 会选择一个可用的快速模型",
-      preferredHint: "选择 Paseo 使用的模型",
+      automaticHint: "{{appName}} 会选择一个可用的快速模型",
+      preferredHint: "选择 {{appName}} 使用的模型",
       model: "模型",
-      modelHint: "只使用此模型。如果失败，Paseo 不会尝试其他模型",
+      modelHint: "只使用此模型。如果失败，{{appName}} 不会尝试其他模型",
       docs: "文档",
       saveError: "无法更新元数据生成设置",
     },
@@ -2409,7 +2409,7 @@ export const zhCN: TranslationResources = {
       browserData: {
         title: "浏览器数据",
         siteData: "Cookie 和网站数据",
-        description: "浏览器标签页在 Paseo 中共享登录状态和网站数据。",
+        description: "浏览器标签页在 {{appName}} 中共享登录状态和网站数据。",
         clear: "清除浏览器数据",
         clearing: "正在清除...",
         confirmTitle: "清除浏览器数据？",
@@ -2445,7 +2445,7 @@ export const zhCN: TranslationResources = {
       serviceUrls: {
         options: {
           ask: "询问",
-          inApp: "在 Paseo 中",
+          inApp: "在 {{appName}} 中",
           external: "外部浏览器",
         },
       },
@@ -2525,7 +2525,7 @@ export const zhCN: TranslationResources = {
         label: "应用更新",
         readyToInstall: "可安装：{{version}}",
         installTitle: "安装桌面版更新",
-        installMessage: "这会更新此电脑上的 Paseo",
+        installMessage: "这会更新此电脑上的 {{appName}}",
         installConfirm: "安装更新",
         update: "更新",
         updateTo: "更新到 {{version}}",
@@ -2693,7 +2693,7 @@ export const zhCN: TranslationResources = {
       commandLine: {
         title: "命令行",
         description: "从终端控制 Agent 并运行脚本",
-        accessibilityLabel: "安装 Paseo CLI",
+        accessibilityLabel: "安装 {{appName}} CLI",
       },
     },
     permissions: {
@@ -2923,9 +2923,10 @@ export const zhCN: TranslationResources = {
           unavailableTitle: "Host 不可用",
           unavailableMessage: "这个 Host 尚未连接。请等待它上线后再重启。",
           offlineTitle: "Host 离线",
-          offlineMessage: "这个 Host 已离线。Paseo 会自动重连，请等它恢复在线后再重启。",
+          offlineMessage: "这个 Host 已离线。{{appName}} 会自动重连，请等它恢复在线后再重启。",
           requestFailedTitle: "错误",
-          requestFailedMessage: "发送重启请求失败。Paseo 会自动重连，请在 Host 显示在线后重试。",
+          requestFailedMessage:
+            "发送重启请求失败。{{appName}} 会自动重连，请在 Host 显示在线后重试。",
           closeTerminals: "重启并关闭终端",
           closeTerminalsHint: "重启的同时关闭此主机上的所有终端。",
           closeTerminalsConfirmMessage:
@@ -3101,7 +3102,7 @@ export const zhCN: TranslationResources = {
       },
       metadata: {
         title: "元数据生成",
-        info: "注入到 Paseo 用来生成元数据的 AI prompts 中的 Project 专属指令，可用于强制执行团队约定，例如分支命名、提交风格或 PR 格式",
+        info: "注入到 {{appName}} 用来生成元数据的 AI prompts 中的 Project 专属指令，可用于强制执行团队约定，例如分支命名、提交风格或 PR 格式",
         branchName: "分支名称",
         branchNamePlaceholder: "分支以 feat/ 或 fix/ 开头，个人分支使用 mb/",
         commitMessage: "提交消息",

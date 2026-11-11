@@ -182,7 +182,7 @@ function PreparationForm({ theme, layout, navigation, host, params }: PluginScre
               value={modeId}
               disabled={frozen || !provider}
               options={[
-                { value: "", label: "Paseo-Standard" },
+                { value: "", label: "Paseo Advanced-Standard" },
                 ...(provider?.modes ?? []).map((value) => ({
                   value: value.id,
                   label: value.label,
@@ -226,13 +226,13 @@ function PreparationForm({ theme, layout, navigation, host, params }: PluginScre
           {projects.data?.length === 0 && (
             <Text style={{ color: theme.colors.foregroundMuted }}>
               Auf diesem Host ist noch kein Projekt unter C:\IFI_SourceCode registriert. Füge es
-              zuerst in Paseo hinzu.
+              zuerst in Paseo Advanced hinzu.
             </Text>
           )}
           {!navigation && (
             <Text style={{ color: theme.colors.statusWarning }}>
-              Diese Paseo-Oberfläche unterstützt das Öffnen des Chats noch nicht. Es wurde keine
-              Session erstellt.
+              Diese Paseo Advanced-Oberfläche unterstützt das Öffnen des Chats noch nicht. Es wurde
+              keine Session erstellt.
             </Text>
           )}
           {mutation.isError && (
