@@ -11173,6 +11173,14 @@ test("idle runtime cleanup honors a provider veto and resumes the saved conversa
       session.canStopRuntime = async () => safe;
       return session;
     }
+    override async resumeSession(
+      handle: AgentPersistenceHandle,
+      config?: Partial<AgentSessionConfig>,
+    ): Promise<AgentSession> {
+      return new (class extends TestAgentSession {
+        override readonly id = handle.sessionId;
+      })({ provider: this.provider, cwd: config?.cwd ?? workdir });
+    }
   })();
   const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
   const collect = runtimeCleanup(manager);
@@ -11196,6 +11204,40 @@ test("idle runtime cleanup honors a provider veto and resumes the saved conversa
     });
     expect(resumed.id).toBe(agent.id);
     expect(resumed.persistence).toEqual(agent.persistence);
+    const recorded = await storage.get(agent.id);
+    expect(recorded?.updatedAt).toBe(resumed.updatedAt.toISOString());
+    expect(recorded?.lastActivityAt).toBe(resumed.updatedAt.toISOString());
+    const reopenedAt = new Date(later.getTime() + 60_000);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(reopenedAt.getTime());
+    try {
+      const reloaded = await manager.reloadAgentSession(resumed.id);
+      expect(reloaded.id).toBe(agent.id);
+      expect(reloaded.persistence).toEqual(agent.persistence);
+      expect(reloaded.session).not.toBe(resumed.session);
+      expect(reloaded.updatedAt).toEqual(resumed.updatedAt);
+      const afterReload = await storage.get(agent.id);
+      expect(afterReload?.updatedAt).toBe(recorded?.updatedAt);
+      expect(afterReload?.lastActivityAt).toBe(recorded?.lastActivityAt);
+      // A fresh runtime is not idle for hours just because the saved chat is.
+      // Delay its first sweep to catch a clock incorrectly started at the sweep.
+      expect(await collect({ now: new Date(reopenedAt.getTime() + 30_000) })).toEqual({
+        collected: [],
+        failures: [],
+      });
+      expect(manager.getAgent(agent.id)?.session).toBe(reloaded.session);
+      expect(
+        (await collect({ now: new Date(reopenedAt.getTime() + 59 * 60_000) })).collected,
+      ).toEqual([]);
+      expect(
+        (await collect({ now: new Date(reopenedAt.getTime() + 60 * 60_000) })).collected,
+      ).toEqual([
+        { agentId: agent.id, provider: "codex", sessionId: agent.persistence?.sessionId },
+      ]);
+      expect(manager.getAgent(agent.id)).toBeNull();
+    } finally {
+      nowSpy.mockRestore();
+    }
+    await ensureAgentLoaded(agent.id, { agentManager: manager, agentStorage: storage, logger });
     await manager.runAgent(agent.id, "Continue the saved conversation");
   } finally {
     await manager.closeAgent(manager.listAgents()[0]?.id ?? "missing").catch(() => undefined);

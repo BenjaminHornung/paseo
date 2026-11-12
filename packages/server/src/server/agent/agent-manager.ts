@@ -832,6 +832,10 @@ export interface RetiredInternalAgent {
   lastMessage: string | null;
 }
 
+interface RuntimeCleanupIdentity {
+  readonly activatedAtMs: number;
+}
+
 export class AgentManager {
   private readonly pluginLifecycle: PluginLifecycle | undefined;
   private readonly retiredInternalAgents = new Map<
@@ -860,7 +864,7 @@ export class AgentManager {
   private readonly inFlightAgentCloses = new Map<string, Promise<void>>();
   private readonly historySessions = new WeakSet<AgentSession>();
   private readonly reloadedSessionCloses = new WeakMap<AgentSession, Promise<void>>();
-  private readonly runtimeCleanupIdentities = new WeakMap<AgentSession, object>();
+  private readonly runtimeCleanupIdentities = new WeakMap<AgentSession, RuntimeCleanupIdentity>();
   private readonly collectingRuntimes = new Set<string>();
   private readonly lifecycleMutationTails = new Map<string, Promise<void>>();
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
@@ -2128,10 +2132,9 @@ export class AgentManager {
     const candidates: RuntimeCleanupCandidate[] = [];
     for (const agent of this.agents.values()) {
       const updatedAt = agent.updatedAt;
-      let identity = this.runtimeCleanupIdentities.get(agent.session);
+      const identity = this.runtimeCleanupIdentities.get(agent.session);
       if (!identity) {
-        identity = Object.freeze({});
-        this.runtimeCleanupIdentities.set(agent.session, identity);
+        throw new Error("Registered runtime cleanup identity missing");
       }
       const isEligible = () =>
         this.agents.get(agent.id) === agent &&
@@ -2143,7 +2146,7 @@ export class AgentManager {
         parentAgentId: getParentAgentIdFromLabels(agent.labels) ?? undefined,
         provider: agent.provider,
         sessionId: agent.persistence?.sessionId ?? null,
-        lastActivityAt: updatedAt.getTime(),
+        lastActivityAt: Math.max(updatedAt.getTime(), identity.activatedAtMs),
         isEligible,
         canStopRuntime: agent.session.canStopRuntime?.bind(agent.session),
         closeIfEligible: async (revalidate) => {
@@ -4357,6 +4360,9 @@ export class AgentManager {
       }
 
       this.assertAcceptingAgentRegistrations();
+      // Opening a runtime starts its idle clock without rewriting the chat's
+      // historical activity, which the workspace sidebar also relies on.
+      this.runtimeCleanupIdentities.set(session, Object.freeze({ activatedAtMs: Date.now() }));
       this.agents.set(resolvedAgentId, managed);
       registered = true;
       // Initialize previousStatus to track transitions
