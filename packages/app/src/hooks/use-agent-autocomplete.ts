@@ -14,6 +14,8 @@ import {
 import { orderAutocompleteOptions } from "@/components/ui/autocomplete-utils";
 import { useAutocomplete } from "./use-autocomplete";
 import { useSessionStore } from "@/stores/session-store";
+import type { HarnessContextEntry } from "@getpaseo/protocol/messages";
+import { useHarnessContext } from "@/composer/context/query";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { pluginDisplayName, usePluginList } from "@/plugins/plugin-list";
@@ -35,6 +37,7 @@ import {
 } from "@/utils/file-mention-autocomplete";
 
 interface UseAgentAutocompleteInput {
+  onSelectHarnessContext?: (entry: HarnessContextEntry) => void;
   userInput: string;
   cursorIndex: number;
   setUserInput: (nextValue: string) => void;
@@ -59,6 +62,8 @@ interface AgentAutocompleteInputSnapshot {
 }
 
 type AgentAutocompleteOption =
+  | (AutocompleteOption & { type: "context_retry" })
+  | (AutocompleteOption & { type: "harness_context"; entry: HarnessContextEntry })
   | (AutocompleteOption & { type: "client_command"; command: ClientSlashCommand })
   | (AutocompleteOption & {
       type: "plugin_command";
@@ -489,6 +494,86 @@ function resolveCommandsEmptyText(args: {
   return args.t("agentAutocomplete.noCommands");
 }
 
+function useHarnessContextAutocomplete({
+  serverId,
+  agentId,
+  draft,
+  mode,
+  canSelect,
+  fileFilterQuery,
+  menu,
+  t,
+}: {
+  serverId: string;
+  agentId: string;
+  draft?: DraftCommandTarget;
+  mode: AutocompleteMode;
+  canSelect: boolean;
+  fileFilterQuery: string;
+  menu: AutocompleteMenu;
+  t: TFunction;
+}) {
+  const context = useHarnessContext(serverId, agentId, mode === "file" && canSelect, draft);
+  const { refetch: retry } = context;
+  const contextOptions = useMemo<AgentAutocompleteOption[]>(
+    () =>
+      mode === "file"
+        ? (context.data?.entries ?? [])
+            .filter((entry) =>
+              `${entry.name} ${entry.description}`
+                .toLowerCase()
+                .includes(fileFilterQuery.toLowerCase()),
+            )
+            .map((entry) => ({
+              id: entry.id,
+              type: "harness_context",
+              entry,
+              label: entry.name,
+              description: entry.description,
+              tag: t(`composer.context.${entry.kind}`),
+              icon: entry.kind === "skill" ? "skill" : "plugin",
+            }))
+        : [],
+    [mode, context.data, fileFilterQuery, t],
+  );
+  const options = useMemo(() => {
+    const entries = [...contextOptions, ...menu.options];
+    if (mode === "file" && (context.isError || context.data?.error))
+      entries.unshift({
+        id: "context-retry",
+        type: "context_retry",
+        label: t("composer.context.failed"),
+        icon: "plugin",
+      });
+    return entries;
+  }, [contextOptions, menu.options, mode, context.isError, context.data?.error, t]);
+  let status = options.length > 0 ? null : menu.status;
+  if (options.length === 0 && context.isLoading)
+    status = { kind: "loading", message: t("composer.context.loading") };
+  return { options, status, retry };
+}
+
+function applyHarnessContextSelection({
+  entry,
+  current,
+  onSelect,
+  setUserInput,
+  onApplied,
+}: {
+  entry: HarnessContextEntry;
+  current: AgentAutocompleteSnapshot;
+  onSelect: UseAgentAutocompleteInput["onSelectHarnessContext"];
+  setUserInput: UseAgentAutocompleteInput["setUserInput"];
+  onApplied: UseAgentAutocompleteInput["onAutocompleteApplied"];
+}) {
+  if (!current.fileMention || !onSelect) return;
+  onSelect(entry);
+  setUserInput(
+    current.text.slice(0, current.fileMention.start) + current.text.slice(current.fileMention.end),
+  );
+  onApplied?.();
+}
+
 export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAutocompleteResult {
   const { t } = useTranslation();
   const {
@@ -500,6 +585,7 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
     draft,
     onAutocompleteApplied,
     onClientSlashCommand,
+    onSelectHarnessContext,
     canExecuteClientSlashCommand,
     pluginClientSlashCommands = [],
   } = input;
@@ -628,7 +714,7 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
     // Pressing Retry takes focus on web; hand it back so the user keeps typing the command.
     onAutocompleteApplied?.();
   }, [onAutocompleteApplied, retryCommandsQuery]);
-  const { options, status } = useMemo<AutocompleteMenu>(() => {
+  const menu = useMemo<AutocompleteMenu>(() => {
     if (!isVisible) return { options: [], status: null };
     const buildOptions = () =>
       buildAutocompleteOptions({
@@ -683,9 +769,29 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
     t,
   ]);
 
+  const {
+    options,
+    status,
+    retry: retryHarnessContext,
+  } = useHarnessContextAutocomplete({
+    serverId,
+    agentId,
+    draft,
+    mode,
+    canSelect: onSelectHarnessContext !== undefined,
+    fileFilterQuery,
+    menu,
+    t,
+  });
+
   const onSelectOption = useCallback(
     (option: AutocompleteOption, snapshot?: AgentAutocompleteInputSnapshot) => {
       const selected = option as AgentAutocompleteOption;
+      if (selected.type === "context_retry") {
+        void retryHarnessContext();
+        onAutocompleteApplied?.();
+        return;
+      }
       const current = resolveAgentAutocompleteSnapshot({
         input: snapshot,
         userInput,
@@ -693,6 +799,16 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
         activeSlashCommand,
         activeFileMention,
       });
+      if (selected.type === "harness_context") {
+        applyHarnessContextSelection({
+          entry: selected.entry,
+          current,
+          onSelect: onSelectHarnessContext,
+          setUserInput,
+          onApplied: onAutocompleteApplied,
+        });
+        return;
+      }
       const selectedIsCommand =
         selected.type === "client_command" ||
         selected.type === "plugin_command" ||
@@ -738,6 +854,8 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
       canExecuteClientSlashCommand,
       onAutocompleteApplied,
       onClientSlashCommand,
+      onSelectHarnessContext,
+      retryHarnessContext,
       setUserInput,
       userInput,
       cursorIndex,

@@ -6,6 +6,8 @@ type OutboundOperation = SessionOutboundMessage["type"];
 export type PermissionRequirement = DaemonPermission | readonly DaemonPermission[] | null;
 
 const INBOUND_PERMISSION = {
+  "composer.prediction.request": "workspace.write",
+  "agent.context.list.request": "workspace.read",
   "hosts.list.request": "daemon.read",
   "hosts.add.request": "tunnel.manage",
   "hosts.update.request": "tunnel.manage",
@@ -240,6 +242,8 @@ const INBOUND_PERMISSION = {
 } as const satisfies Record<InboundOperation, PermissionRequirement>;
 
 const OUTBOUND_PERMISSION = {
+  "composer.prediction.response": "workspace.write",
+  "agent.context.list.response": "workspace.read",
   "hosts.list.response": "daemon.read",
   "hosts.changed": "daemon.read",
   "hosts.add.response": "tunnel.manage",

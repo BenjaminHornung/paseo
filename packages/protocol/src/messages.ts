@@ -21,6 +21,15 @@ import {
 } from "./hosts.js";
 import { PluginRegistryIdentitySchema } from "./plugin-registry.js";
 import { AgentProfileSchema, AgentSkillSelectionSchema } from "./agent-profile.js";
+import {
+  ComposerPredictionsConfigSchema,
+  ComposerPredictionRequestSchema,
+  ComposerPredictionResponseSchema,
+  HarnessContextRequestSchema,
+  HarnessContextResponseSchema,
+  HarnessContextEntrySchema,
+} from "./composer.js";
+export type { HarnessContextEntry } from "./composer.js";
 export {
   AgentProfileSchema,
   AgentSkillSelectionSchema,
@@ -246,6 +255,7 @@ export const MutableDaemonConfigSchema = z
     appendSystemPrompt: z.string().default(""),
     terminalProfiles: z.array(TerminalProfileSchema).optional(),
     agentProfiles: z.array(AgentProfileSchema).optional(),
+    composerPredictions: ComposerPredictionsConfigSchema.optional(),
     skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
     pluginsEnabled: z.boolean().optional(),
     plugins: z.record(PluginIdSchema, PluginSourceSchema).optional(),
@@ -274,6 +284,7 @@ export const MutableDaemonConfigPatchSchema = z
     appendSystemPrompt: z.string().optional(),
     terminalProfiles: z.array(TerminalProfileSchema).optional(),
     agentProfiles: z.array(AgentProfileSchema).optional(),
+    composerPredictions: ComposerPredictionsConfigSchema.optional(),
     pluginsEnabled: z.boolean().optional(),
     plugins: z.record(PluginIdSchema, PluginSourceSchema).optional(),
     features: SpeechSettingsPatchSchema.optional(),
@@ -414,6 +425,7 @@ const AgentModelDefinitionSchema = z.object({
 
 const AgentCapabilityFlagsSchema: z.ZodType<AgentCapabilityFlags> = z
   .object({
+    supportsTextGeneration: z.boolean().optional(),
     supportsStreaming: z.boolean(),
     supportsSessionPersistence: z.boolean(),
     supportsSessionListing: z.boolean().optional(),
@@ -1253,6 +1265,9 @@ export const TextAttachmentSchema = z
     title: z.string().nullable().optional(),
     text: z.string(),
     externalResource: ExternalResourceAttachmentMetadataSchema.optional(),
+    harnessContext: z
+      .object({ agentId: z.string(), provider: z.string(), entry: HarnessContextEntrySchema })
+      .optional(),
   })
   .transform(({ contextKind, ...attachment }) => ({
     ...attachment,
@@ -3695,6 +3710,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ClientHeartbeatMessageSchema,
   PingMessageSchema,
   ListCommandsRequestSchema,
+  ComposerPredictionRequestSchema,
+  HarnessContextRequestSchema,
   RegisterPushTokenMessageSchema,
   PushUnregisterRequestSchema,
   ListTerminalsRequestSchema,
@@ -4131,6 +4148,8 @@ export const ServerInfoStatusPayloadSchema = z
         // agentProfiles to one is silently dropped. The client hides the feature
         // rather than letting a save appear to succeed.
         agentProfiles: z.boolean().optional(),
+        composerPredictions: z.boolean().optional(),
+        harnessContext: z.boolean().optional(),
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: z.boolean().optional(),
       })
@@ -7617,6 +7636,8 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   UsageListReportsUpdateMessageSchema,
   UsageListReportsResponseMessageSchema,
   ListCommandsResponseSchema,
+  ComposerPredictionResponseSchema,
+  HarnessContextResponseSchema,
   ListTerminalsResponseSchema,
   TerminalsChangedSchema,
   CreateTerminalResponseSchema,

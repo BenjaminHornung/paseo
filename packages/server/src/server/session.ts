@@ -148,6 +148,8 @@ import { assertPluginTimelineDataSize } from "./agent/agent-timeline-content.js"
 import { parsePluginClientId } from "./plugins/plugin-session-identity.js";
 import { buildAgentForkContextAttachment } from "./agent/activity-curator.js";
 import { buildAgentPrompt } from "./agent/prompt-attachments.js";
+import { composerPredictions, ComposerPredictionFailure } from "./composer/predictions.js";
+import { discoverHarnessContext } from "./composer/context.js";
 import type { StructuredGenerationDaemonConfig } from "./agent/structured-generation-providers.js";
 import {
   getAgentStreamEventTurnId,
@@ -3507,6 +3509,70 @@ export class Session {
 
   private async dispatchMiscMessage(msg: SessionInboundMessage): Promise<void> {
     switch (msg.type) {
+      case "agent.context.list.request": {
+        try {
+          const existing = this.agentManager.getAgent(msg.agentId);
+          const stored = existing ? null : await this.agentStorage.get(msg.agentId);
+          if (stored?.archivedAt) throw new Error("Agent archived");
+          if (msg.draftConfig && !existing && !stored) {
+            const commands = await this.agentManager.listDraftCommands({
+              ...msg.draftConfig,
+              cwd: expandTilde(msg.draftConfig.cwd),
+            });
+            const catalog = await discoverHarnessContext({ listCommands: async () => commands });
+            this.emit({
+              type: "agent.context.list.response",
+              payload: { requestId: msg.requestId, agentId: msg.agentId, ...catalog },
+            });
+            return;
+          }
+          const agent = await ensureAgentLoaded(msg.agentId, {
+            agentManager: this.agentManager,
+            agentStorage: this.agentStorage,
+            logger: this.sessionLogger,
+          });
+          if (!agent?.session) throw new Error("Agent unavailable");
+          const catalog = await discoverHarnessContext(agent.session);
+          this.emit({
+            type: "agent.context.list.response",
+            payload: { requestId: msg.requestId, agentId: msg.agentId, ...catalog },
+          });
+        } catch {
+          this.emit({
+            type: "agent.context.list.response",
+            payload: {
+              requestId: msg.requestId,
+              agentId: msg.agentId,
+              entries: [],
+              error: "Capability discovery failed",
+            },
+          });
+        }
+        return;
+      }
+      case "composer.prediction.request": {
+        let suggestion: string | null = null;
+        let error: "unavailable" | "failed" | "timeout" | null = null;
+        try {
+          suggestion = await composerPredictions(this.agentManager, this.daemonConfigStore).predict(
+            msg.agentId,
+            msg.sourceTurnId,
+          );
+        } catch (cause) {
+          error = cause instanceof ComposerPredictionFailure ? cause.code : "failed";
+        }
+        this.emit({
+          type: "composer.prediction.response",
+          payload: {
+            requestId: msg.requestId,
+            agentId: msg.agentId,
+            sourceTurnId: msg.sourceTurnId,
+            suggestion,
+            error,
+          },
+        });
+        return;
+      }
       case "list_commands_request":
         await this.handleListCommandsRequest(msg);
         return;

@@ -122,6 +122,8 @@ export const ja: TranslationResources = {
     },
   },
   composer: {
+    predictions: en.composer.predictions,
+    context: en.composer.context,
     placeholders: {
       desktop: "エージェントにメッセージ、@ファイル、/コマンドや/スキルを入力",
       mobile: "メッセージ、@ファイル、/コマンド",

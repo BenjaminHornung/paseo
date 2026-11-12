@@ -122,6 +122,8 @@ export const ru: TranslationResources = {
     },
   },
   composer: {
+    predictions: en.composer.predictions,
+    context: en.composer.context,
     placeholders: {
       desktop: "Напишите агенту сообщение, отметьте @files или используйте /commands и /skills.",
       mobile: "Сообщение,@files,/commands",

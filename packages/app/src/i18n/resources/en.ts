@@ -117,6 +117,34 @@ export const en = {
     },
   },
   composer: {
+    predictions: {
+      title: "Composer predictions",
+      enabled: "Suggest my next message",
+      description:
+        "Suggestions for all chats on this host. Tab accepts a draft; nothing is sent automatically.",
+      profile: "Prediction profile",
+      profileHint:
+        "Choose an existing Pi or Claude profile. Generation uses its provider allowance, independently of the chat agent.",
+      chooseProfile: "Choose a profile",
+      unavailable: "The selected profile is unavailable. Choose another profile.",
+      saveFailed: "Could not save the prediction settings. Try again.",
+      accept: "Accept suggestion",
+      dismiss: "Dismiss suggestion",
+      failed: "Suggestion unavailable",
+    },
+    context: {
+      title: "Skills and connections",
+      loading: "Loading skills and connections…",
+      search: "Search this agent's skills and connections",
+      empty: "No available skills or connections",
+      failed: "Could not load this agent's skills and connections. Try again.",
+      stale:
+        "A selected skill or connection is no longer available for this agent. Remove it and select it again.",
+      skill: "Skill",
+      mcp: "MCP server",
+      plugin: "Plugin",
+      connector: "Connector",
+    },
     placeholders: {
       desktop: "Message the agent, tag @files, or use /commands and /skills",
       mobile: "Message, @files, /commands",

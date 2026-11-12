@@ -477,6 +477,7 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
     close: () => inner.close(),
     canStopRuntime: inner.canStopRuntime?.bind(inner),
     listCommands: inner.listCommands?.bind(inner),
+    listContext: inner.listContext?.bind(inner),
     setModel: inner.setModel?.bind(inner),
     setThinkingOption: inner.setThinkingOption?.bind(inner),
     applyOptions: inner.applyOptions?.bind(inner),
@@ -495,6 +496,7 @@ function wrapClientProvider(
   profileModelsAreAdditive: boolean,
   configuredOptions: ProviderOptions | undefined,
 ): AgentClient {
+  const generateText = inner.generateText?.bind(inner);
   const listImportableSessions = inner.listImportableSessions?.bind(inner);
   const importSession = inner.importSession?.bind(inner);
   const listControls = inner.listControls?.bind(inner);
@@ -514,6 +516,18 @@ function wrapClientProvider(
       return inner.capabilities;
     },
     shutdown: inner.shutdown?.bind(inner),
+    generateText: generateText
+      ? (config, prompt, signal) =>
+          generateText(
+            {
+              ...config,
+              provider: inner.provider,
+              providerOptions: withDefaults(config.providerOptions),
+            },
+            prompt,
+            signal,
+          )
+      : undefined,
     createSession: async (config, launchContext, options) =>
       wrapSessionProvider(
         provider,

@@ -11,6 +11,7 @@ import { type ComposerEditingSession, useComposerFullscreen } from "@/composer/e
 import { ComposerImportPill } from "@/composer/draft/import-pill";
 import { COMPOSER_PILL_CLEARANCE } from "@/composer/pill-styles";
 import { composerWorkspaceAttachment } from "@/composer/attachments/workspace";
+import { harnessContextAgentId } from "@/composer/context/selection";
 import { useAgentInputDraft } from "@/composer/draft/input-draft";
 import type { CreateAgentInitialValues } from "@/hooks/use-agent-form-state";
 import { useDraftAgentCreateFlow, type DraftCreateAttempt } from "@/composer/draft/create-flow";
@@ -162,17 +163,19 @@ async function submitDraftCreateRequest(input: {
     providerOptions: autoSubmitConfig?.providerOptions ?? composerState.providerOptions,
   });
 
-  const attachmentsArray = Array.isArray(attachments) ? attachments : undefined;
+  const attachmentsArray = Array.isArray(attachments) ? attachments : [];
+  const reservedAgentId = harnessContextAgentId(attachmentsArray);
   const imagesData = await encodeImages(images);
   const options = {
     idempotencyKey: input.draftId,
+    ...(reservedAgentId ? { agentId: reservedAgentId } : {}),
     config,
     workspaceId,
     initialPrompt: text,
     clientMessageId: attempt.clientMessageId,
     ...(Object.keys(composerState.metadata).length > 0 ? { metadata: composerState.metadata } : {}),
     ...(imagesData && imagesData.length > 0 ? { images: imagesData } : {}),
-    ...(attachmentsArray && attachmentsArray.length > 0 ? { attachments: attachmentsArray } : {}),
+    ...(attachmentsArray.length > 0 ? { attachments: attachmentsArray } : {}),
   };
   const creation = useWorkspaceDraftSubmissionStore.getState().creationByDraftId[input.draftId];
   const result = creation ? await creation.retry(options) : await client.createAgent(options);

@@ -1,6 +1,8 @@
 import { setImmediate } from "node:timers/promises";
 import { ClaudeRuntimeSafety } from "./runtime-safety.js";
 import type { ProviderOptions } from "@getpaseo/protocol/agent-types";
+import type { HarnessContextEntry } from "@getpaseo/protocol/messages";
+import { HarnessContextUnavailable } from "../../../composer/context.js";
 import { applyProviderOptionsPatch } from "../../option-controls.js";
 import { assertChangesAreLive, validateProviderOptions } from "../../provider-options.js";
 import type { ChildProcess } from "node:child_process";
@@ -148,6 +150,7 @@ import {
   createProviderEnv,
   createProviderEnvSpec,
   resolveProviderLaunch,
+  supportsIsolatedTextGeneration,
   type ProviderRuntimeSettings,
   type ResolvedProviderLaunch,
 } from "../../provider-launch-config.js";
@@ -1605,9 +1608,93 @@ export function readEventIdentifiers(message: SDKMessage): EventIdentifiers {
 }
 
 export class ClaudeAgentClient implements AgentClient {
+  async generateText(
+    config: AgentSessionConfig,
+    prompt: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    signal.throwIfAborted();
+    if (!this.capabilities.supportsTextGeneration)
+      throw new Error("Isolated text generation is unavailable with a custom provider command");
+    const controller = new AbortController();
+    const abort = () => controller.abort(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    let child: ChildProcess | undefined;
+    let query: Query | undefined;
+    try {
+      const binary = await this.resolveBinary();
+      signal.throwIfAborted();
+      const thinkingOption = config.thinkingOptionId;
+      assertClaudeThinkingOptionSupported(config.model, thinkingOption);
+      const ultracode = thinkingOption === CLAUDE_ULTRACODE_THINKING_OPTION_ID;
+      let effort: ClaudeOptions["effort"];
+      if (ultracode) effort = "xhigh";
+      else if (thinkingOption && isClaudeThinkingEffort(thinkingOption)) effort = thinkingOption;
+      let thinking: ClaudeOptions["thinking"];
+      if (thinkingOption === CLAUDE_DISABLED_THINKING_OPTION_ID) thinking = { type: "disabled" };
+      else if (effort) thinking = { type: "adaptive", display: "summarized" };
+      const { fast_mode, ...providerOptions } = ClaudeProviderOptionsSchema.parse(
+        config.providerOptions ?? {},
+      );
+      query = claudeQuery(
+        {
+          prompt,
+          options: {
+            ...providerOptions,
+            pathToClaudeCodeExecutable: binary,
+            cwd: config.cwd,
+            env: this.runtimeSettings?.env,
+            model: config.model,
+            effort,
+            thinking,
+            tools: [],
+            allowedTools: [],
+            // Arbitrary CLI flags can restore tools, hooks, MCPs or an existing session.
+            extraArgs: undefined,
+            disallowedTools: ["mcp__*"],
+            mcpServers: {},
+            strictMcpConfig: true,
+            plugins: [],
+            settingSources: [],
+            settings: {
+              disableAllHooks: true,
+              disableClaudeAiConnectors: true,
+              ...(ultracode ? { ultracode: true } : {}),
+              ...(typeof fast_mode === "boolean" ? { fastMode: fast_mode } : {}),
+            },
+            canUseTool: async () => ({ behavior: "deny", message: "Text-only generation" }),
+            persistSession: false,
+            maxTurns: 1,
+            abortController: controller,
+          },
+        },
+        {
+          runtimeSettings: this.runtimeSettings,
+          queryFactory: this.queryFactory,
+          onChildProcess: (process) => {
+            child = process;
+          },
+        },
+      );
+      for await (const message of query) {
+        signal.throwIfAborted();
+        if (message.type === "result" && message.subtype === "success") return message.result;
+      }
+      throw new Error("Text generation returned no result");
+    } finally {
+      signal.removeEventListener("abort", abort);
+      controller.abort();
+      try {
+        query?.close();
+      } finally {
+        if (child)
+          await terminateWithTreeKill(child, { gracefulTimeoutMs: 200, forceTimeoutMs: 200 });
+      }
+    }
+  }
   private readonly discoverModels: typeof discoverClaudeModels;
   readonly provider = "claude" as const;
-  readonly capabilities = CLAUDE_CAPABILITIES;
+  readonly capabilities: AgentCapabilityFlags;
 
   private readonly defaults?: { agents?: Record<string, AgentDefinition> };
   private readonly logger: Logger;
@@ -1627,6 +1714,10 @@ export class ClaudeAgentClient implements AgentClient {
   });
 
   constructor(options: ClaudeAgentClientOptions) {
+    this.capabilities = {
+      ...CLAUDE_CAPABILITIES,
+      supportsTextGeneration: supportsIsolatedTextGeneration(options.runtimeSettings),
+    };
     this.discoverModels = options.discoverModels ?? discoverClaudeModels;
     this.defaults = options.defaults;
     this.logger = options.logger.child({ module: "agent", provider: "claude" });
@@ -3166,6 +3257,38 @@ class ClaudeAgentSession implements AgentSession {
     return Array.from(commandMap.values()).sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  private contextPlugins: HarnessContextEntry[] | null = null;
+
+  async listContext(
+    kinds: readonly HarnessContextEntry["kind"][] = ["mcp", "plugin", "connector"],
+  ): Promise<HarnessContextEntry[]> {
+    const query = await this.ensureQuery();
+    if (kinds.includes("plugin") && this.contextPlugins === null) {
+      throw new HarnessContextUnavailable(
+        "Claude plugin availability is confirmed after the first turn; send without the plugin or select it again after a turn",
+      );
+    }
+    const needsServers = kinds.includes("mcp") || kinds.includes("connector");
+    const servers = needsServers ? await query.mcpServerStatus() : [];
+    const entries: HarnessContextEntry[] = servers
+      .filter((server) => server.status === "connected")
+      .map((server) => {
+        const kind =
+          server.scope === "claudeai" || server.config?.type === "claudeai-proxy"
+            ? "connector"
+            : "mcp";
+        return {
+          id: `${kind}:${server.name}`,
+          kind,
+          name: server.name,
+          description: "",
+          invocation: `${kind} ${server.name}`,
+        };
+      });
+    const plugins = kinds.includes("plugin") ? (this.contextPlugins ?? []) : [];
+    return [...entries, ...plugins].filter((entry) => kinds.includes(entry.kind));
+  }
+
   async revertConversation(input: { messageId: string }): Promise<void> {
     await this.ensureHistoryReady();
     const target = await this.resolveConversationRewindTarget(input.messageId);
@@ -3608,6 +3731,7 @@ class ClaudeAgentSession implements AgentSession {
     this.dispatchEvents([{ type: "background_work", provider: "claude", items: null }]);
     // A fresh Claude process has no turn of its own in flight.
     this.mainTurnInFlight = false;
+    this.contextPlugins = null;
     this.query = claudeQuery(
       { prompt: input.iterable, options },
       {
@@ -5203,6 +5327,14 @@ class ClaudeAgentSession implements AgentSession {
     if (message.subtype !== "init") {
       return { threadStartedSessionId: null, notice: null };
     }
+    this.contextPlugins =
+      message.plugins?.map((plugin) => ({
+        id: `plugin:${plugin.name}`,
+        kind: "plugin",
+        name: plugin.name,
+        description: "",
+        invocation: `plugin ${plugin.name}`,
+      })) ?? null;
 
     const msgRecord = toObjectRecord(message) ?? {};
     const newSessionId = extractSessionIdRaw({
