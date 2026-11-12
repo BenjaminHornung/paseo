@@ -123,6 +123,8 @@ export const fr: TranslationResources = {
     },
   },
   composer: {
+    predictions: en.composer.predictions,
+    context: en.composer.context,
     placeholders: {
       desktop: "Écrivez à l’agent, mentionnez des @fichiers ou utilisez les /commandes et /skills",
       mobile: "Message, @fichiers, /commandes",

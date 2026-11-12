@@ -6239,6 +6239,95 @@ test.each([
   });
 });
 
+test("context discovery never wakes archived agents", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const resumeAgentFromPersistence = vi.fn();
+  const createAgentFromRecord = vi.fn();
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      getAgent: () => undefined,
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      getRegisteredProviderIds: vi.fn(() => ["codex"]),
+      resumeAgentFromPersistence,
+      createAgentFromRecord,
+    },
+    agentStorage: {
+      get: vi.fn().mockResolvedValue(
+        createStoredAgentRecord({
+          id: "agent-a",
+          cwd: "/tmp/repo",
+          archivedAt: "2026-10-06T10:00:00.000Z",
+        }),
+      ),
+    },
+  });
+  await session.handleMessage({
+    type: "agent.context.list.request",
+    agentId: "agent-a",
+    requestId: "archived-context",
+  });
+  expect(messages).toContainEqual({
+    type: "agent.context.list.response",
+    payload: {
+      requestId: "archived-context",
+      agentId: "agent-a",
+      entries: [],
+      error: "Capability discovery failed",
+    },
+  });
+  expect(resumeAgentFromPersistence).not.toHaveBeenCalled();
+  expect(createAgentFromRecord).not.toHaveBeenCalled();
+});
+
+test("context discovery keeps loaded harness capabilities available", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      getAgent: () => ({
+        id: "agent-a",
+        provider: "codex",
+        cwd: "/tmp/repo",
+        session: {
+          provider: "codex",
+          listCommands: async () => [
+            {
+              name: "review",
+              kind: "skill",
+              description: "Review",
+              argumentHint: "",
+            },
+          ],
+        },
+      }),
+    },
+  });
+  await session.handleMessage({
+    type: "agent.context.list.request",
+    agentId: "agent-a",
+    requestId: "live-context",
+  });
+  expect(messages).toContainEqual({
+    type: "agent.context.list.response",
+    payload: {
+      requestId: "live-context",
+      agentId: "agent-a",
+      error: null,
+      entries: [
+        {
+          id: "skill:review",
+          kind: "skill",
+          name: "review",
+          description: "Review",
+          invocation: "/review",
+        },
+      ],
+    },
+  });
+});
+
 test("never pushes background work to an old app", async () => {
   const messages: SessionOutboundMessage[] = [];
   const targetedMessages: Array<{ source: object; message: SessionOutboundMessage }> = [];

@@ -122,6 +122,8 @@ export const ptBR: TranslationResources = {
     },
   },
   composer: {
+    predictions: en.composer.predictions,
+    context: en.composer.context,
     placeholders: {
       desktop: "Envie uma mensagem ao agente, marque @files ou use /commands e /skills",
       mobile: "Mensagem, @files, /commands",

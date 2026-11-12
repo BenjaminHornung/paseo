@@ -1,4 +1,5 @@
 import type { AttachedAgentTool, PluginAgentToolsRuntime } from "../plugins/agent-tools.js";
+import { validateHarnessContext } from "../composer/context.js";
 import { ProviderOptionsValidationError } from "./provider-options.js";
 import type { AgentToolResult } from "@getpaseo/plugin/server";
 import type { RuntimeCleanupCandidate } from "./idle-runtime-cleanup/index.js";
@@ -966,6 +967,21 @@ export class AgentManager {
 
   getRegisteredProviderIds(): AgentProvider[] {
     return Array.from(this.clients.keys());
+  }
+
+  async generateText(
+    config: AgentSessionConfig,
+    prompt: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    this.requireEnabledProvider(config.provider);
+    const client = await this.requireAvailableClient({ provider: config.provider });
+    if (!client.generateText || client.capabilities.supportsTextGeneration !== true) {
+      throw new Error("This provider does not support isolated text generation");
+    }
+    signal.throwIfAborted();
+    const normalized = await this.normalizeConfig(config);
+    return client.generateText(normalized, prompt, signal);
   }
 
   setAgentAttentionCallback(callback: AgentAttentionCallback): void {
@@ -3182,6 +3198,7 @@ export class AgentManager {
   }): Promise<string> {
     const { agent, agentId, pendingRun, prompt, options } = params;
     try {
+      if (Array.isArray(prompt)) await validateHarnessContext(agentId, agent.session, prompt);
       const result = await agent.session.startTurn(prompt, options);
       if (pendingRun.settled) {
         throw new Error(`Agent ${agentId} run was canceled before its turn started`);
@@ -3515,6 +3532,7 @@ export class AgentManager {
       return { status: "unavailable" };
     }
     const result = await this.runSteerAdmission(agent, expectedTurnId, async () => {
+      if (Array.isArray(prompt)) await validateHarnessContext(agentId, agent.session, prompt);
       const admission = await agent.session.steerActiveTurn!(prompt, {
         ...options,
         expectedTurnId,
@@ -3554,6 +3572,7 @@ export class AgentManager {
 
     const result = agent.session.steerActiveTurn
       ? await this.runSteerAdmission(agent, expectedTurnId, async () => {
+          if (Array.isArray(prompt)) await validateHarnessContext(agentId, agent.session, prompt);
           const admission = await agent.session.steerActiveTurn!(prompt, {
             ...options,
             expectedTurnId,

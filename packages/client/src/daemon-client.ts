@@ -6385,6 +6385,24 @@ export class DaemonClient {
   // Permissions
   // ============================================================================
 
+  async predictComposerMessage(options: { agentId: string; sourceTurnId: string }) {
+    return this.sendCorrelatedSessionRequest({
+      message: { type: "composer.prediction.request", ...options },
+      responseType: "composer.prediction.response",
+    });
+  }
+
+  async listHarnessContext(agentId: string, draftConfig?: ListCommandsOptions["draftConfig"]) {
+    return this.sendCorrelatedSessionRequest({
+      message: {
+        type: "agent.context.list.request",
+        agentId,
+        ...(draftConfig ? { draftConfig } : {}),
+      },
+      responseType: "agent.context.list.response",
+    });
+  }
+
   async respondToPermission(
     agentId: string,
     requestId: string,

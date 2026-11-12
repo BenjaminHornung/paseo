@@ -432,6 +432,7 @@ export interface PaseoDaemonConfig {
   appendSystemPrompt?: string;
   terminalProfiles?: TerminalProfile[];
   agentProfiles?: AgentProfile[];
+  composerPredictions?: MutableDaemonConfig["composerPredictions"];
   skillSelection?: AgentSkillSelection;
   pluginsEnabled?: boolean;
   plugins?: Record<string, PluginSource>;
@@ -616,6 +617,7 @@ function createInitialMutableDaemonConfig(config: ResolvedDaemonSettings): Mutab
   if (config.agentProfiles !== undefined) {
     initialConfig.agentProfiles = config.agentProfiles;
   }
+  initialConfig.composerPredictions = config.composerPredictions;
 
   return initialConfig;
 }

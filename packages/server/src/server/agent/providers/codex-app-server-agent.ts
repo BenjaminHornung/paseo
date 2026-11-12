@@ -48,6 +48,7 @@ import type { Logger } from "pino";
 
 import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { listCodexContext } from "./codex/context.js";
 import { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -3780,6 +3781,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     name: string;
   } | null = null;
   private cachedSkills: Array<{ name: string; description: string; path: string }> | null = null;
+  private disabledPluginIds: string[] | null = null;
 
   private readonly usageSessionKey = randomUUID();
   private readonly harnessEnvironment: Record<string, string>;
@@ -4065,6 +4067,20 @@ export class CodexAppServerAgentSession implements AgentSession {
       );
       this.cachedSkills = null;
     }
+  }
+
+  async listContext(
+    kinds?: readonly import("@getpaseo/protocol/messages").HarnessContextEntry["kind"][],
+  ) {
+    if (!this.client || !this.currentThreadId) throw new Error("Codex session unavailable");
+    const client = this.client;
+    return listCodexContext({
+      request: (method, params) => client.request(method, params),
+      threadId: this.currentThreadId,
+      cwd: this.config.cwd,
+      disabledPluginIds: this.disabledPluginIds,
+      kinds,
+    });
   }
 
   private findCollaborationMode(target: "code" | "plan"): {
@@ -4392,6 +4408,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       }
       const response = await this.client.request("thread/resume", params);
       this.rememberResolvedSandboxPolicy(response);
+      this.rememberDisabledPlugins(response);
     } catch (error) {
       const threadId = this.currentThreadId;
       const message = error instanceof Error ? error.message : String(error);
@@ -4405,6 +4422,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         }
         const response = await this.client.request("thread/resume", params);
         this.rememberResolvedSandboxPolicy(response);
+        this.rememberDisabledPlugins(response);
         this.logger.info({ threadId }, "Unarchived Codex thread to restore active Paseo agent");
         return;
       }
@@ -5844,6 +5862,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     const { params, approvalPolicy, sandbox } = this.buildThreadStartRequest(model);
     const rawResponse = await this.client.request("thread/start", params);
     this.rememberResolvedSandboxPolicy(rawResponse);
+    this.rememberDisabledPlugins(rawResponse);
     const response = toObjectRecord(rawResponse);
     const threadRecord = toObjectRecord(response?.thread);
     const threadId = typeof threadRecord?.id === "string" ? threadRecord.id : undefined;
@@ -5972,8 +5991,31 @@ export class CodexAppServerAgentSession implements AgentSession {
     return this.pendingNotifications;
   }
 
+  private rememberDisabledPlugins(response: unknown): void {
+    const record = toObjectRecord(response);
+    if (
+      Array.isArray(record?.disabledPluginIds) &&
+      record.disabledPluginIds.every((id) => typeof id === "string")
+    ) {
+      this.disabledPluginIds = record.disabledPluginIds;
+    }
+  }
+
+  private updateContextFromNotification(
+    method: string,
+    notificationParams: Record<string, unknown> | undefined,
+  ): void {
+    if (
+      method === "thread/settings/updated" &&
+      notificationParams?.threadId === this.currentThreadId
+    ) {
+      this.rememberDisabledPlugins(notificationParams.threadSettings);
+    }
+  }
+
   private async processNotification(method: string, params: unknown): Promise<void> {
     const notificationParams = toObjectRecord(params);
+    this.updateContextFromNotification(method, notificationParams);
     if (method === "serverRequest/resolved" && typeof notificationParams?.requestId === "number") {
       const requestId = this.mcpElicitationPermissionIds.get(notificationParams.requestId);
       if (requestId) {

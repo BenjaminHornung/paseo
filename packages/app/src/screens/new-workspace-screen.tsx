@@ -1,4 +1,5 @@
 import { useAddHost } from "@/hosts/add-host";
+import { harnessContextAgentId } from "@/composer/context/selection";
 import type {
   CreateAgentRequestOptions,
   CreateWorkspaceRequestOptions,
@@ -456,7 +457,9 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
   const images = await encodeImages(wirePayload.images);
   let navigated = false;
   let outcome: SubmitOutcome = "background";
+  const reservedAgentId = harnessContextAgentId(attachments);
   const initialAgent: NonNullable<CreateWorkspaceRequestOptions["agent"]> = {
+    ...(reservedAgentId ? { agentId: reservedAgentId } : {}),
     config: {
       provider,
       cwd,

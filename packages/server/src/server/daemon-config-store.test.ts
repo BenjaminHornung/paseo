@@ -41,6 +41,7 @@ function reloadableConfig(
     appendSystemPrompt: daemon.appendSystemPrompt ?? "",
     terminalProfiles: daemon.terminalProfiles,
     agentProfiles: daemon.agentProfiles,
+    composerPredictions: daemon.composerPredictions,
     cors: { allowedOrigins: [] },
     trustedProxies: ["loopback"],
     git: {
@@ -538,10 +539,24 @@ describe("DaemonConfigStore", () => {
       ],
     });
 
-    await store.patch({ agentProfiles: [{ id: "a", name: "Keep", provider: "claude" }] });
+    await store.patch({
+      agentProfiles: [{ id: "a", name: "Keep", provider: "claude" }],
+      composerPredictions: { enabled: true, profileId: "a" },
+    });
 
     expect(store.get().agentProfiles).toEqual([{ id: "a", name: "Keep", provider: "claude" }]);
     expect(loadPersistedConfig(paseoHome).daemon?.agentProfiles).toHaveLength(1);
+    const persisted = loadPersistedConfig(paseoHome);
+    const restarted = new DaemonConfigStore(paseoHome, reloadableConfig(persisted));
+    expect(toWireDaemonConfig(restarted.get()).composerPredictions).toEqual({
+      enabled: true,
+      profileId: "a",
+    });
+    await restarted.patch({ composerPredictions: { enabled: false, profileId: "a" } });
+    expect(loadPersistedConfig(paseoHome).daemon?.composerPredictions).toEqual({
+      enabled: false,
+      profileId: "a",
+    });
   });
 
   test("rolls back config when a field transition fails", async () => {

@@ -45,6 +45,20 @@ export function splitComposerAttachmentsForSubmit(
       : buildForgeAttachmentFromSearchItem;
 
   for (const attachment of attachments) {
+    if (attachment.kind === "harness_context") {
+      agentAttachments.push({
+        type: "text",
+        mimeType: "text/plain",
+        title: attachment.entry.name,
+        text: `Explicitly use the available ${attachment.entry.kind} ${attachment.entry.name} (${attachment.entry.invocation}) for this request.`,
+        harnessContext: {
+          agentId: attachment.agentId,
+          provider: attachment.provider,
+          entry: attachment.entry,
+        },
+      });
+      continue;
+    }
     if (attachment.kind === "image") {
       images.push(attachment.metadata);
       continue;

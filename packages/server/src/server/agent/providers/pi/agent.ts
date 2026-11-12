@@ -4,6 +4,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve as resolvePath } from "node:path";
 import type { Logger } from "pino";
+import { isPiMcpStatusMessage, listPiContext } from "./context.js";
+import { HarnessContextUnavailable } from "../../../composer/context.js";
 import stripAnsi from "strip-ansi";
 import { z } from "zod";
 
@@ -48,6 +50,7 @@ import { runProviderTurn } from "../provider-runner.js";
 import {
   checkProviderLaunchAvailable,
   resolveProviderLaunch,
+  supportsIsolatedTextGeneration,
   type ProviderRuntimeSettings,
   type ResolvedProviderLaunch,
 } from "../../provider-launch-config.js";
@@ -1676,6 +1679,39 @@ export class PiRpcAgentSession implements AgentSession {
     return mappedCommands;
   }
 
+  private contextRead: Promise<Awaited<ReturnType<typeof listPiContext>>> | null = null;
+  private readingMcpStatus = false;
+
+  async listContext(
+    kinds: readonly import("@getpaseo/protocol/messages").HarnessContextEntry["kind"][] = [
+      "mcp",
+      "plugin",
+    ],
+  ) {
+    const previous = this.contextRead;
+    const request = (async () => {
+      await previous?.catch(() => undefined);
+      if (kinds.includes("mcp") && this.activeTurnId !== null) {
+        throw new HarnessContextUnavailable(
+          "Pi MCP availability cannot be verified while a turn is running; retry when idle or queue the message",
+        );
+      }
+      this.readingMcpStatus = kinds.includes("mcp");
+      try {
+        const entries = await listPiContext(this.runtimeSession, this.readingMcpStatus);
+        return entries.filter((entry) => kinds.includes(entry.kind));
+      } finally {
+        this.readingMcpStatus = false;
+      }
+    })();
+    this.contextRead = request;
+    try {
+      return await request;
+    } finally {
+      if (this.contextRead === request) this.contextRead = null;
+    }
+  }
+
   tryHandleOutOfBand(
     prompt: AgentPromptInput,
   ): { run(ctx: { emit: (event: AgentStreamEvent) => void }): Promise<void> } | null {
@@ -2086,6 +2122,13 @@ export class PiRpcAgentSession implements AgentSession {
   private handleExtensionUiRequest(
     event: Extract<PiRuntimeEvent, { type: "extension_ui_request" }>,
   ): void {
+    if (
+      this.readingMcpStatus &&
+      event.method === "notify" &&
+      event.notifyType === "info" &&
+      isPiMcpStatusMessage(event.message)
+    )
+      return;
     const message = optionalString(event.message);
     if (event.method === "notify" && message) {
       const extensionMapping = this.extensionHost.mapRuntimeNotification(message);
@@ -2600,6 +2643,59 @@ export class PiRpcAgentSession implements AgentSession {
 }
 
 export class PiRpcAgentClient implements AgentClient {
+  async generateText(
+    config: AgentSessionConfig,
+    prompt: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    signal.throwIfAborted();
+    if (!this.capabilities.supportsTextGeneration)
+      throw new Error("Isolated text generation is unavailable with a custom provider command");
+    const providerOptions = PiProviderOptionsSchema.parse(config.providerOptions ?? {});
+    const runtime = this.resolveRuntime(providerOptions.rpcTimeoutMs);
+    const runtimeSession = await runtime.startSession({
+      cwd: config.cwd,
+      model: config.model,
+      thinkingOptionId: normalizePiThinkingOption(config.thinkingOptionId) ?? undefined,
+      noSession: true,
+      signal,
+      extraArgs: [
+        "--no-tools",
+        "--exclude-tools",
+        "*",
+        "--no-mcp",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+      ],
+    });
+    const abort = () => {
+      void runtimeSession.abort().catch(() => undefined);
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    let session: PiRpcAgentSession | undefined;
+    try {
+      signal.throwIfAborted();
+      session = new PiRpcAgentSession({
+        runtimeSession,
+        config,
+        initialState: await runtimeSession.getState(),
+        capabilities: capabilitiesForSession(false),
+        cleanup: () => {},
+        extensionTimeoutMs: providerOptions.extensionTimeoutMs,
+        logger: this.logger,
+        usagePollScheduler: this.usagePollScheduler,
+      });
+      signal.throwIfAborted();
+      const result = await session.run(prompt);
+      signal.throwIfAborted();
+      return result.finalText;
+    } finally {
+      signal.removeEventListener("abort", abort);
+      if (session) await session.close();
+      else await runtimeSession.close();
+    }
+  }
   readonly provider: AgentProvider;
   readonly capabilities: AgentCapabilityFlags;
 
@@ -2610,7 +2706,10 @@ export class PiRpcAgentClient implements AgentClient {
 
   constructor(options: PiRpcAgentClientOptions) {
     this.provider = PI_PROVIDER;
-    this.capabilities = capabilitiesForClient();
+    this.capabilities = {
+      ...capabilitiesForClient(),
+      supportsTextGeneration: supportsIsolatedTextGeneration(options.runtimeSettings),
+    };
     this.logger = options.logger;
     this.runtimeSettings = options.runtimeSettings;
     this.runtime = options.runtime;
