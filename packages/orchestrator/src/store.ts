@@ -48,6 +48,13 @@ export interface TaskRow {
   state: string;
   rework: number;
 }
+export interface ContinuationReviewBinding {
+  requestKey: string;
+  reviewerAgentId: string;
+  routeJson: string;
+  diffHash: string;
+  contractHash: string;
+}
 export const liveStates = [
   "INTENT",
   "SENDING",
@@ -1118,12 +1125,54 @@ export class Store {
       this.event(status, id);
     });
   }
-  claimContinuation(id: string, traceHash: string, authorize: () => string): void {
+  private archiveContinuationReview(
+    id: string,
+    task: TaskRow,
+    review?: ContinuationReviewBinding,
+  ): void {
+    const previousReview = this.db.prepare("SELECT * FROM review_runs WHERE attempt_id=?").get(id);
+    if (review) {
+      if (
+        !previousReview ||
+        task.state !== "NEEDS_CONFIRMATION" ||
+        task.contract_hash !== review.contractHash ||
+        previousReview.state !== "NEEDS_CONFIRMATION" ||
+        previousReview.request_key !== review.requestKey ||
+        previousReview.agent_id !== review.reviewerAgentId ||
+        previousReview.route_json !== review.routeJson ||
+        previousReview.diff_hash !== review.diffHash ||
+        previousReview.result_json !== null
+      )
+        throw Error("CONTINUATION_REVIEW_BINDING_CHANGED");
+      const checks =
+        this.db.prepare("SELECT * FROM turn_checks WHERE attempt_id=?").get(id) ?? null;
+      // Preserve superseded evidence before replacing its projections. Every
+      // later guard is in this transaction, so a failed claim restores it all.
+      this.event(
+        `CONTINUATION_REVIEW_ARCHIVED:${JSON.stringify({ review: previousReview, checks })}`,
+        id,
+      );
+      this.db.prepare("DELETE FROM review_runs WHERE attempt_id=?").run(id);
+      this.db.prepare("DELETE FROM turn_checks WHERE attempt_id=?").run(id);
+    } else if (previousReview) throw Error("CONTINUATION_REVIEW_FINDINGS_REQUIRED");
+  }
+  claimContinuation(
+    id: string,
+    traceHash: string,
+    authorize: () => string,
+    review?: ContinuationReviewBinding,
+  ): void {
     this.transaction(() => {
       const humanCheckpoint = authorize();
       const a = this.attempt(id),
         c: Contract = JSON.parse(this.task(a.task_key)!.contract_json);
-      if (this.stopped() || a.status !== "NEEDS_CONFIRMATION" || this.latest(a.task_key)?.id !== id)
+      const task = this.task(a.task_key)!;
+      const rejectedReview = review && a.status === "VERIFY" && task.state === "NEEDS_CONFIRMATION";
+      if (
+        this.stopped() ||
+        (a.status !== "NEEDS_CONFIRMATION" && !rejectedReview) ||
+        this.latest(a.task_key)?.id !== id
+      )
         throw Error("CONTINUATION_STATE_CHANGED");
       if (this.db.prepare("SELECT 1 FROM check_locks WHERE worktree=?").get(c.worktree))
         throw Error("CONTINUATION_CHECKS_ACTIVE");
@@ -1133,6 +1182,7 @@ export class Store {
           .get(id, a.fence)
       )
         throw Error("CONTINUATION_LEASE_LOST");
+      this.archiveContinuationReview(id, task, review);
       const blocked = this.coordinationBlock(c);
       if (blocked) throw Error(`CONTINUATION_COORDINATION_BLOCKED:${blocked}`);
       if (this.routeOccupied(JSON.parse(a.route_json), undefined, c))

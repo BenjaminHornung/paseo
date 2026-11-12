@@ -17,7 +17,7 @@ import { routePreference } from "../starter/src/policy.ts";
 import { decideRoute } from "../starter/src/router.ts";
 import { mayComplete } from "../starter/src/gates.ts";
 import type { Route } from "../starter/src/types.ts";
-import { Store, type Attempt } from "./store.ts";
+import { Store, type Attempt, type ContinuationReviewBinding } from "./store.ts";
 import type { Discovery, Provider, Snapshot } from "./provider.ts";
 import { taskPrompt } from "./provider.ts";
 import { Git, runCheck } from "./git.ts";
@@ -209,15 +209,7 @@ export class Engine {
       a = this.store.latest(key);
     const findings = reviewFindingsSchema.parse(repair?.findings ?? []);
     if (repair && !findings.length) throw Error("CONTINUATION_REVIEW_FINDINGS_REQUIRED");
-    if (
-      repair &&
-      (this.git.snapshot(c).diffHash !== repair.diffHash ||
-        findings.some(
-          (finding) =>
-            !this.store.scopePaths(c).some((allowed) => pathInScope(finding.file, allowed)),
-        ))
-    )
-      throw Error("CONTINUATION_REVIEW_BINDING_MISMATCH");
+    if (repair) this.assertContinuationRepair(c, repair.diffHash, findings);
     assertTaskAssessment(this.store, this.config, c);
     if (
       this.config.orchestrationVersion === 3 &&
@@ -227,12 +219,19 @@ export class Engine {
       throw Error("CONTINUATION_OWNER_APPROVAL_REQUIRED");
     if (!this.canDispatch(key) || this.store.stopped()) throw Error("CONTINUATION_NOT_AUTHORIZED");
     const effectiveChecks = this.store.checkCommands(c);
-    if (!a?.agent_id || a.status !== "NEEDS_CONFIRMATION" || !c.role.startsWith("implement-"))
+    if (
+      !a?.agent_id ||
+      (a.status !== "NEEDS_CONFIRMATION" && !(repair && a.status === "VERIFY")) ||
+      !c.role.startsWith("implement-")
+    )
       throw Error("CONTINUATION_STATE_CHANGED");
     const route: RuntimeRoute = JSON.parse(a.route_json);
     // API workers need a fresh budget handshake, not another call on a closed ledger.
     if (route.provider !== "codex" || route.access !== "codex-pro200")
       throw Error("CONTINUATION_NATIVE_CODEX_ONLY");
+    // Resolve the rejected reviewer before the final worker observation, so its
+    // asynchronous read cannot age the foreground trace used by the claim.
+    const review = await this.continuationReview(a, c, repair?.diffHash);
     const snapshot = await this.provider.refresh(a.agent_id);
     if (
       !snapshot ||
@@ -253,35 +252,41 @@ export class Engine {
       this.store.completionReason(a.id) === "process-coverage-unavailable"
     )
       throw Error("CONTINUATION_NOT_NEEDED_AWAITING_PROCESS_PROOF");
-    this.store.claimContinuation(a.id, foreground.traceHash, () => {
-      assertTaskAssessment(this.store, this.config, c);
-      if (
-        this.config.orchestrationVersion === 3 &&
-        c.highRisk &&
-        !hasAuditedOwnerApproval(this.store, c)
-      )
-        throw Error("CONTINUATION_OWNER_APPROVAL_REQUIRED");
-      if (!this.canDispatch(key)) throw Error("CONTINUATION_NOT_AUTHORIZED");
-      const scopeCheckpoint =
-        hash(this.store.scopePaths(c)) === hash(c.allowedPaths)
-          ? ""
-          : `:scope:${this.store.scopeRevision(c)}`;
-      if (!c.intakeId) return `legacy-attempt${scopeCheckpoint}`;
-      const owner = this.store.db
-        .prepare("SELECT owner_id FROM assessments WHERE id=?")
-        .get(c.intakeId) as { owner_id: string };
-      const human = this.store.db
-        .prepare(`SELECT id,facts_json FROM assessments WHERE owner_id=? AND kind='intake'
+    this.store.claimContinuation(
+      a.id,
+      foreground.traceHash,
+      () => {
+        if (repair) this.assertContinuationRepair(c, repair.diffHash, findings);
+        assertTaskAssessment(this.store, this.config, c);
+        if (
+          this.config.orchestrationVersion === 3 &&
+          c.highRisk &&
+          !hasAuditedOwnerApproval(this.store, c)
+        )
+          throw Error("CONTINUATION_OWNER_APPROVAL_REQUIRED");
+        if (!this.canDispatch(key)) throw Error("CONTINUATION_NOT_AUTHORIZED");
+        const scopeCheckpoint =
+          hash(this.store.scopePaths(c)) === hash(c.allowedPaths)
+            ? ""
+            : `:scope:${this.store.scopeRevision(c)}`;
+        if (!c.intakeId) return `legacy-attempt${scopeCheckpoint}`;
+        const owner = this.store.db
+          .prepare("SELECT owner_id FROM assessments WHERE id=?")
+          .get(c.intakeId) as { owner_id: string };
+        const human = this.store.db
+          .prepare(`SELECT id,facts_json FROM assessments WHERE owner_id=? AND kind='intake'
         AND json_extract(facts_json,'$.origin')='human' ORDER BY rowid DESC`)
-        .all(owner.owner_id) as { id: string; facts_json: string }[];
-      const receipt = human.find((row) => {
-        const facts = JSON.parse(row.facts_json);
-        return !!this.store.db
-          .prepare("SELECT 1 FROM internal_messages WHERE agent_id=? AND message_id=? AND kind=?")
-          .get(owner.owner_id, facts.messageId, `human:${hash(facts.text)}`);
-      });
-      return `${receipt?.id ?? c.intakeId}${scopeCheckpoint}`;
-    });
+          .all(owner.owner_id) as { id: string; facts_json: string }[];
+        const receipt = human.find((row) => {
+          const facts = JSON.parse(row.facts_json);
+          return !!this.store.db
+            .prepare("SELECT 1 FROM internal_messages WHERE agent_id=? AND message_id=? AND kind=?")
+            .get(owner.owner_id, facts.messageId, `human:${hash(facts.text)}`);
+        });
+        return `${receipt?.id ?? c.intakeId}${scopeCheckpoint}`;
+      },
+      review,
+    );
     if (repair)
       this.store.event(
         `CONTINUATION_REVIEW_FEEDBACK:${hash({ diffHash: repair.diffHash, findings })}`,
@@ -308,6 +313,84 @@ export class Engine {
       throw Error("CONTINUATION_OUTCOME_UNKNOWN");
     }
     return { agentId: a.agent_id, continued: true };
+  }
+  private assertContinuationRepair(
+    c: Contract,
+    diffHash: string,
+    findings: NonNullable<ReviewResult["findings"]>,
+  ): void {
+    if (
+      this.git.snapshot(c).diffHash !== diffHash ||
+      findings.some(
+        (finding) =>
+          !this.store.scopePaths(c).some((allowed) => pathInScope(finding.file, allowed)),
+      )
+    )
+      throw Error("CONTINUATION_REVIEW_BINDING_MISMATCH");
+  }
+  private reviewerContract(
+    c: Contract,
+    implementationAgentId: string | null,
+    diffHash: string,
+  ): Contract {
+    return contractSchema.parse({
+      ...c,
+      amendsTaskKey: undefined,
+      amendsContractHash: undefined,
+      amendsDiffHash: undefined,
+      role: "reviewer",
+      mutation: false,
+      minTier: 3,
+      allowedPaths: this.store.scopePaths(c),
+      implementationAgentId,
+      reviewDiffHash: diffHash,
+    });
+  }
+  private async continuationReview(
+    a: Attempt,
+    c: Contract,
+    diffHash?: string,
+  ): Promise<ContinuationReviewBinding | undefined> {
+    const row = this.store.db.prepare("SELECT * FROM review_runs WHERE attempt_id=?").get(a.id) as
+      | ReviewRunRow
+      | undefined;
+    if (!row) {
+      if (a.status === "VERIFY") throw Error("CONTINUATION_STATE_CHANGED");
+      return;
+    }
+    if (
+      !diffHash ||
+      row.state !== "NEEDS_CONFIRMATION" ||
+      !row.agent_id ||
+      row.diff_hash !== diffHash ||
+      this.store.task(a.task_key)?.state !== "NEEDS_CONFIRMATION"
+    )
+      throw Error("CONTINUATION_REVIEW_BINDING_MISMATCH");
+    const reviewer = await this.observed(await this.provider.refresh(row.agent_id));
+    if (
+      !reviewer ||
+      reviewer.id !== row.agent_id ||
+      reviewer.status !== "idle" ||
+      reviewer.turnComplete !== true
+    )
+      throw Error("CONTINUATION_REVIEWER_NOT_SETTLED");
+    this.validateSnapshot(
+      this.reviewerContract(c, a.agent_id, row.diff_hash),
+      JSON.parse(row.route_json),
+      reviewer,
+    );
+    if ((await this.completion.assess(reviewer)).state !== "VERIFY")
+      throw Error("CONTINUATION_REVIEWER_NOT_SETTLED");
+    const result = reviewer.reviewResult;
+    if (result?.pass === true && result.unresolvedIssues === 0 && result.diffHash === row.diff_hash)
+      throw Error("CONTINUATION_REVIEW_PASS_PENDING");
+    return {
+      requestKey: row.request_key,
+      reviewerAgentId: row.agent_id,
+      routeJson: row.route_json,
+      diffHash: row.diff_hash,
+      contractHash: hash(c),
+    };
   }
   add(input: unknown): string {
     const c = contractSchema.parse(input);
@@ -1441,9 +1524,17 @@ export class Engine {
       if (this.store.stopped()) throw Error("Dispatch stopped");
       if (this.store.routeOccupied(route, undefined, c)) throw Error("Route slot limit");
       this.recordCompletionBoundarySkips(id, selection.completionBoundaryUnavailable);
+      const continued = this.store.db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM events WHERE attempt_id=? AND kind='CONTINUATION_BEGIN'",
+        )
+        .get(id) as { count: number };
+      const requestKey = continued.count
+        ? `${id}/review/continuation-${continued.count}`
+        : `${id}/review`;
       this.store.db
         .prepare("INSERT OR IGNORE INTO review_runs VALUES(?,?,?,NULL,?,?,NULL)")
-        .run(id, `${id}/review`, JSON.stringify(route), "INTENT", snapshot.diffHash);
+        .run(id, requestKey, JSON.stringify(route), "INTENT", snapshot.diffHash);
     });
     const row = this.store.db
       .prepare("SELECT * FROM review_runs WHERE attempt_id=?")
@@ -1591,18 +1682,7 @@ export class Engine {
       row = revalidated.row;
       r = revalidated.route;
     }
-    const reviewer = contractSchema.parse({
-      ...c,
-      amendsTaskKey: undefined,
-      amendsContractHash: undefined,
-      amendsDiffHash: undefined,
-      role: "reviewer",
-      mutation: false,
-      minTier: 3,
-      allowedPaths: this.store.scopePaths(c),
-      implementationAgentId: a.agent_id,
-      reviewDiffHash: row.diff_hash,
-    });
+    const reviewer = this.reviewerContract(c, a.agent_id, row.diff_hash);
     if (!observeOnly && row.state === "INTENT") {
       if (this.store.circuitOpen(r.access, Date.now()))
         throw Error("Reviewer account circuit open");

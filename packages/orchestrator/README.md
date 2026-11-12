@@ -69,6 +69,17 @@ that task's audited owner approval.
 Reviewer preference is preserved; unsupported completion boundaries are audited before
 falling back to the next eligible saved route.
 
+A terminal reviewer response with invalid JSON types remains rejected; native reviewers
+receive the typed schema and a valid example (`unresolvedIssues` is an integer count).
+For concrete corrections, `orchestrator_continue_task` can consume the existing rejected
+review with its exact diffHash and scoped findings, even when the implementation attempt
+still projects VERIFY. The reviewer must first be freshly confirmed idle and process-safe.
+Active, unknown or changed reviewer bindings block continuation. The same Codex worker
+retains its original lease and approval; superseded review/check records are atomically
+archived before their projections are replaced. Its repaired turn receives fresh checks
+and a distinct, idempotent native review request. This never accepts the rejected verdict
+or substitutes for final independent review and any required visual acceptance.
+
 Under **Rollen & Modelle → Reihenfolge je Rolle & Arbeitsart → UI-Implementierung**,
 choose existing routes and order their priority, including routes created from Advanced
 profiles. The optional `roleRoutes.ui` list applies to mutating implementation packages

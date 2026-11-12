@@ -14,7 +14,8 @@
     "dataScopeRemoval": "Thirteen existing complexity fingerprints are renewed after deleting the privacy policy and adding the explicitly approved local-only-denial first-call lifecycle. assess rises 75 to 94 for exact identity/version/state/latest/absence-of-call/audit/CAS guards; other counts decrease or stay unchanged: routes 31 to 29, contract route validation 33 to 29, PreparationForm 55, Settings 87, capture 79 to 91 (normal checkpoint retry and audit-bound settled-result binding after a caller failure), currentIntake 26 to 25, confirmation callback 23 to 22, task assessment 61 to 58, settingsOperation 227 to 223, amendment transaction 41 to 39, addAmendment 37 to 36, plan 49. New tests remain below the standard complexity limit. No new entries, disabled rules or broad allowance; preserved Sonnet row fingerprints remain unchanged.",
     "targetedTaskApproval": "Four inherited fingerprints only: currentIntake remains 25, settingsOperation rises 223 to 224 for stored main-owned workflow selection, assertTaskAssessment decreases 58 to 53 by removing global per-task poisoning, continueExisting rises 36 to 39 for task-specific audited high-risk checks before and after its async preflight. Exact target selection and atomic one-assessment binding remain within normal lint thresholds. No new baseline entries, disabled rules or peer UI changes.",
     "advisoryAuthority": "Nine inherited fingerprints only: capture 92 (was 91), currentIntake 23 (25), task assessment 51 (53), settingsOperation 238 (224), workflowStatus 29 (28), its task projection 38 unchanged, decisionHistory 34 unchanged, DecisionsHistory 30 (31). The existing five-deep worktree preflight only adds Main as an accepted read-only planning source; its previous exact block hash was matched to the immutable P1 snapshot. All new interpretation/schema/observation helpers and tests meet ordinary thresholds. No new entries, disabled rules or broad exceptions; raw accounting and effective authority stay separate.",
-    "workCategories": "Phase B renews only three existing function fingerprints: OrchestratorSettings 87 to 85 after extracting the existing priority editor and adding category validation; Engine.plan 49 to 46 with the shared category preference isolated from the existing dispatch/reuse policy; settingsOperation 238 to 247 for frozen package catalogs, pre-advice Main proposal validation and caller catalog readback. New category schemas, editor components and routing helper meet ordinary lint thresholds. No new baseline entries or rule changes. Phase-A counts above describe the immutable predecessor."
+    "workCategories": "Phase B renews only three existing function fingerprints: OrchestratorSettings 87 to 85 after extracting the existing priority editor and adding category validation; Engine.plan 49 to 46 with the shared category preference isolated from the existing dispatch/reuse policy; settingsOperation 238 to 247 for frozen package catalogs, pre-advice Main proposal validation and caller catalog readback. New category schemas, editor components and routing helper meet ordinary lint thresholds. No new baseline entries or rule changes. Phase-A counts above describe the immutable predecessor.",
+    "reviewRepair": "Two inherited Engine fingerprints only: continueExisting 39 to 40 for the exact rejected-review admission and pre/post-await repair binding; review remains 65 after reusing the same read-only reviewer-contract constructor. All new binding, audit/projection replacement and prompt/test helpers meet ordinary thresholds; Store.claimContinuation remains below the threshold after isolating its atomic review archival invariant. No new entries, disabled rules or broad exceptions. Rejected responses remain invalid; no model answer or process evidence is normalized."
   },
   "entries": [
     {
@@ -1126,8 +1127,8 @@
     {
       "file": "packages/orchestrator/src/engine.ts",
       "rule": "eslint(complexity)",
-      "message": "async method `continueExisting` has a complexity of 39. Maximum allowed is 20.",
-      "sourceSha256": "84f25abcdc4283df825e49e908bbf3efb5711deea02651b0f49527d0c0b90227",
+      "message": "async method `continueExisting` has a complexity of 40. Maximum allowed is 20.",
+      "sourceSha256": "1ee970344577b0e0adfa693349fc3d162ae4d3ade277bf3795deebc805e6c529",
       "count": 1
     },
     {
@@ -1141,7 +1142,7 @@
       "file": "packages/orchestrator/src/engine.ts",
       "rule": "eslint(complexity)",
       "message": "async method `review` has a complexity of 65. Maximum allowed is 20.",
-      "sourceSha256": "07c0930ebf47248e21f70ef3ddcf4d3cf785b6354c987dfff510d0188d027f74",
+      "sourceSha256": "f226fb90b4b5e0d77de93b908fbd62ed45835233fb15a43a9869b776bcddc867",
       "count": 1
     },
     {

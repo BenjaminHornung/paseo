@@ -9,6 +9,8 @@ import {
   configSchema,
   contractSchema,
   hash,
+  parseAgentJson,
+  reviewResultSchema,
   type Contract,
 } from "../src/contracts.ts";
 import { Git } from "../src/git.ts";
@@ -387,4 +389,282 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
   assert.equal(workerFeedback.includes(reviewerFinding.problem), true);
   assert.equal(store.latest(taskKey)?.route_json, JSON.stringify(writerRoute));
   store.close();
+
+  await t.test(
+    "terminal invalid native review permits only bound same-worker repair and fresh review",
+    async () => {
+      const state = new Store(":memory:");
+      try {
+        rmSync(path.join(worktreePath, "src", "in-progress.ts"));
+        const emptyDiff = new Git(git).snapshot(contract);
+        assert.equal(
+          emptyDiff.files.length,
+          0,
+          "the observed failed implementation has an empty diff",
+        );
+        const initialChecks = { ...reviewCheckpoint, diffHash: emptyDiff.diffHash };
+        const nativeReviewer = {
+          ...reviewerRoute,
+          provider: "claude" as const,
+          access: "claude-company-pro" as const,
+          modeId: "plan",
+          repositoryRoots: [root],
+        };
+        const repairConfig = configSchema.parse({
+          ...config,
+          routes: [writerRoute, nativeReviewer],
+        });
+        state.db
+          .prepare("INSERT INTO workflows VALUES(?,?,?,?)")
+          .run(contract.workflowId, repoPath, "", hash(repairConfig));
+        state.db
+          .prepare(
+            "INSERT INTO tasks(key,workflow_id,contract_json,contract_hash,config_hash,config_json,state,rework) VALUES(?,?,?,?,?,?,?,0)",
+          )
+          .run(
+            taskKey,
+            contract.workflowId,
+            JSON.stringify(contract),
+            hash(contract),
+            hash(repairConfig),
+            JSON.stringify(repairConfig),
+            "VERIFY",
+          );
+        state.db
+          .prepare(
+            "INSERT INTO attempts(id,task_key,sequence,status,route_json,agent_id,fence,session_key,created_ms,result_hash,error_kind) VALUES(?,?,1,'VERIFY',?,?,1,'original-session',?,NULL,NULL)",
+          )
+          .run(attemptId, taskKey, JSON.stringify(writerRoute), "writer-old", Date.now());
+        state.db
+          .prepare("INSERT INTO leases VALUES(?,?,1,'HELD',?)")
+          .run(worktree, attemptId, Date.now());
+        state.db
+          .prepare("INSERT INTO turn_checks VALUES(?,?,?)")
+          .run(attemptId, emptyDiff.diffHash, JSON.stringify(initialChecks));
+        const writerSnapshot = {
+          ...(await provider.refresh("writer-old")),
+          contextFraction: 0.4,
+        } as Snapshot;
+        let reviewerActive = false,
+          invalid = true,
+          changedBinding = false,
+          sent = 0,
+          continuationPrompt = "";
+        const requests: { key: string; diffHash: string }[] = [];
+        const reviewSnapshot = (id: string): Snapshot => ({
+          ...writerSnapshot,
+          id,
+          provider: "claude",
+          model: nativeReviewer.model,
+          modeId: "plan",
+          foregroundActive: reviewerActive,
+          turnComplete: !reviewerActive,
+          status: reviewerActive ? "running" : "idle",
+          reviewResult: parseAgentJson(
+            JSON.stringify({
+              diffHash: new Git(git).snapshot(contract).diffHash,
+              pass: !invalid,
+              unresolvedIssues: invalid ? ["Missing implementation", "Missing checks"] : 0,
+              findings: invalid ? [reviewerFinding] : [],
+            }),
+            reviewResultSchema,
+          ),
+        });
+        const repairProvider: Provider = {
+          ...provider,
+          discover: async () => [
+            ...(await provider.discover(worktree)),
+            {
+              provider: "claude",
+              status: "ready",
+              supportsBackgroundWorkRefresh: true,
+              models: [{ id: nativeReviewer.model, thinking: ["high"] }],
+              modes: ["plan"],
+            },
+          ],
+          create: async (route, reviewContract, requestKey) => {
+            assert.equal(route.provider, "claude");
+            assert.equal(reviewContract.mutation, false);
+            assert.equal(reviewContract.role, "reviewer");
+            requests.push({ key: requestKey, diffHash: reviewContract.reviewDiffHash! });
+            return `reviewer-agent-${requests.length}`;
+          },
+          wait: async (id) =>
+            id.startsWith("reviewer-agent") ? reviewSnapshot(id) : writerSnapshot,
+          refresh: async (id) => {
+            if (!id.startsWith("reviewer-agent")) return writerSnapshot;
+            if (changedBinding)
+              state.db
+                .prepare(
+                  "UPDATE review_runs SET request_key=request_key||'-changed' WHERE attempt_id=?",
+                )
+                .run(attemptId);
+            return reviewSnapshot(id);
+          },
+          run: async (id, prompt) => {
+            assert.equal(id, "writer-old");
+            sent++;
+            continuationPrompt = prompt;
+            return writerSnapshot;
+          },
+        };
+        const repairEngine = new Engine(state, repairConfig, repairProvider);
+        await repairEngine.advance(attemptId);
+        assert.equal(state.task(taskKey)?.state, "NEEDS_CONFIRMATION");
+        assert.equal(
+          state.attempt(attemptId).status,
+          "VERIFY",
+          "reproduce the already-installed terminal review/attempt skew",
+        );
+        const oldReview = state.db
+          .prepare("SELECT * FROM review_runs WHERE attempt_id=?")
+          .get(attemptId)!;
+        assert.equal(oldReview.state, "NEEDS_CONFIRMATION");
+        assert.equal(
+          oldReview.result_json,
+          null,
+          "invalid native arrays are not normalized into a verdict",
+        );
+        const repair = { diffHash: emptyDiff.diffHash, findings: [reviewerFinding] };
+        reviewerActive = true;
+        await assert.rejects(() => repairEngine.continueExisting(taskKey, repair));
+        assert.equal(sent, 0, "active reviewers cannot overlap a mutating continuation");
+        reviewerActive = false;
+        invalid = false;
+        await assert.rejects(
+          () => repairEngine.continueExisting(taskKey, repair),
+          /CONTINUATION_REVIEW_PASS_PENDING/,
+          "a fresh valid pass must be finalized by normal review recovery, not discarded",
+        );
+        assert.equal(sent, 0, "a valid review pass cannot trigger another mutating prompt");
+        assert.deepEqual(
+          state.db.prepare("SELECT * FROM review_runs WHERE attempt_id=?").get(attemptId),
+          oldReview,
+          "the pending valid pass retains its original review projection",
+        );
+        assert.equal(
+          state.db
+            .prepare(
+              "SELECT count(*) AS count FROM events WHERE kind LIKE 'CONTINUATION_REVIEW_ARCHIVED:%'",
+            )
+            .get()!.count,
+          0,
+          "a valid pass is never archived as a rejected review",
+        );
+        invalid = true;
+        changedBinding = true;
+        await assert.rejects(() => repairEngine.continueExisting(taskKey, repair));
+        assert.equal(sent, 0, "a changed reviewer/request binding cannot be consumed");
+        state.db
+          .prepare("UPDATE review_runs SET request_key=? WHERE attempt_id=?")
+          .run(oldReview.request_key, attemptId);
+        changedBinding = false;
+        const duplicateIntent = `CONTINUATION_INTENT:${"f".repeat(64)}`;
+        state.event(duplicateIntent, attemptId);
+        await assert.rejects(
+          () => repairEngine.continueExisting(taskKey, repair),
+          /CONTINUATION_ALREADY_ATTEMPTED/,
+        );
+        assert.equal(
+          state.db
+            .prepare(
+              "SELECT count(*) AS count FROM events WHERE kind LIKE 'CONTINUATION_REVIEW_ARCHIVED:%'",
+            )
+            .get()!.count,
+          0,
+          "a failed claim rolls back its attempted audit and projection replacement",
+        );
+        assert.equal(
+          state.db.prepare("SELECT request_key FROM review_runs WHERE attempt_id=?").get(attemptId)!
+            .request_key,
+          oldReview.request_key,
+        );
+        state.db
+          .prepare("DELETE FROM events WHERE attempt_id=? AND kind=?")
+          .run(attemptId, duplicateIntent);
+        assert.deepEqual(await repairEngine.continueExisting(taskKey, repair), {
+          agentId: "writer-old",
+          continued: true,
+        });
+        assert.equal(sent, 1);
+        assert.equal(state.attempt(attemptId).status, "RUNNING");
+        assert.equal(
+          state.db
+            .prepare("SELECT fence FROM leases WHERE attempt_id=? AND state='HELD'")
+            .get(attemptId)!.fence,
+          1,
+        );
+        assert.ok(continuationPrompt.includes(contract.prompt));
+        assert.ok(continuationPrompt.includes(contract.acceptance[0]));
+        assert.ok(continuationPrompt.includes(reviewerFinding.problem));
+        assert.equal(
+          state.db.prepare("SELECT 1 FROM review_runs WHERE attempt_id=?").get(attemptId),
+          undefined,
+          "a repaired turn cannot reuse the superseded review snapshot",
+        );
+        assert.equal(
+          state.db.prepare("SELECT 1 FROM turn_checks WHERE attempt_id=?").get(attemptId),
+          undefined,
+        );
+        const archive = state.db
+          .prepare(
+            "SELECT kind FROM events WHERE attempt_id=? AND kind LIKE 'CONTINUATION_REVIEW_ARCHIVED:%'",
+          )
+          .get(attemptId) as { kind: string };
+        const evidence = JSON.parse(archive.kind.slice("CONTINUATION_REVIEW_ARCHIVED:".length));
+        assert.deepEqual(
+          evidence.review,
+          { ...oldReview },
+          "retain the complete original review/request/agent evidence",
+        );
+        assert.deepEqual(JSON.parse(evidence.checks.result_json), initialChecks);
+        writeFileSync(
+          path.join(worktreePath, "src", "in-progress.ts"),
+          "export const inProgress = 'repaired';\n",
+        );
+        const repairedDiff = new Git(git).snapshot(contract);
+        assert.notEqual(repairedDiff.diffHash, emptyDiff.diffHash);
+        invalid = false;
+        state.observe(attemptId, "VERIFY", 0.4);
+        await repairEngine.review(attemptId);
+        const next = state.db
+          .prepare("SELECT * FROM review_runs WHERE attempt_id=?")
+          .get(attemptId)!;
+        assert.equal(next.state, "DONE");
+        assert.equal(next.diff_hash, repairedDiff.diffHash);
+        assert.equal(requests.length, 2);
+        assert.notEqual(
+          requests[0].key,
+          requests[1].key,
+          "new turn requires a fresh idempotent reviewer request",
+        );
+        assert.equal((await repairEngine.review(attemptId)).state, "DONE");
+        assert.equal(
+          requests.length,
+          2,
+          "reading the same review again cannot start another native request",
+        );
+        assert.equal(
+          JSON.parse(
+            String(
+              state.db
+                .prepare("SELECT result_json FROM turn_checks WHERE attempt_id=?")
+                .get(attemptId)!.result_json,
+            ),
+          ).diffHash,
+          repairedDiff.diffHash,
+        );
+        assert.equal(
+          state.db
+            .prepare(
+              "SELECT count(*) AS count FROM events WHERE kind LIKE 'CONTINUATION_REVIEW_ARCHIVED:%'",
+            )
+            .get()!.count,
+          1,
+        );
+      } finally {
+        state.close();
+      }
+    },
+  );
 });

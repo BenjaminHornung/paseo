@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CurrentPaseoCompletion, OptionalBackgroundCapability } from "../src/completion.ts";
-import { parseAgentJson, reviewResultSchema } from "../src/contracts.ts";
+import { parseAgentJson, reviewResultSchema, contractSchema } from "../src/contracts.ts";
 import type { Snapshot } from "../src/provider.ts";
-import { PaseoProvider } from "../src/provider.ts";
+import { PaseoProvider, taskPrompt } from "../src/provider.ts";
 
 // Fault: an absent/failed process inventory or a completed foreground turn releases
 // a writer while work continues. Existing starter tests cannot exercise SDK capabilities.
@@ -127,6 +127,46 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
     assert.deepEqual(parseAgentJson(text, reviewResultSchema), result);
   for (const text of ["Other text " + json, json + "\nOther text", '{"pass":true}'])
     assert.equal(parseAgentJson(text, reviewResultSchema), undefined);
+  const contract = contractSchema.parse({
+    workflowId: "review",
+    taskId: "schema",
+    repository: process.cwd(),
+    worktree: process.cwd(),
+    baseCommit: "b".repeat(40),
+    role: "reviewer",
+    prompt: "Review the owned implementation",
+    acceptance: ["Implementation is complete"],
+    allowedPaths: ["src"],
+    requiredCapabilities: ["code"],
+    minTier: 3,
+    mutation: false,
+    highRisk: false,
+    uiChanged: false,
+    reviewDiffHash: result.diffHash,
+    implementationAgentId: "original-writer",
+    checks: { build: [process.execPath, "--version"], test: [process.execPath, "--version"] },
+  });
+  const prompt = taskPrompt(contract);
+  const emittedSchema = prompt.match(/^Review output schema:\n(.+)$/m)?.[1];
+  assert.ok(
+    emittedSchema,
+    "native reviewers must receive the typed output contract, not only key names",
+  );
+  assert.equal(JSON.parse(emittedSchema).properties.unresolvedIssues.type, "integer");
+  const example = prompt.match(/^Review output example:\n(.+)$/m)?.[1];
+  assert.ok(example);
+  const parsed = parseAgentJson(example, reviewResultSchema)!;
+  assert.equal(parsed.diffHash, result.diffHash);
+  assert.equal(parsed.pass, false);
+  assert.equal(parsed.unresolvedIssues, 1);
+  assert.equal(
+    parseAgentJson(
+      JSON.stringify({ ...parsed, unresolvedIssues: ["Missing implementation"] }),
+      reviewResultSchema,
+    ),
+    undefined,
+    "native arrays remain invalid instead of being silently normalized",
+  );
 });
 
 test("recovery reconciles a completed turn through public waitForFinish despite projected running", async () => {
