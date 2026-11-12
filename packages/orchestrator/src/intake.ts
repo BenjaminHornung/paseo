@@ -29,7 +29,7 @@ import {
 } from "./main-interpretation.ts";
 import { Git } from "./git.ts";
 import { Store } from "./store.ts";
-import { observedTimeline } from "./timeline.ts";
+import { observedTimeline, type TimelineObservation } from "./timeline.ts";
 import { verifiedProviderSessionId } from "./completion.ts";
 import type { IntakeConfirmation } from "../paseo-plugin/shared/intake-confirmation.ts";
 import {
@@ -37,6 +37,12 @@ import {
   rememberIntakeIdentity,
   resolveIntakeIdentities,
   isOperatorAdvisorReceipt,
+  needsCompleteInternalHistory,
+  recordInternalMessageOrigins,
+  isProvenInternalIntake,
+  provenInternalMessages,
+  unboundInternalIdentities,
+  relevantCaptureIdentities,
 } from "./intake-identity.ts";
 
 const taskApprovalLinkSchema = z.strictObject({
@@ -124,12 +130,14 @@ export function timelineCheckpointIndex(
 ): number {
   if (!checkpoint) return -1;
   const anchor = checkpoint.match(/^cursor:(.+):(\d+)$/);
-  return entries.findIndex((entry) =>
+  const matches = entries.filter((entry) =>
     anchor
       ? entry.seqStart <= Number(anchor[2]) && entry.seqEnd >= Number(anchor[2])
       : entry.item.type === "user_message" &&
-        (entry.item.clientMessageId ?? entry.item.messageId) === checkpoint,
+        (entry.item.clientMessageId === checkpoint || entry.item.messageId === checkpoint),
   );
+  if (matches.length > 1) throw Error("INTAKE_MESSAGE_IDENTITY_AMBIGUOUS");
+  return matches.length ? entries.indexOf(matches[0]!) : -1;
 }
 export function abandonHumanInput(store: Store, agentId: string, messageId: string): void {
   store.transaction(() => {
@@ -197,13 +205,12 @@ export async function captureHumanIntake(
   if (main.wake) recordInternalMessage(store, main.agentId, main.wake.messageId, "wake");
   const abandoned = store.db
     .prepare(
-      "SELECT facts_json FROM assessments WHERE owner_id=? AND kind='intake' AND result_json IS NULL AND created_ms<?",
+      "SELECT id,facts_json FROM assessments WHERE owner_id=? AND kind='intake' AND result_json IS NULL AND created_ms<?",
     )
     .all(main.agentId, Date.now() - (config.decisions?.timeoutMs ?? 10000) - 15000) as {
+    id: string;
     facts_json: string;
   }[];
-  for (const row of abandoned)
-    await classifier.classifyIntake(intakeFactsSchema.parse(JSON.parse(row.facts_json)), config);
   const checkpoint = store.db
     .prepare("SELECT message_id,work_intake_id FROM main_checkpoints WHERE agent_id=?")
     .get(main.agentId) as { message_id: string | null; work_intake_id: string | null } | undefined;
@@ -238,22 +245,57 @@ export async function captureHumanIntake(
           )
           .get(main.agentId, receipt.messageId),
     );
-  const timeline = await observedTimeline(
-    handle,
-    "projected",
-    emptyBaseline || staleReceipts.length
-      ? undefined
-      : checkpoint?.message_id
-        ? (entries) =>
-            timelineCheckpointIndex(
-              resolveIntakeIdentities(entries, identities, false),
-              checkpoint.message_id,
-            ) >= 0
-        : checkpoint
-          ? undefined
-          : () => true,
+  const identitiesForCapture = (entries: TimelineObservation["entries"]) => {
+    const directEntries = resolveIntakeIdentities(entries, identities, false);
+    const index = timelineCheckpointIndex(directEntries, checkpoint?.message_id ?? null);
+    return relevantCaptureIdentities(store, {
+      identities,
+      entries: directEntries,
+      checkpointEntry: directEntries[index],
+    });
+  };
+  let reached: ((entries: TimelineObservation["entries"]) => boolean) | undefined;
+  if (!emptyBaseline && !staleReceipts.length) {
+    if (checkpoint?.message_id) {
+      const checkpointId = checkpoint.message_id;
+      reached = (entries) => {
+        const relevant = identitiesForCapture(entries);
+        return (
+          !needsCompleteInternalHistory(store, relevant, entries) &&
+          timelineCheckpointIndex(
+            resolveIntakeIdentities(entries, relevant, false),
+            checkpointId,
+          ) >= 0
+        );
+      };
+    } else if (!checkpoint) {
+      reached = (entries) =>
+        !needsCompleteInternalHistory(store, identitiesForCapture(entries), entries);
+    }
+  }
+  const timeline = await observedTimeline(handle, "projected", reached);
+  const relevant = identitiesForCapture(timeline.entries);
+  let entries = resolveIntakeIdentities(timeline.entries, relevant, !timeline.hasOlder);
+  if (anchor && timeline.endCursor && timeline.endCursor.epoch !== anchor[1])
+    throw Error("INTAKE_HISTORY_EPOCH_CHANGED");
+  let checkpointEntry: (typeof entries)[number] | undefined;
+  let checkpointIndex = -1;
+  if (checkpoint?.message_id && !emptyBaseline) {
+    checkpointIndex = timelineCheckpointIndex(entries, checkpoint.message_id);
+    if (checkpointIndex < 0) throw Error("INTAKE_HISTORY_GAP");
+    checkpointEntry = entries[checkpointIndex];
+  }
+  const newInternalAlias = unboundInternalIdentities(store, relevant).some((identity) =>
+    entries.some(
+      (entry) =>
+        entry.item.type === "user_message" &&
+        entry.item.clientMessageId === identity.messageId &&
+        !!entry.item.messageId &&
+        entry.item.messageId !== identity.messageId,
+    ),
   );
-  let entries = resolveIntakeIdentities(timeline.entries, identities, !timeline.hasOlder);
+  if (newInternalAlias && (await verifiedProviderSessionId(handle)) !== sessionId)
+    throw Error("INTAKE_HISTORY_SESSION_CHANGED");
   if (!timeline.hasOlder && snapshot.status === "idle" && !snapshot.activeTurn) {
     for (const receipt of staleReceipts) {
       if (
@@ -292,15 +334,11 @@ export async function captureHumanIntake(
         : {}),
     });
   }
-  if (anchor && timeline.endCursor && timeline.endCursor.epoch !== anchor[1])
-    throw Error("INTAKE_HISTORY_EPOCH_CHANGED");
-  let checkpointEntry: (typeof entries)[number] | undefined;
-  if (checkpoint?.message_id && !emptyBaseline) {
-    const index = timelineCheckpointIndex(entries, checkpoint.message_id);
-    if (index < 0) throw Error("INTAKE_HISTORY_GAP");
-    checkpointEntry = entries[index];
-    entries = entries.slice(index + 1);
-  }
+  recordInternalMessageOrigins(store, main, sessionId, entries);
+  for (const row of abandoned)
+    if (!isProvenInternalIntake(store, row.id))
+      await classifier.classifyIntake(intakeFactsSchema.parse(JSON.parse(row.facts_json)), config);
+  entries = entries.slice(checkpointIndex + 1);
   const humanEntries = entries.filter((entry) => {
     const item = entry.item;
     return (
@@ -495,11 +533,7 @@ export async function captureHumanIntake(
     });
   }
   if (!latest) {
-    const prior = store.db
-      .prepare(
-        "SELECT id FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY created_ms DESC,rowid DESC LIMIT 1",
-      )
-      .get(main.agentId) as { id: string } | undefined;
+    const prior = latestIntakeInput(store, main.agentId);
     if (prior) latest = readIntakeAssessment(store, prior.id);
   }
   return effectiveIntakeAssessment(store, latest);
@@ -518,11 +552,7 @@ export function currentIntake(
       ? store.db
           .prepare("SELECT id FROM assessments WHERE id=? AND owner_id=?")
           .get(checkpoint.work_intake_id, agentId)
-      : store.db
-          .prepare(
-            "SELECT id FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY created_ms DESC,rowid DESC LIMIT 1",
-          )
-          .get(agentId);
+      : latestIntakeInput(store, agentId);
   const value = row as { id: string } | undefined;
   if (!value) throw Error("INTAKE_CLASSIFICATION_REQUIRED");
   const assessment = effectiveIntakeAssessment(store, readIntakeAssessment(store, value.id));
@@ -538,6 +568,7 @@ export function currentIntake(
       )
       .all(agentId, assessment.id) as { id: string }[];
     for (const followingRow of following) {
+      if (isProvenInternalIntake(store, followingRow.id)) continue;
       const latest = effectiveIntakeAssessment(store, readIntakeAssessment(store, followingRow.id));
       if (latest.id === assessment.id) continue;
       const latestFactsRow = store.db
@@ -572,14 +603,22 @@ export function currentIntake(
   return assessment;
 }
 
-export function currentMainInput(store: Store, agentId: string) {
-  const row = store.db
+interface MainInputRow {
+  id: string;
+  facts_hash: string;
+  facts_json: string;
+  state: string;
+}
+function latestIntakeInput(store: Store, agentId: string): MainInputRow | undefined {
+  const rows = store.db
     .prepare(
-      "SELECT id,facts_hash,facts_json,state FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY created_ms DESC,rowid DESC LIMIT 1",
+      "SELECT id,facts_hash,facts_json,state FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY created_ms DESC,rowid DESC",
     )
-    .get(agentId) as
-    | { id: string; facts_hash: string; facts_json: string; state: string }
-    | undefined;
+    .all(agentId) as unknown as MainInputRow[];
+  return rows.find((row) => !isProvenInternalIntake(store, row.id));
+}
+export function currentMainInput(store: Store, agentId: string) {
+  const row = latestIntakeInput(store, agentId);
   if (!row) return undefined;
   const facts = intakeFactsSchema.parse(JSON.parse(row.facts_json));
   const checkpoint = store.db
@@ -1287,7 +1326,10 @@ function assertIntakeSettled(
   const latestInput = currentMainInput(store, agentId);
   const mainResolved = !!latestInput?.interpretation;
   if (
-    (!mainResolved && pendingAdvice.some((row) => !mainInputInterpretation(store, row.id))) ||
+    (!mainResolved &&
+      pendingAdvice.some(
+        (row) => !isProvenInternalIntake(store, row.id) && !mainInputInterpretation(store, row.id),
+      )) ||
     store.db
       .prepare(`SELECT 1 FROM internal_messages receipt WHERE receipt.agent_id=? AND (receipt.kind LIKE 'human:%' OR receipt.kind LIKE 'operator-readonly-advisor:%')
       AND NOT EXISTS(SELECT 1 FROM assessments assessment WHERE assessment.owner_id=receipt.agent_id AND assessment.kind='intake'
@@ -1305,7 +1347,16 @@ function assertIntakeSettled(
       approval.effectiveResult.intent === "new-task" &&
       approvedOriginal(store, approval),
   );
+  const internalMessages = provenInternalMessages(store, agentId);
   for (const row of pending) {
+    if (
+      internalMessages.some(
+        ({ identity }) =>
+          row.kind === `${pendingPrefix}${hash(identity.messageId)}` ||
+          row.kind === `${pendingPrefix}${hash(identity.nativeMessageId)}`,
+      )
+    )
+      continue;
     const interpreted = store.db
       .prepare(
         "SELECT id FROM assessments WHERE owner_id=? AND kind='intake' AND json_extract(facts_json,'$.messageId') IS NOT NULL",

@@ -316,12 +316,11 @@ export function workflowStatus(store: Store, directory: string, agentId?: string
       ];
     })
     .slice(0, 40);
-  const row = agentId
+  const mainInput = agentId ? currentMainInput(store, agentId) : undefined;
+  const row = mainInput
     ? (store.db
-        .prepare(
-          "SELECT facts_json,result_json FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY created_ms DESC,rowid DESC LIMIT 1",
-        )
-        .get(agentId) as { facts_json: string; result_json: string | null } | undefined)
+        .prepare("SELECT facts_json,result_json FROM assessments WHERE id=? AND kind='intake'")
+        .get(mainInput.intakeId) as { facts_json: string; result_json: string | null } | undefined)
     : undefined;
   let assessment = row?.result_json ? JSON.parse(row.result_json) : undefined;
   if (agentId) {
@@ -365,7 +364,7 @@ export function workflowStatus(store: Store, directory: string, agentId?: string
     tasks,
     intake,
     writeAuthorization,
-    mainInput: agentId ? currentMainInput(store, agentId) : undefined,
+    mainInput,
     repositoryScope: { directory: selected, includesDescendants: true },
     historyLimited: tasks.length === 40 || rows.length === 1000,
   };

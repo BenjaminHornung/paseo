@@ -1,6 +1,7 @@
 import type { PaseoApi } from "@getpaseo/client";
 import { canonicalPath, hash } from "./contracts.ts";
 import type { Store } from "./store.ts";
+import type { IntakeFacts } from "./assessments.ts";
 import { observedTimeline } from "./timeline.ts";
 
 interface Entry {
@@ -16,6 +17,18 @@ export interface IntakeIdentity {
   textHash: string;
 }
 const prefix = "INTAKE_MESSAGE_IDENTITY:";
+const internalOriginPrefix = "INTAKE_INTERNAL_ORIGIN:";
+type InternalMessageKind = "wake" | "reminder" | "activation";
+const internalReceiptKinds: ReadonlySet<string> = new Set<InternalMessageKind>([
+  "wake",
+  "reminder",
+  "activation",
+]);
+interface InternalMessageOrigin {
+  identity: IntakeIdentity;
+  directory: string;
+  kind: InternalMessageKind;
+}
 const nativeId = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const operatorAdvisorPrefix = "operator-readonly-advisor:";
 export function isOperatorAdvisorReceipt(
@@ -74,6 +87,228 @@ export function rememberIntakeIdentity(store: Store, identity: IntakeIdentity): 
   const kind = `${prefix}${JSON.stringify(identity)}`;
   if (!store.db.prepare("SELECT 1 FROM events WHERE kind=?").get(kind)) store.event(kind);
   return true;
+}
+
+// A first replay may expose only the native ID. The existing fallback can
+// establish its uniqueness only after the complete history has been read.
+export function unboundInternalIdentities(
+  store: Store,
+  identities: IntakeIdentity[],
+): IntakeIdentity[] {
+  return identities.filter((identity) => {
+    if (identity.nativeMessageId) return false;
+    const receipt = store.db
+      .prepare("SELECT kind FROM internal_messages WHERE agent_id=? AND message_id=?")
+      .get(identity.agentId, identity.messageId) as { kind: string } | undefined;
+    return !!receipt && internalReceiptKinds.has(receipt.kind);
+  });
+}
+interface IntakeIdentityCapture {
+  identities: IntakeIdentity[];
+  entries: readonly Entry[];
+  checkpointEntry?: Entry;
+}
+// Relevance only limits which unresolved internal aliases need a first proof.
+// Human identities and existing native aliases retain the normal strict checks.
+export function relevantCaptureIdentities(
+  store: Store,
+  capture: IntakeIdentityCapture,
+): IntakeIdentity[] {
+  const { identities, entries, checkpointEntry } = capture;
+  const checkpointTime = Date.parse(checkpointEntry?.timestamp ?? "");
+  if (!identities.length || !Number.isFinite(checkpointTime)) return identities;
+  const unbound = new Set(unboundInternalIdentities(store, identities));
+  if (!unbound.size) return identities;
+  const agentId = identities[0]!.agentId;
+  const claims = store.db
+    .prepare(
+      "SELECT facts_json FROM assessments WHERE owner_id=? AND kind='intake' AND json_extract(facts_json,'$.origin')='unverified'",
+    )
+    .all(agentId) as { facts_json: string }[];
+  const claimedIds = new Set<string>();
+  const claimedHashes = new Set<string>();
+  for (const row of claims) {
+    const facts = JSON.parse(row.facts_json) as IntakeFacts;
+    claimedIds.add(facts.messageId);
+    claimedHashes.add(hash(facts.text));
+  }
+  const pendingPrefix = `INTAKE_CLASSIFICATION_PENDING:${agentId}:`;
+  const pending = store.db
+    .prepare(
+      "SELECT pending.kind FROM events pending WHERE substr(pending.kind,1,?)=? AND NOT EXISTS(SELECT 1 FROM events settled WHERE settled.kind=replace(pending.kind,'INTAKE_CLASSIFICATION_PENDING:','INTAKE_CLASSIFICATION_SETTLED:') AND settled.sequence>pending.sequence)",
+    )
+    .all(pendingPrefix.length, pendingPrefix) as { kind: string }[];
+  const pendingHashes = new Set(pending.map((row) => row.kind.slice(pendingPrefix.length)));
+  return identities.filter((identity) => {
+    if (!unbound.has(identity)) return true;
+    const timestamp = Date.parse(identity.timestamp);
+    const afterCheckpoint = !Number.isFinite(timestamp) || timestamp >= checkpointTime - 1000;
+    const boundClaim = claimedIds.has(identity.messageId) || claimedHashes.has(identity.textHash);
+    if (afterCheckpoint || boundClaim || pendingHashes.has(hash(identity.messageId))) return true;
+    return entries.some((entry) => {
+      const item = entry.item;
+      if (item.type !== "user_message") return false;
+      if (item.clientMessageId === identity.messageId || item.messageId === identity.messageId)
+        return true;
+      const messageId = item.clientMessageId ?? item.messageId;
+      return (
+        !!messageId && hash(item.text) === identity.textHash && pendingHashes.has(hash(messageId))
+      );
+    });
+  });
+}
+export function needsCompleteInternalHistory(
+  store: Store,
+  identities: IntakeIdentity[],
+  entries: readonly Entry[],
+): boolean {
+  return unboundInternalIdentities(store, identities).some(
+    (identity) =>
+      !entries.some(
+        (entry) =>
+          entry.item.type === "user_message" &&
+          (entry.item.clientMessageId ?? entry.item.messageId) === identity.messageId,
+      ),
+  );
+}
+
+function assertInternalOrigin(store: Store, origin: InternalMessageOrigin): void {
+  const { identity } = origin;
+  if (
+    !internalReceiptKinds.has(origin.kind) ||
+    !identity.sessionId ||
+    !nativeId.test(identity.nativeMessageId ?? "") ||
+    !Number.isFinite(Date.parse(identity.timestamp))
+  )
+    throw Error("INTAKE_INTERNAL_ORIGIN_UNPROVEN");
+  const receipt = store.db.prepare(
+    "SELECT kind FROM internal_messages WHERE agent_id=? AND message_id=?",
+  );
+  const original = receipt.get(identity.agentId, identity.messageId) as
+    | { kind: string }
+    | undefined;
+  const native = receipt.get(identity.agentId, identity.nativeMessageId!) as
+    | { kind: string }
+    | undefined;
+  if (original?.kind !== origin.kind || (native && native.kind !== origin.kind))
+    throw Error("INTAKE_INTERNAL_ORIGIN_CONFLICT");
+  if (
+    !store.db
+      .prepare("SELECT 1 FROM events WHERE kind=?")
+      .get(`${prefix}${JSON.stringify(identity)}`)
+  )
+    throw Error("INTAKE_INTERNAL_ORIGIN_UNPROVEN");
+  assertNoHumanOriginClaim(store, origin);
+}
+
+function assertNoHumanOriginClaim(store: Store, origin: InternalMessageOrigin): void {
+  const { identity } = origin;
+  const rows = store.db
+    .prepare(
+      "SELECT id,facts_hash,facts_json FROM assessments WHERE owner_id=? AND kind='intake' AND json_extract(facts_json,'$.messageId') IN (?,?)",
+    )
+    .all(identity.agentId, identity.messageId, identity.nativeMessageId!) as {
+    id: string;
+    facts_hash: string;
+    facts_json: string;
+  }[];
+  for (const row of rows) {
+    const facts = JSON.parse(row.facts_json) as IntakeFacts;
+    if (
+      facts.origin !== "unverified" ||
+      facts.mainAgentId !== identity.agentId ||
+      hash(facts) !== row.facts_hash ||
+      hash(facts.text) !== identity.textHash ||
+      canonicalPath(facts.directory) !== origin.directory
+    )
+      throw Error("INTAKE_INTERNAL_ORIGIN_CONFLICT");
+  }
+  const claims = store.db
+    .prepare(
+      "SELECT kind FROM events WHERE kind LIKE 'MAIN_INPUT_INTERPRETATION:%' OR kind LIKE 'OPERATOR_INTAKE_APPROVED:%'",
+    )
+    .all() as { kind: string }[];
+  for (const { kind } of claims) {
+    const claim = JSON.parse(kind.slice(kind.indexOf(":") + 1));
+    if (
+      rows.some((row) =>
+        [claim.intakeId, claim.assessmentId, claim.confirmation?.assessmentId].includes(row.id),
+      )
+    )
+      throw Error("INTAKE_INTERNAL_ORIGIN_CONFLICT");
+  }
+  for (const messageId of [identity.messageId, identity.nativeMessageId!]) {
+    const confirmed = `OPERATOR_CONFIRMED_EXISTING_WORK:${identity.agentId}:${messageId}:`;
+    if (
+      store.db
+        .prepare("SELECT 1 FROM events WHERE substr(kind,1,?)=?")
+        .get(confirmed.length, confirmed)
+    )
+      throw Error("INTAKE_INTERNAL_ORIGIN_CONFLICT");
+  }
+}
+
+export function provenInternalMessages(store: Store, agentId: string): InternalMessageOrigin[] {
+  const rows = store.db
+    .prepare("SELECT kind FROM events WHERE substr(kind,1,?)=?")
+    .all(internalOriginPrefix.length, internalOriginPrefix) as { kind: string }[];
+  return rows.flatMap(({ kind }) => {
+    const origin = JSON.parse(kind.slice(internalOriginPrefix.length)) as InternalMessageOrigin;
+    if (origin.identity.agentId !== agentId) return [];
+    assertInternalOrigin(store, origin);
+    return [origin];
+  });
+}
+
+export function isProvenInternalIntake(store: Store, assessmentId: string): boolean {
+  const row = store.db
+    .prepare("SELECT owner_id,facts_hash,facts_json FROM assessments WHERE id=? AND kind='intake'")
+    .get(assessmentId) as { owner_id: string; facts_hash: string; facts_json: string } | undefined;
+  if (!row) return false;
+  const facts = JSON.parse(row.facts_json) as IntakeFacts;
+  if (facts.origin !== "unverified" || hash(facts) !== row.facts_hash) return false;
+  return provenInternalMessages(store, row.owner_id).some(
+    ({ identity, directory }) =>
+      facts.mainAgentId === identity.agentId &&
+      canonicalPath(facts.directory) === directory &&
+      [identity.messageId, identity.nativeMessageId].includes(facts.messageId) &&
+      hash(facts.text) === identity.textHash,
+  );
+}
+
+export function recordInternalMessageOrigins(
+  store: Store,
+  main: { agentId: string; directory: string },
+  sessionId: string,
+  entries: readonly Entry[],
+): void {
+  store.transaction(() => {
+    for (const identity of intakeIdentities(store, main.agentId, sessionId)) {
+      if (!identity.nativeMessageId) continue;
+      const receipt = store.db
+        .prepare("SELECT kind FROM internal_messages WHERE agent_id=? AND message_id=?")
+        .get(main.agentId, identity.messageId) as { kind: string } | undefined;
+      if (!receipt || !internalReceiptKinds.has(receipt.kind)) continue;
+      const matches = entries.filter(
+        (entry) =>
+          entry.item.type === "user_message" &&
+          entry.item.clientMessageId === identity.messageId &&
+          entry.item.messageId === identity.nativeMessageId &&
+          typeof entry.item.text === "string" &&
+          hash(entry.item.text) === identity.textHash,
+      );
+      if (matches.length > 1) throw Error("INTAKE_INTERNAL_ORIGIN_AMBIGUOUS");
+      if (!matches.length) continue;
+      const origin: InternalMessageOrigin = {
+        identity,
+        directory: canonicalPath(main.directory),
+        kind: receipt.kind as InternalMessageKind,
+      };
+      assertInternalOrigin(store, origin);
+      const event = `${internalOriginPrefix}${JSON.stringify(origin)}`;
+      if (!store.db.prepare("SELECT 1 FROM events WHERE kind=?").get(event)) store.event(event);
+    }
+  });
 }
 
 // Cursor epochs are transport state, not durable message identities. Operator

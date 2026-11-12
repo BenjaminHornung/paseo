@@ -1158,7 +1158,12 @@ export class Engine {
         "SELECT attempt_id FROM review_runs WHERE state IN ('SENDING','UNKNOWN','RUNNING','PERMISSION','NEEDS_CONFIRMATION','WAITING_PROCESSES')",
       )
       .all() as { attempt_id: string }[];
-    for (const r of reviews) await this.review(r.attempt_id, true);
+    for (const r of reviews) {
+      // A closed or otherwise unsettled implementation is still a blocked
+      // rework boundary, not a valid input to observe-only review processing.
+      if (this.store.attempt(r.attempt_id).status !== "VERIFY") continue;
+      await this.review(r.attempt_id, true);
+    }
     return result;
   }
   async tick(taskKeys?: readonly string[]): Promise<void> {

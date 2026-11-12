@@ -15,7 +15,8 @@
     "targetedTaskApproval": "Four inherited fingerprints only: currentIntake remains 25, settingsOperation rises 223 to 224 for stored main-owned workflow selection, assertTaskAssessment decreases 58 to 53 by removing global per-task poisoning, continueExisting rises 36 to 39 for task-specific audited high-risk checks before and after its async preflight. Exact target selection and atomic one-assessment binding remain within normal lint thresholds. No new baseline entries, disabled rules or peer UI changes.",
     "advisoryAuthority": "Nine inherited fingerprints only: capture 92 (was 91), currentIntake 23 (25), task assessment 51 (53), settingsOperation 238 (224), workflowStatus 29 (28), its task projection 38 unchanged, decisionHistory 34 unchanged, DecisionsHistory 30 (31). The existing five-deep worktree preflight only adds Main as an accepted read-only planning source; its previous exact block hash was matched to the immutable P1 snapshot. All new interpretation/schema/observation helpers and tests meet ordinary thresholds. No new entries, disabled rules or broad exceptions; raw accounting and effective authority stay separate.",
     "workCategories": "Phase B renews only three existing function fingerprints: OrchestratorSettings 87 to 85 after extracting the existing priority editor and adding category validation; Engine.plan 49 to 46 with the shared category preference isolated from the existing dispatch/reuse policy; settingsOperation 238 to 247 for frozen package catalogs, pre-advice Main proposal validation and caller catalog readback. New category schemas, editor components and routing helper meet ordinary lint thresholds. No new baseline entries or rule changes. Phase-A counts above describe the immutable predecessor.",
-    "reviewRepair": "Two inherited Engine fingerprints only: continueExisting 39 to 40 for the exact rejected-review admission and pre/post-await repair binding; review remains 65 after reusing the same read-only reviewer-contract constructor. All new binding, audit/projection replacement and prompt/test helpers meet ordinary thresholds; Store.claimContinuation remains below the threshold after isolating its atomic review archival invariant. No new entries, disabled rules or broad exceptions. Rejected responses remain invalid; no model answer or process evidence is normalized."
+    "reviewRepair": "Two inherited Engine fingerprints only: continueExisting 39 to 40 for the exact rejected-review admission and pre/post-await repair binding; review remains 65 after reusing the same read-only reviewer-contract constructor. All new binding, audit/projection replacement and prompt/test helpers meet ordinary thresholds; Store.claimContinuation remains below the threshold after isolating its atomic review archival invariant. No new entries, disabled rules or broad exceptions. Rejected responses remain invalid; no model answer or process evidence is normalized.",
+    "restartTransport": "Three existing fingerprints only: captureHumanIntake 92 to 95 for bounded complete-history recovery, same-entry checkpoint aliases, native-session recheck before identity/audit writes and preservation of proven internal pending claims; currentIntake 23 to 24 for exact audited controller-transport exclusion; workflowStatus remains 29 and uses the same current-input reader. V2 keeps capture at 95 and narrows unresolved internal alias selection to the checkpoint, unverified/open pending bindings and later messages before both pagination and full-history resolution. New selection helpers remain within ordinary thresholds; direct aliases and human identities retain existing strict checks. No new baseline entries, disabled rules or broad exceptions. Historical assessment facts, financial state and human/operator collision gates remain intact."
   },
   "entries": [
     {
@@ -904,7 +905,7 @@
       "file": "packages/orchestrator/src/automation.ts",
       "rule": "eslint(complexity)",
       "message": "function `workflowStatus` has a complexity of 29. Maximum allowed is 20.",
-      "sourceSha256": "7be6ffc8c0c0179d9158a1d18dde65c6857053b38150539554d4f6f94f77d9ea",
+      "sourceSha256": "7ca6accce487faef6a420d9e11839d3a97b5124a43d190a6319189553da47992",
       "count": 1
     },
     {
@@ -1211,8 +1212,8 @@
     {
       "file": "packages/orchestrator/src/intake.ts",
       "rule": "eslint(complexity)",
-      "message": "async function `captureHumanIntake` has a complexity of 92. Maximum allowed is 20.",
-      "sourceSha256": "7c0bbe6ade8f49cb8d554ec9558f3c8b68c31a7bd7b843f80ba5e4c54ef1b0a7",
+      "message": "async function `captureHumanIntake` has a complexity of 95. Maximum allowed is 20.",
+      "sourceSha256": "f3a2b55ae259e778ffe2dd3cd987035ed4b7e15be7ed0baf67cad21adac6a8ec",
       "count": 1
     },
     {
@@ -1225,8 +1226,8 @@
     {
       "file": "packages/orchestrator/src/intake.ts",
       "rule": "eslint(complexity)",
-      "message": "function `currentIntake` has a complexity of 23. Maximum allowed is 20.",
-      "sourceSha256": "0225ea68097213aa8fdfbcb88dfe9c155ef4217ed42619666809d48c7a858555",
+      "message": "function `currentIntake` has a complexity of 24. Maximum allowed is 20.",
+      "sourceSha256": "34189b401afa3a25cac7138e3701e6e47ebec5eb1024334a78ba083c74e0ea78",
       "count": 1
     },
     {

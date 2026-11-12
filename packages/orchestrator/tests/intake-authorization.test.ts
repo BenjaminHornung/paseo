@@ -24,6 +24,7 @@ import {
   currentIntake,
   markIntakeClassificationPending,
 } from "../src/intake.ts";
+import { rememberIntakeIdentity } from "../src/intake-identity.ts";
 import {
   canonicalPath,
   configSchema,
@@ -1399,7 +1400,58 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
   // Legacy configurations retain their role lists until UI is explicitly configured.
   assert.equal(config.roleRoutes?.ui, undefined);
   writeFileSync(configFile, JSON.stringify(config));
-  const messages: { id: string; text: string; timestamp: string }[] = [];
+  const messages: { id: string; text: string; timestamp: string; nativeId?: string }[] = [];
+  let rehydratedHistory = false;
+  let historyGap = false;
+  let sessionChangesDuringHistory = false;
+  const historyReads: string[] = [];
+  const timelinePage = async (
+    request: { direction?: string; cursor?: { seq: number }; limit?: number } = {},
+  ) => {
+    historyReads.push(request.direction ?? "tail");
+    const olderEntries = Array.from({ length: rehydratedHistory ? 220 : 0 }, (_, index) => ({
+      timestamp: index < 2 ? "2025-01-02T00:00:00.000Z" : "2026-01-01T00:00:00.000Z",
+      seqStart: index + 1,
+      seqEnd: index + 1,
+      item:
+        index < 2
+          ? {
+              type: "user_message",
+              messageId: `33333333-3333-7333-8333-33333333333${index}`,
+              text: "Old duplicate internal transport",
+            }
+          : { type: "assistant_message", text: "Earlier safe fixture activity" },
+    }));
+    const all = [
+      ...olderEntries,
+      ...messages.map((message, index) => ({
+        timestamp: message.timestamp,
+        seqStart: olderEntries.length + index + 1,
+        seqEnd: olderEntries.length + index + 1,
+        item: {
+          type: "user_message",
+          clientMessageId: rehydratedHistory && message.nativeId ? undefined : message.id,
+          messageId: rehydratedHistory ? (message.nativeId ?? message.id) : message.id,
+          text: message.text,
+        },
+      })),
+    ];
+    const end = request.direction === "before" ? request.cursor!.seq - 1 : all.length;
+    const start = rehydratedHistory ? Math.max(0, end - (request.limit ?? 200)) : 0;
+    if (sessionChangesDuringHistory && request.direction === "before") {
+      providerSessionId = "foreign-native-session";
+      sessionChangesDuringHistory = false;
+    }
+    return {
+      entries: all.slice(start, end),
+      error: false,
+      gap: historyGap,
+      hasOlder: start > 0,
+      hasNewer: false,
+      startCursor: { epoch: "fixture-session", seq: start + 1 },
+      endCursor: { epoch: "fixture-session", seq: end },
+    };
+  };
   let backgroundActive: boolean | null = false;
   let savedSessionId: string | null = null;
   let providerSessionId = "fixture-session";
@@ -1420,25 +1472,7 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
           },
         }),
         timeline: {
-          refetch: async () => ({
-            entries: messages.map((message, index) => ({
-              timestamp: message.timestamp,
-              seqStart: index + 1,
-              seqEnd: index + 1,
-              item: {
-                type: "user_message",
-                clientMessageId: message.id,
-                messageId: message.id,
-                text: message.text,
-              },
-            })),
-            error: false,
-            gap: false,
-            hasOlder: false,
-            hasNewer: false,
-            startCursor: { epoch: "fixture-session", seq: 1 },
-            endCursor: { epoch: "fixture-session", seq: messages.length },
-          }),
+          refetch: timelinePage,
         },
         backgroundWork: {
           refresh: async () => ({
@@ -2413,17 +2447,19 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
 
   await t.test(
     "main authority separates plan, native implementation and stop from pending advisory calls",
-    async () => {
+    async (mainAuthority) => {
       let releaseAdvice = () => {};
       let noticeRequest = () => {};
       let responseGate = Promise.resolve();
       let requests = 0;
+      const intakeRequests: string[] = [];
       const advisoryOptions = {
         ...options,
         classifierFactory: (state: Store): Classifier => ({
           classifyPackage: (facts, cfg) => new Decisions(state).classifyPackage(facts, cfg),
-          classifyIntake: (facts, cfg) =>
-            facts.text.startsWith("Implement advisory example")
+          classifyIntake: (facts, cfg) => {
+            intakeRequests.push(facts.messageId);
+            return facts.text.startsWith("Implement advisory example")
               ? followupDecisions(state, {
                   intent: "new-task",
                   intentConfidence: 0.94,
@@ -2445,7 +2481,8 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
                     validUntil: "2099-01-01T00:00:00Z",
                   },
                 })
-              : new FixtureClassifier(state).classifyIntake(facts, cfg),
+              : new FixtureClassifier(state).classifyIntake(facts, cfg);
+          },
         }),
       };
       const readInput = () =>
@@ -2876,6 +2913,225 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
           "a question preserves only the existing objective",
         );
         afterQuestion.close();
+
+        // A controller wake lost its client ID during native history replay.
+        // The old false unverified claim must not require a new human click.
+        async function recoverInternalWake() {
+          const wake = {
+            id: "dc5b5935-c85f-4acf-913a-b6054f6b8e4e",
+            nativeId: "11111111-1111-7111-8111-111111111111",
+            text: "Controller progress for the unchanged authorized task",
+            timestamp: new Date().toISOString(),
+          };
+          const activation = readAutomation(vaultRoot).mains.find(
+            (main) => main.agentId === agentId,
+          )!;
+          await settingsOperation(
+            {
+              operation: "auto-wake",
+              agentId,
+              activationId: activation.requestId,
+              fingerprint: hash(wake),
+              messageId: wake.id,
+            },
+            advisoryOptions,
+          );
+          await settingsOperation(
+            { operation: "auto-wake-settle", agentId, messageId: wake.id, sent: true },
+            advisoryOptions,
+          );
+          const state = new Store(database);
+          // A historical activation was never replayed by the native provider.
+          // It must not force complete reads after the current wake is proven.
+          state.db
+            .prepare("INSERT INTO internal_messages VALUES(?,?,?)")
+            .run(agentId, "old-activation-without-native", "activation");
+          rememberIntakeIdentity(state, {
+            agentId,
+            sessionId: providerSessionId,
+            messageId: "old-activation-without-native",
+            timestamp: "2025-01-01T00:00:00.000Z",
+            textHash: hash("Old activation absent from replayed history"),
+          });
+          state.db
+            .prepare("INSERT INTO internal_messages VALUES(?,?,?)")
+            .run(agentId, "old-reminder-ambiguous-in-history", "reminder");
+          rememberIntakeIdentity(state, {
+            agentId,
+            sessionId: providerSessionId,
+            messageId: "old-reminder-ambiguous-in-history",
+            timestamp: "2025-01-02T00:00:00.000Z",
+            textHash: hash("Old duplicate internal transport"),
+          });
+          const beforeWork = state.db
+            .prepare("SELECT work_intake_id FROM main_checkpoints WHERE agent_id=?")
+            .get(agentId)!.work_intake_id;
+          rememberIntakeIdentity(state, {
+            agentId,
+            sessionId: providerSessionId,
+            messageId: wake.id,
+            timestamp: new Date(Date.parse(wake.timestamp) - 85).toISOString(),
+            textHash: hash(wake.text),
+          });
+          const mistaken = await new Decisions(state).classifyIntake(
+            intakeFactsSchema.parse({
+              mainAgentId: agentId,
+              messageId: wake.nativeId,
+              origin: "unverified",
+              directory: repo,
+              text: wake.text,
+            }),
+            config,
+          );
+          state.event(`MAIN_INPUT_AWAITING_INTERPRETATION:${mistaken.id}`);
+          markIntakeClassificationPending(state, agentId, wake.nativeId);
+          state.db
+            .prepare("UPDATE main_checkpoints SET message_id=? WHERE agent_id=?")
+            .run(wake.nativeId, agentId);
+          const historical = {
+            ...state.db.prepare("SELECT * FROM assessments WHERE id=?").get(mistaken.id)!,
+          };
+          const callsBefore = state.db.prepare("SELECT count(*) AS n FROM decision_calls").get()!.n;
+          state.close();
+          messages.push(wake);
+          rehydratedHistory = true;
+          historyReads.length = 0;
+          try {
+            sessionChangesDuringHistory = true;
+            await assert.rejects(() => readInput(), /INTAKE_HISTORY_SESSION_CHANGED/);
+            const foreignState = new Store(database);
+            assert.throws(
+              () => currentIntake(foreignState, agentId, true),
+              /INTAKE_PENDING|MAIN_INPUT_INTERPRETATION_REQUIRED/,
+            );
+            foreignState.close();
+            providerSessionId = "fixture-session";
+            historyGap = true;
+            await assert.rejects(() => readInput(), /TIMELINE_HISTORY_INCOMPLETE/);
+            historyGap = false;
+            messages.push({
+              ...wake,
+              id: "ambiguous-copy",
+              nativeId: "22222222-2222-7222-8222-222222222222",
+            });
+            await assert.rejects(() => readInput(), /INTAKE_MESSAGE_IDENTITY_AMBIGUOUS/);
+            messages.pop();
+            const intakeRequestsBefore = intakeRequests.length;
+            const recovered = await readInput();
+            assert.equal(
+              intakeRequests.length,
+              intakeRequestsBefore,
+              "proven internal transport causes no new classification",
+            );
+            assert.notEqual(
+              recovered.input.intakeId,
+              mistaken.id,
+              "controller transport is not a new Main input",
+            );
+            const recoveredState = new Store(database);
+            try {
+              assert.equal(currentIntake(recoveredState, agentId, true).id, beforeWork);
+              assert.doesNotThrow(() =>
+                assertTaskAssessment(recoveredState, config, registeredContract),
+              );
+              assert.equal(
+                (
+                  await new Engine(
+                    recoveredState,
+                    config,
+                    fakeProvider,
+                    undefined,
+                    undefined,
+                    (key) => taskDispatchAllowed(key, vaultRoot),
+                  ).plan(p1.key)
+                ).action,
+                "start",
+              );
+              assert.deepEqual(
+                {
+                  ...recoveredState.db
+                    .prepare("SELECT * FROM assessments WHERE id=?")
+                    .get(mistaken.id)!,
+                },
+                historical,
+              );
+              assert.equal(
+                recoveredState.db.prepare("SELECT count(*) AS n FROM decision_calls").get()!.n,
+                callsBefore,
+              );
+              assert.equal(
+                recoveredState.db
+                  .prepare("SELECT work_intake_id FROM main_checkpoints WHERE agent_id=?")
+                  .get(agentId)!.work_intake_id,
+                beforeWork,
+              );
+              assert.equal(
+                recoveredState.db
+                  .prepare("SELECT message_id FROM main_checkpoints WHERE agent_id=?")
+                  .get(agentId)!.message_id,
+                wake.nativeId,
+                "alias recovery must not rewrite the native checkpoint",
+              );
+              recoveredState.db
+                .prepare("INSERT INTO internal_messages VALUES(?,?,?)")
+                .run(agentId, wake.nativeId, `human:${hash(wake.text)}`);
+              assert.throws(
+                () => currentIntake(recoveredState, agentId, true),
+                /INTAKE_INTERNAL_ORIGIN_CONFLICT/,
+                "a colliding human receipt cannot be ignored",
+              );
+              recoveredState.db
+                .prepare("DELETE FROM internal_messages WHERE agent_id=? AND message_id=?")
+                .run(agentId, wake.nativeId);
+            } finally {
+              recoveredState.close();
+            }
+            assert.ok(
+              historyReads.includes("before"),
+              "the strict first alias proof requires complete history",
+            );
+            historyReads.length = 0;
+            const status = (await settingsOperation(
+              { operation: "status", agentId, directory: repo },
+              advisoryOptions,
+            )) as { writeAuthorization: { allowed: boolean } };
+            assert.equal(status.writeAuthorization.allowed, true);
+            await readInput();
+            assert.equal(
+              historyReads.includes("before"),
+              false,
+              "the proven native alias avoids full reads on later pulses",
+            );
+            await registerInput(
+              "wake-followed-by-human-stop",
+              "Stop the unchanged implementation",
+              false,
+            );
+            await readInput();
+            const beforeHumanStop = new Store(database);
+            assert.throws(
+              () => currentIntake(beforeHumanStop, agentId, true),
+              /MAIN_INPUT_INTERPRETATION_REQUIRED|INTAKE_PENDING/,
+            );
+            beforeHumanStop.close();
+            await interpret("stop");
+            const stoppedState = new Store(database);
+            assert.throws(
+              () => currentIntake(stoppedState, agentId, true),
+              /INTAKE_IMPLEMENTATION_NOT_AUTHORIZED/,
+            );
+            stoppedState.close();
+          } finally {
+            rehydratedHistory = false;
+            historyGap = false;
+            providerSessionId = "fixture-session";
+            sessionChangesDuringHistory = false;
+          }
+        }
+        await mainAuthority.test(
+          "rehydrated internal wake preserves the bound task and a later human stop",
+          recoverInternalWake,
+        );
 
         await registerInput(
           "advisory-start-000002",

@@ -525,6 +525,34 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
           null,
           "invalid native arrays are not normalized into a verdict",
         );
+        const closedProvider: Provider = {
+          ...repairProvider,
+          refresh: async (id) =>
+            id === "writer-old"
+              ? {
+                  ...writerSnapshot,
+                  status: "unknown",
+                  turnComplete: false,
+                  backgroundActive: null,
+                }
+              : repairProvider.refresh(id),
+        };
+        state.observe(attemptId, "NEEDS_CONFIRMATION");
+        await new Engine(state, repairConfig, closedProvider).tick();
+        assert.equal(
+          state.attempt(attemptId).status,
+          "NEEDS_CONFIRMATION",
+          "closed workers remain blocked without terminating recovery",
+        );
+        assert.equal(
+          state.db.prepare("SELECT state FROM review_runs WHERE attempt_id=?").get(attemptId)!
+            .state,
+          "NEEDS_CONFIRMATION",
+        );
+        assert.equal(sent, 0);
+        // Restore the original rejected-review/VERIFY skew for the remaining
+        // continuation cases; recovery itself never promoted this attempt.
+        state.db.prepare("UPDATE attempts SET status='VERIFY' WHERE id=?").run(attemptId);
         const repair = { diffHash: emptyDiff.diffHash, findings: [reviewerFinding] };
         reviewerActive = true;
         await assert.rejects(() => repairEngine.continueExisting(taskKey, repair));

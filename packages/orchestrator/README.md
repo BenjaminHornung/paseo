@@ -80,6 +80,22 @@ archived before their projections are replaced. Its repaired turn receives fresh
 and a distinct, idempotent native review request. This never accepts the rejected verdict
 or substitutes for final independent review and any required visual acceptance.
 
+After native history replay, controller-owned activation, wake and reminder messages
+retain their internal origin through the existing receipt/session/message identity audit.
+If the first native alias is missing, capture reads complete history for the strict,
+unique content-hash and timestamp match before classifying new input. Only unresolved
+internal identities relevant to the checkpoint, an unverified intake/open pending binding,
+or later input require that first proof; absent old transport does not force every pulse
+to read complete history. This selection itself never proves origin. A proven internal
+message never becomes human authority, including a historical unverified assessment
+created before that alias was recovered. Its original facts/results and any financial
+call state remain visible and unchanged. Ambiguous identities, incomplete history and
+colliding human/operator claims block; genuine new human input still requires normal
+interpretation. Both IDs of the proven timeline entry identify the same checkpoint.
+Observe-only recovery waits when an implementation is not VERIFY; it does not restart
+a closed worker, attest its processes or accept its review. Reopening the same existing
+agent uses the normal public reload path with fresh identity and safety checks.
+
 Under **Rollen & Modelle → Reihenfolge je Rolle & Arbeitsart → UI-Implementierung**,
 choose existing routes and order their priority, including routes created from Advanced
 profiles. The optional `roleRoutes.ui` list applies to mutating implementation packages
