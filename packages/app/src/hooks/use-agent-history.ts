@@ -4,10 +4,15 @@ import type {
   FetchAgentHistoryPageInfo,
 } from "@getpaseo/client/internal/daemon-client";
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { AggregatedAgent } from "@/hooks/use-aggregated-agents";
-import { getHostRuntimeStore, isHostRuntimeConnected, useHosts } from "@/runtime/host-runtime";
+import {
+  getHostRuntimeStore,
+  useHostRuntimeConnectionStatuses,
+  useHosts,
+} from "@/runtime/host-runtime";
+import { useSessionStore } from "@/stores/session-store";
 import { buildAgentDirectoryState } from "@/utils/agent-directory-sync";
 import { agentHistoryQueryKey, allAgentHistoryQueryKey } from "./agent-history-query-key";
 
@@ -25,6 +30,12 @@ export interface AgentHistoryResult {
   isError: boolean;
   hasMore: boolean;
   isLoadingMore: boolean;
+  /** False when any target host predates search; the screen hides the field. */
+  isSearchSupported: boolean;
+  /** More sessions matched than the ranked page holds. Narrow the query. */
+  isSearchTruncated: boolean;
+  /** Hosts that failed while others succeeded. The list still renders. */
+  hostErrors: AgentHistoryHostError[];
   refreshAll: () => Promise<void>;
   loadMore: () => void;
 }
@@ -32,9 +43,21 @@ export interface AgentHistoryResult {
 export interface AgentHistoryPage {
   agents: AggregatedAgent[];
   pageInfo: FetchAgentHistoryPageInfo;
+  /** More matched this host's query than its page could hold. */
+  isSearchTruncated: boolean;
 }
 
 export type AgentHistoryClient = Pick<DaemonClient, "fetchAgentHistory">;
+
+/**
+ * A host that could not be reached while at least one other could. Its sessions
+ * are missing from the list, which under a query means "no matches" would be a
+ * claim the app cannot make.
+ */
+export interface AgentHistoryHostError {
+  serverId: string;
+  serverName: string;
+}
 
 export interface AgentHistoryHost {
   serverId: string;
@@ -45,6 +68,9 @@ export interface AgentHistoryHost {
 interface AgentHistoryBatchPage {
   agents: AggregatedAgent[];
   pageInfoByServerId: Record<string, FetchAgentHistoryPageInfo>;
+  hostErrors: AgentHistoryHostError[];
+  /** Set only under a query: more sessions matched than this page can hold. */
+  isSearchTruncated?: boolean;
 }
 
 type AgentHistoryCursorByServerId = Record<string, string | null>;
@@ -53,8 +79,10 @@ export async function fetchAgentHistoryPage(input: {
   client: AgentHistoryClient;
   serverId: string;
   cursor: string | null;
+  search?: string;
 }): Promise<AgentHistoryPage> {
   const payload = await input.client.fetchAgentHistory({
+    ...(input.search ? { search: input.search } : {}),
     sort: AGENT_HISTORY_SORT,
     page: input.cursor
       ? { limit: AGENT_HISTORY_PAGE_LIMIT, cursor: input.cursor }
@@ -65,14 +93,15 @@ export async function fetchAgentHistoryPage(input: {
     serverId: input.serverId,
     entries: payload.entries,
   });
-
   return {
+    isSearchTruncated: payload.searchTruncated === true,
     agents: Array.from(agents.values(), (agent) => ({
       id: agent.id,
       serverId: input.serverId,
       serverLabel: input.serverId,
       title: agent.title ?? null,
       status: agent.status,
+      turn: agent.turn,
       lastActivityAt: agent.lastActivityAt,
       cwd: agent.cwd,
       workspaceId: agent.workspaceId,
@@ -94,6 +123,31 @@ function sortByLatestActivity(agents: AggregatedAgent[]): AggregatedAgent[] {
   return [...agents].sort((a, b) => b.lastActivityAt.getTime() - a.lastActivityAt.getTime());
 }
 
+/**
+ * Which hosts are missing from the list the user is looking at.
+ *
+ * Failures are collected across every loaded page, not just the newest: a host
+ * that rejects page one contributes no cursor and is never asked again, so a
+ * later page carries no error of its own while that host's history is still
+ * absent. A refetch replaces every page, which is what clears an error that has
+ * healed.
+ */
+export function collectAgentHistoryHostErrors(input: {
+  pages: readonly Pick<AgentHistoryBatchPage, "hostErrors">[];
+  unreachableHosts: readonly AgentHistoryHostError[];
+}): AgentHistoryHostError[] {
+  const byServerId = new Map<string, AgentHistoryHostError>();
+  for (const error of input.unreachableHosts) {
+    byServerId.set(error.serverId, error);
+  }
+  for (const page of input.pages) {
+    for (const error of page.hostErrors) {
+      byServerId.set(error.serverId, error);
+    }
+  }
+  return [...byServerId.values()];
+}
+
 function getNextAgentHistoryPageParam(
   page: AgentHistoryBatchPage,
 ): AgentHistoryCursorByServerId | null {
@@ -110,6 +164,7 @@ function getNextAgentHistoryPageParam(
 export async function fetchAgentHistoryBatch(input: {
   hosts: readonly AgentHistoryHost[];
   cursorByServerId: AgentHistoryCursorByServerId | null;
+  search?: string;
 }): Promise<AgentHistoryBatchPage> {
   const cursorByServerId = input.cursorByServerId ?? {};
   const hasCursorFilter = Object.keys(cursorByServerId).length > 0;
@@ -123,6 +178,7 @@ export async function fetchAgentHistoryBatch(input: {
         client: host.client,
         serverId: host.serverId,
         cursor: cursorByServerId[host.serverId] ?? null,
+        ...(input.search ? { search: input.search } : {}),
       });
       return { host, page };
     }),
@@ -133,6 +189,18 @@ export async function fetchAgentHistoryBatch(input: {
   if (pages.length === 0) {
     throw new Error(AGENT_HISTORY_ALL_HOSTS_FAILED_MESSAGE);
   }
+  // allSettled preserves order, so a rejection still names the host it came
+  // from. Losing that name is what would let the list quietly under-report.
+  const hostErrors = settledPages.flatMap((result, index) =>
+    result.status === "rejected"
+      ? [
+          {
+            serverId: hostsToFetch[index].serverId,
+            serverName: hostsToFetch[index].serverLabel,
+          },
+        ]
+      : [],
+  );
 
   const agents = pages.flatMap(({ host, page }) =>
     page.agents.map((agent) => Object.assign({}, agent, { serverLabel: host.serverLabel })),
@@ -140,55 +208,79 @@ export async function fetchAgentHistoryBatch(input: {
   const pageInfoByServerId = Object.fromEntries(
     pages.map(({ host, page }) => [host.serverId, page.pageInfo]),
   );
-
   return {
     agents: sortByLatestActivity(agents),
     pageInfoByServerId,
+    hostErrors,
+    ...(input.search
+      ? { isSearchTruncated: pages.some(({ page }) => page.isSearchTruncated) }
+      : {}),
   };
 }
 
 export function useAgentHistory(options: {
   serverId?: string | null;
   enabled?: boolean;
+  search?: string;
 }): AgentHistoryResult {
   const { t } = useTranslation();
   const daemons = useHosts();
   const runtime = getHostRuntimeStore();
-  const runtimeVersion = useSyncExternalStore(
-    (onStoreChange) => runtime.subscribeAll(onStoreChange),
-    () => runtime.getVersion(),
-    () => runtime.getVersion(),
-  );
   const serverId = useMemo(() => {
     const value = options.serverId;
     return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
   }, [options.serverId]);
   const enabled = options.enabled ?? true;
-  const targetHosts = useMemo(() => {
-    void runtimeVersion;
+  const serverIds = useMemo(
+    () => (serverId ? [serverId] : daemons.map((daemon) => daemon.serverId)),
+    [daemons, serverId],
+  );
+  const connectionStatuses = useHostRuntimeConnectionStatuses(serverIds);
+  // A host the user asked about splits two ways: one this fetch can reach, and
+  // one whose sessions will be missing from the answer. Both come out of here,
+  // because dropping the unreachable ones silently is what lets the list — and
+  // worse, "No sessions match" — overstate what was actually searched.
+  const { targetHosts, unreachableHosts } = useMemo(() => {
     const serverLabelById = new Map(daemons.map((daemon) => [daemon.serverId, daemon.label]));
-    const serverIds = serverId ? [serverId] : daemons.map((daemon) => daemon.serverId);
     const hosts: AgentHistoryHost[] = [];
+    const unreachable: AgentHistoryHostError[] = [];
 
     for (const targetServerId of serverIds) {
-      const snapshot = runtime.getSnapshot(targetServerId);
       const client = runtime.getClient(targetServerId);
-      if (!client || !isHostRuntimeConnected(snapshot)) {
+      const serverName = serverLabelById.get(targetServerId) ?? targetServerId;
+      if (!client || connectionStatuses.get(targetServerId) !== "online") {
+        unreachable.push({ serverId: targetServerId, serverName });
         continue;
       }
-      hosts.push({
-        serverId: targetServerId,
-        serverLabel: serverLabelById.get(targetServerId) ?? targetServerId,
-        client,
-      });
+      hosts.push({ serverId: targetServerId, serverLabel: serverName, client });
     }
 
-    return hosts;
-  }, [daemons, runtime, runtimeVersion, serverId]);
+    return { targetHosts: hosts, unreachableHosts: unreachable };
+  }, [daemons, runtime, connectionStatuses, serverIds]);
   const targetServerIds = useMemo(() => targetHosts.map((host) => host.serverId), [targetHosts]);
+  // One gate, checked before the field is offered: a fleet where any host
+  // predates search has no search, rather than a list that silently omits that
+  // host's sessions.
+  const isSearchSupported = useSessionStore(
+    useCallback(
+      (state) =>
+        targetServerIds.length > 0 &&
+        targetServerIds.every(
+          (id) => state.sessions[id]?.serverInfo?.features?.agentHistorySearch === true,
+        ),
+      [targetServerIds],
+    ),
+  );
+  const search = useMemo(() => {
+    const trimmed = options.search?.trim() ?? "";
+    return isSearchSupported ? trimmed : "";
+  }, [isSearchSupported, options.search]);
   const queryKey = useMemo(
-    () => (serverId ? agentHistoryQueryKey(serverId) : allAgentHistoryQueryKey(targetServerIds)),
-    [serverId, targetServerIds],
+    () => [
+      ...(serverId ? agentHistoryQueryKey(serverId) : allAgentHistoryQueryKey(targetServerIds)),
+      search,
+    ],
+    [search, serverId, targetServerIds],
   );
   const serverLabelById = useMemo(
     () => new Map(daemons.map((daemon) => [daemon.serverId, daemon.label])),
@@ -214,6 +306,7 @@ export function useAgentHistory(options: {
       return fetchAgentHistoryBatch({
         hosts: targetHosts,
         cursorByServerId: pageParam,
+        ...(search ? { search } : {}),
       });
     },
   });
@@ -243,7 +336,8 @@ export function useAgentHistory(options: {
   }, [enabled, fetchNextPage, hasNextPage, isFetchingNextPage, targetHosts.length]);
 
   const agents = useMemo(() => {
-    const historyAgents = (data?.pages ?? []).flatMap((page) => page.agents);
+    const pages = data?.pages ?? [];
+    const historyAgents = pages.flatMap((page) => page.agents);
     const labelledAgents = historyAgents.map((agent) =>
       Object.assign({}, agent, {
         serverLabel: serverLabelById.get(agent.serverId) ?? agent.serverLabel,
@@ -253,6 +347,11 @@ export function useAgentHistory(options: {
   }, [data?.pages, serverLabelById]);
   const isInitialLoad = isLoading && agents.length === 0;
   const isRevalidating = isFetching && !isFetchingNextPage && agents.length > 0;
+  const isSearchTruncated = Boolean(search && data?.pages.some((page) => page.isSearchTruncated));
+  const hostErrors = useMemo(
+    () => collectAgentHistoryHostErrors({ pages: data?.pages ?? [], unreachableHosts }),
+    [data?.pages, unreachableHosts],
+  );
 
   return {
     agents,
@@ -262,6 +361,9 @@ export function useAgentHistory(options: {
     isError,
     hasMore: hasNextPage,
     isLoadingMore: isFetchingNextPage,
+    isSearchSupported,
+    isSearchTruncated,
+    hostErrors,
     refreshAll,
     loadMore,
   };

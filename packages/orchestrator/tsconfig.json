@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "outDir": "dist",
+    "rootDir": ".",
+    "rewriteRelativeImportExtensions": true,
+    "skipLibCheck": true,
+    "types": ["node", "proper-lockfile"]
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "starter/src/**/*.ts", "starter/tests/**/*.ts"]
+}

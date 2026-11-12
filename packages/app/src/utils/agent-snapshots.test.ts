@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
-import { normalizeAgentSnapshot } from "./agent-snapshots";
+import { isControlActive, readSelectOption } from "@/agent-controls/option-controls";
+import { normalizeAgentSnapshot, projectAgentSnapshot } from "./agent-snapshots";
 
 function createSnapshot(
   input: Partial<Omit<AgentSnapshotPayload, "labels">> & {
@@ -17,6 +18,7 @@ function createSnapshot(
     updatedAt: input.updatedAt ?? "2026-04-20T00:01:00.000Z",
     lastUserMessageAt: input.lastUserMessageAt ?? null,
     status: input.status ?? "idle",
+    activeTurn: input.activeTurn,
     capabilities: input.capabilities ?? {
       supportsStreaming: true,
       supportsSessionPersistence: true,
@@ -31,10 +33,81 @@ function createSnapshot(
     persistence: input.persistence ?? null,
     title: input.title ?? null,
     labels: (input.labels ?? {}) as AgentSnapshotPayload["labels"],
+    ...(input.controls ? { controls: input.controls } : {}),
+    ...(input.options ? { options: input.options } : {}),
   };
 }
 
 describe("normalizeAgentSnapshot", () => {
+  it("keeps a closed agent's stored options and controls, so its Fast control draws", () => {
+    const speed = {
+      type: "select" as const,
+      key: "service_tier",
+      label: "Speed",
+      defaultValue: "default",
+      choices: [
+        { value: "default", label: "Normal" },
+        { value: "priority", label: "Fast" },
+      ],
+    };
+    const agent = normalizeAgentSnapshot(
+      createSnapshot({
+        status: "closed",
+        controls: [speed],
+        options: { service_tier: "priority", sandbox_mode: "read-only" },
+      }),
+      "server-1",
+    );
+
+    expect(agent.status).toBe("closed");
+    expect(agent.controls).toEqual([speed]);
+    expect(agent.options).toEqual({ service_tier: "priority", sandbox_mode: "read-only" });
+    expect(readSelectOption(speed, agent.options ?? {})).toBe("priority");
+    expect(isControlActive(speed, agent.options ?? {})).toBe(true);
+  });
+
+  it("round-trips identified active turns through the canonical snapshot boundary", () => {
+    const snapshot = createSnapshot({
+      status: "running",
+      activeTurn: { turnId: "turn-1", startedAt: "2026-07-31T12:00:00.000Z" },
+    });
+
+    expect(projectAgentSnapshot(normalizeAgentSnapshot(snapshot, "server-1"))).toMatchObject({
+      status: "running",
+      activeTurn: snapshot.activeTurn,
+    });
+  });
+
+  it("normalizes identified and legacy active turns at the snapshot boundary", () => {
+    const startedAt = "2026-07-31T12:00:00.000Z";
+    expect(
+      normalizeAgentSnapshot(
+        createSnapshot({
+          status: "running",
+          activeTurn: { turnId: "turn-1", startedAt },
+        }),
+        "server-1",
+      ).turn,
+    ).toEqual({
+      phase: "open",
+      turnId: "turn-1",
+      startedAt: new Date(startedAt),
+      cancellationRequestId: null,
+    });
+
+    expect(
+      normalizeAgentSnapshot(
+        createSnapshot({ status: "running", lastUserMessageAt: startedAt }),
+        "server-1",
+      ).turn,
+    ).toEqual({
+      phase: "open",
+      turnId: null,
+      startedAt: new Date(startedAt),
+      cancellationRequestId: null,
+    });
+  });
+
   it("derives parentAgentId from the parent label while preserving labels", () => {
     const labels = {
       [PARENT_AGENT_ID_LABEL]: "parent-1",

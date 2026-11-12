@@ -2,12 +2,12 @@ import { type ChildProcess, type ChildProcessWithoutNullStreams } from "node:chi
 import { query, type Options, type Query, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 
 import {
-  createProviderEnv,
   createProviderEnvSpec,
   type ProviderRuntimeSettings,
 } from "../../provider-launch-config.js";
-import { buildSelfNodeCommand } from "../../../paseo-env.js";
+import { buildSelfNodeCommand, createExternalProcessEnv } from "../../../paseo-env.js";
 import { spawnProcess } from "../../../../utils/spawn.js";
+import type { ClaudeBackgroundInventory } from "./background-inventory.js";
 
 // Keep the raw SDK query import in this module only. Claude process launch behavior
 // must stay shared between production and tests so Windows .cmd/.bat handling cannot
@@ -23,6 +23,7 @@ export interface ClaudeQueryContext {
   queryFactory?: ClaudeQueryFactory;
   /** Called with the spawned child process so the caller can tree-kill it on close. */
   onChildProcess?: (child: ChildProcess) => void;
+  backgroundInventory?: ClaudeBackgroundInventory;
 }
 
 function isChildProcessWithStreams(child: ChildProcess): child is ChildProcessWithoutNullStreams {
@@ -74,11 +75,10 @@ function applyRuntimeSettingsToClaudeOptions(
         runtimeSettings,
         overlays: [launchEnv],
       });
-      const providerEnv = createProviderEnv({
-        baseEnv: spawnOptions.env,
-        runtimeSettings,
-        overlays: [launchEnv],
-      });
+      // Session-open hooks may explicitly supply a client identity. Keep inherited
+      // SDK/parent identities cleared while honoring this launch-only contribution.
+      providerEnvSpec.envOverlay.CLAUDE_CODE_ENTRYPOINT = launchEnv?.CLAUDE_CODE_ENTRYPOINT;
+      const providerEnv = createExternalProcessEnv(spawnOptions.env, providerEnvSpec.envOverlay);
       const selfNodeCommand = isDefaultRuntime
         ? buildSelfNodeCommand(resolved.args, providerEnv)
         : null;
@@ -105,7 +105,7 @@ function applyRuntimeSettingsToClaudeOptions(
       if (!isChildProcessWithStreams(child)) {
         throw new Error("Claude process was spawned without stdio streams");
       }
-      return child;
+      return context.backgroundInventory?.attach(child) ?? child;
     },
   };
 }

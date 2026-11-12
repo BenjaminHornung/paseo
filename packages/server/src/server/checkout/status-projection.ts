@@ -33,6 +33,7 @@ export function buildCheckoutStatusPayloadFromSnapshot({
       isDirty: null,
       baseRef: null,
       aheadBehind: null,
+      upstreamRef: null,
       aheadOfOrigin: null,
       behindOfOrigin: null,
       hasRemote: false,
@@ -60,7 +61,10 @@ export function buildCheckoutStatusPayloadFromSnapshot({
       currentBranch: snapshot.git.currentBranch ?? null,
       isDirty: snapshot.git.isDirty,
       baseRef: snapshot.git.baseRef,
+      baseRefExact: snapshot.git.baseRefExact,
+      comparisonBaseRef: snapshot.git.comparisonBaseRef,
       aheadBehind: snapshot.git.aheadBehind ?? null,
+      upstreamRef: snapshot.git.upstreamRef ?? null,
       aheadOfOrigin: snapshot.git.aheadOfOrigin ?? null,
       behindOfOrigin: snapshot.git.behindOfOrigin ?? null,
       hasRemote: snapshot.git.hasRemote,
@@ -79,7 +83,10 @@ export function buildCheckoutStatusPayloadFromSnapshot({
     currentBranch: snapshot.git.currentBranch ?? null,
     isDirty: snapshot.git.isDirty,
     baseRef: snapshot.git.baseRef ?? null,
+    baseRefExact: snapshot.git.baseRefExact,
+    comparisonBaseRef: snapshot.git.comparisonBaseRef,
     aheadBehind: snapshot.git.aheadBehind ?? null,
+    upstreamRef: snapshot.git.upstreamRef ?? null,
     aheadOfOrigin: snapshot.git.aheadOfOrigin ?? null,
     behindOfOrigin: snapshot.git.behindOfOrigin ?? null,
     hasRemote: snapshot.git.hasRemote,
@@ -150,9 +157,10 @@ export function normalizeCheckoutPrStatusPayload(
   }
   if (status.forgeSpecific) {
     payload.forgeSpecific = status.forgeSpecific;
-    // COMPAT(forgeSpecific): added in v0.1.106, remove after 2026-12-27. Keep
-    // mirroring GitHub facts onto `github` for clients that predate forgeSpecific;
-    // drop once the daemon floor >= v0.1.106.
+    // COMPAT(forgeSpecific): forgeSpecific shipped in v0.2.0-beta.1. Keep
+    // mirroring GitHub facts onto `github` for clients that predate it. Stop
+    // emitting the mirror after 2027-01-17 once the supported client floor
+    // is >= v0.2.0.
     if (isGitHubPullRequestStatusFacts(status.forgeSpecific)) {
       const { forge: _forge, ...githubFacts } = status.forgeSpecific;
       payload.github = githubFacts;

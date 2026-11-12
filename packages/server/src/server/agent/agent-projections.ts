@@ -1,3 +1,4 @@
+import { isSameOrDescendantPath } from "../path-utils.js";
 import type {
   AgentListItemPayload,
   AgentSnapshotPayload,
@@ -6,7 +7,7 @@ import type {
 import type { SerializableAgentConfig, StoredAgentRecord } from "./agent-storage.js";
 import type {
   AgentCapabilityFlags,
-  AgentFeature,
+  AgentOptionControl,
   AgentMetadata,
   AgentMode,
   AgentPermissionRequest,
@@ -17,15 +18,28 @@ import type {
   AgentUsage,
   ImportableProviderSession,
 } from "./agent-sdk-types.js";
+import type { ProviderOptions } from "@getpaseo/protocol/agent-types";
 import type { ManagedAgent } from "./agent-manager.js";
+import { featuresFromControls } from "@getpaseo/protocol/option-controls";
 import type { JsonValue } from "../json-utils.js";
-import { isStoredAgentProviderAvailable, toAgentPersistenceHandle } from "../persistence-hooks.js";
+import {
+  isStoredAgentProviderAvailable,
+  resolveStoredAgentUpdatedAt,
+  toAgentPersistenceHandle,
+} from "../persistence-hooks.js";
 export type { ManagedAgent };
 
 interface ProjectionOptions {
   title?: string | null;
   createdAt?: string;
   internal?: boolean;
+  /**
+   * Archive timestamp, supplied by a caller holding the stored record. A live
+   * managed agent cannot know this: an archived agent is resumed back into
+   * memory to serve a history read, so being in the manager is not evidence
+   * that it is active. Storage stays the single owner.
+   */
+  archivedAt?: string | null;
 }
 
 interface RecentProviderSessionProjectionOptions {
@@ -80,11 +94,13 @@ export function toStoredAgentRecord(
     lastUserMessageAt: agent.lastUserMessageAt ? agent.lastUserMessageAt.toISOString() : null,
     title: options?.title ?? null,
     labels: agent.labels,
+    metadata: agent.metadata,
     lastStatus: agent.lifecycle,
     lastModeId: agent.currentModeId ?? config?.modeId ?? null,
     config: config ?? null,
+    launchEnv: agent.launchEnv ? { ...agent.launchEnv } : undefined,
     runtimeInfo,
-    features: normalizeFeatures(agent.features),
+    controls: normalizeControls(agent.controls),
     persistence,
     lastError: agent.lastError ?? undefined,
     requiresAttention: agent.attention.requiresAttention,
@@ -93,8 +109,15 @@ export function toStoredAgentRecord(
       ? agent.attention.attentionTimestamp.toISOString()
       : null,
     internal: options?.internal,
+    ...(agent.background ? { background: true } : {}),
     owner: agent.owner,
   } satisfies StoredAgentRecord;
+}
+
+/** Account discovery depends on the harness session and its model, so the key follows both. */
+function projectUsageScopeKey(agent: ManagedAgent): string | undefined {
+  const usageSession = agent.session?.usageSession?.();
+  return usageSession ? `${usageSession.sessionKey}:${usageSession.model ?? ""}` : undefined;
 }
 
 export function toAgentPayload(
@@ -121,15 +144,34 @@ export function toAgentPayload(
     updatedAt: agent.updatedAt.toISOString(),
     lastUserMessageAt: agent.lastUserMessageAt ? agent.lastUserMessageAt.toISOString() : null,
     status: agent.lifecycle,
+    activeTurn: agent.activeTurnId
+      ? {
+          turnId: agent.activeTurnId,
+          startedAt: agent.activeTurnStartedAt?.toISOString() ?? null,
+        }
+      : null,
     capabilities: cloneCapabilities(agent.capabilities),
     currentModeId: agent.currentModeId,
     availableModes: cloneAvailableModes(agent.availableModes),
-    features: normalizeFeatures(agent.features),
+    // COMPAT(featureValues): added in v0.15.0, remove after 2027-05-01.
+    features: featuresFromControls({ controls: agent.controls, options: agent.effectiveOptions }),
+    ...(agent.effectiveOptions
+      ? { options: sanitizeEffectiveOptions(agent.effectiveOptions) }
+      : {}),
+    controls: normalizeControls(agent.controls),
     pendingPermissions: sanitizePendingPermissions(agent.pendingPermissions),
-    persistence: sanitizePersistenceHandle(agent.persistence),
+    persistence: projectPersistenceHandleForWire(agent.persistence),
     title: options?.title ?? null,
     labels: agent.labels,
+    metadata: agent.metadata,
+    archivedAt: options?.archivedAt ?? null,
+    ...visibilityFlags(agent),
   };
+
+  const usageScopeKey = projectUsageScopeKey(agent);
+  if (usageScopeKey !== undefined) {
+    payload.usageScopeKey = usageScopeKey;
+  }
 
   const usage = sanitizeUsage(agent.lastUsage);
   if (usage !== undefined) {
@@ -185,9 +227,43 @@ function buildStoredPersistenceHandle(
   return toAgentPersistenceHandle(validProviders, record.persistence);
 }
 
+/** The wire carries `internal` and `background` only when set. */
+function visibilityFlags(agent: {
+  internal?: boolean;
+  background?: boolean;
+}): Pick<AgentSnapshotPayload, "internal" | "background"> {
+  return {
+    ...(agent.internal ? { internal: true } : {}),
+    ...(agent.background ? { background: true } : {}),
+  };
+}
+
+/** The options an agent runs with, given the options it owns; see `toAgentPayload`. */
+export type EffectiveOptionsResolver = (
+  provider: AgentProvider,
+  own: ProviderOptions | undefined,
+) => ProviderOptions;
+
+function buildStoredOptionControls(
+  record: StoredAgentRecord,
+  effectiveOptionsFor: EffectiveOptionsResolver,
+): Pick<AgentSnapshotPayload, "features" | "options" | "controls"> {
+  const controls = normalizeControls(record.controls);
+  const options = sanitizeEffectiveOptions(
+    effectiveOptionsFor(record.provider, record.config?.providerOptions ?? undefined),
+  );
+  return {
+    // COMPAT(featureValues): added in v0.15.0, remove after 2027-05-01.
+    features: featuresFromControls({ controls, options }),
+    options,
+    controls,
+  };
+}
+
 export function buildStoredAgentPayload(
   record: StoredAgentRecord,
   validProviders: Iterable<AgentProvider>,
+  effectiveOptionsFor: EffectiveOptionsResolver,
 ): AgentSnapshotPayload {
   const defaultCapabilities = {
     supportsStreaming: false,
@@ -202,12 +278,15 @@ export function buildStoredAgentPayload(
   } as const;
 
   const createdAt = new Date(record.createdAt);
-  const updatedAt = new Date(resolveStoredAgentPayloadUpdatedAt(record));
+  const updatedAt = new Date(resolveStoredAgentUpdatedAt(record));
   const lastUserMessageAt = record.lastUserMessageAt ? new Date(record.lastUserMessageAt) : null;
 
   const runtimeInfo = buildStoredRuntimeInfo(record);
+  const optionControls = buildStoredOptionControls(record, effectiveOptionsFor);
   const providerAvailable = isStoredAgentProviderAvailable(record, validProviders);
-  const persistence = buildStoredPersistenceHandle(record, validProviders);
+  const persistence = projectPersistenceHandleForWire(
+    buildStoredPersistenceHandle(record, validProviders),
+  );
 
   return {
     id: record.id,
@@ -228,6 +307,7 @@ export function buildStoredAgentPayload(
     capabilities: defaultCapabilities,
     currentModeId: record.lastModeId ?? null,
     availableModes: [],
+    ...optionControls,
     pendingPermissions: [],
     persistence,
     title: record.title ?? null,
@@ -235,7 +315,10 @@ export function buildStoredAgentPayload(
     attentionReason: record.attentionReason ?? null,
     attentionTimestamp: record.attentionTimestamp ?? null,
     archivedAt: record.archivedAt ?? null,
+    ...visibilityFlags(record),
     labels: normalizeLabels(record.labels),
+    metadata: record.metadata,
+    ...(typeof record.lastError === "string" ? { lastError: record.lastError } : {}),
     ...(providerAvailable ? {} : { providerUnavailable: true }),
   };
 }
@@ -250,6 +333,7 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
     thinkingOptionId: agent.thinkingOptionId,
     effectiveThinkingOptionId: agent.effectiveThinkingOptionId,
     status: agent.status,
+    ...(agent.backgroundWork ? { backgroundWork: agent.backgroundWork } : {}),
     cwd: agent.cwd,
     createdAt: agent.createdAt,
     updatedAt: agent.updatedAt,
@@ -261,6 +345,66 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
     labels: agent.labels,
     ...(agent.providerUnavailable ? { providerUnavailable: true } : {}),
   };
+}
+
+function parseTimestamp(value: string | null | undefined): number {
+  if (!value) {
+    return 0;
+  }
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function resolveAgentListActivityTime(agent: AgentListItemPayload): number {
+  return Math.max(
+    parseTimestamp(agent.updatedAt),
+    parseTimestamp(agent.lastUserMessageAt),
+    parseTimestamp(agent.attentionTimestamp),
+    parseTimestamp(agent.archivedAt),
+    parseTimestamp(agent.createdAt),
+  );
+}
+
+function compareAgentListItems(a: AgentListItemPayload, b: AgentListItemPayload): number {
+  const attentionDelta =
+    Number(b.requiresAttention ?? false) - Number(a.requiresAttention ?? false);
+  if (attentionDelta !== 0) {
+    return attentionDelta;
+  }
+
+  const statusOrder = {
+    running: 0,
+    initializing: 1,
+    idle: 2,
+    error: 3,
+    closed: 4,
+  } as Record<string, number>;
+  const statusDelta = (statusOrder[a.status] ?? 999) - (statusOrder[b.status] ?? 999);
+  if (statusDelta !== 0) {
+    return statusDelta;
+  }
+
+  return resolveAgentListActivityTime(b) - resolveAgentListActivityTime(a);
+}
+
+export function selectAgentListItems(
+  agents: readonly AgentSnapshotPayload[],
+  options: {
+    cwd?: string;
+    statuses?: AgentSnapshotPayload["status"][];
+    sinceHours?: number;
+    limit?: number;
+  } = {},
+): AgentListItemPayload[] {
+  const statusFilter = options.statuses?.length ? new Set(options.statuses) : null;
+  const sinceMs = Date.now() - (options.sinceHours ?? 48) * 60 * 60 * 1000;
+  return agents
+    .map(toAgentListItemPayload)
+    .filter((agent) => !options.cwd || isSameOrDescendantPath(options.cwd, agent.cwd))
+    .filter((agent) => !statusFilter || statusFilter.has(agent.status))
+    .filter((agent) => !agent.archivedAt || resolveAgentListActivityTime(agent) >= sinceMs)
+    .sort(compareAgentListItems)
+    .slice(0, options.limit ?? 50);
 }
 
 export function toRecentProviderSessionDescriptorPayload(
@@ -279,23 +423,6 @@ export function toRecentProviderSessionDescriptorPayload(
   };
 }
 
-export function resolveStoredAgentPayloadUpdatedAt(record: StoredAgentRecord): string {
-  const timestamps = [record.updatedAt, record.lastActivityAt]
-    .filter((value): value is string => typeof value === "string" && value.length > 0)
-    .map((value) => ({
-      raw: value,
-      parsed: Date.parse(value),
-    }))
-    .filter((value) => !Number.isNaN(value.parsed));
-
-  if (timestamps.length === 0) {
-    return record.updatedAt;
-  }
-
-  timestamps.sort((a, b) => b.parsed - a.parsed);
-  return timestamps[0].raw;
-}
-
 function buildSerializableConfig(config: AgentSessionConfig): SerializableAgentConfig | null {
   const serializable: SerializableAgentConfig = {};
   if (config.modeId) {
@@ -307,15 +434,16 @@ function buildSerializableConfig(config: AgentSessionConfig): SerializableAgentC
   if (config.thinkingOptionId) {
     serializable.thinkingOptionId = config.thinkingOptionId;
   }
-  if (Object.prototype.hasOwnProperty.call(config, "featureValues")) {
-    const featureValues = sanitizeMetadata(config.featureValues);
-    if (featureValues !== undefined) {
-      serializable.featureValues = featureValues;
+  if (config.providerOptions !== undefined) {
+    const providerOptions = sanitizeOptionalJson(config.providerOptions);
+    if (providerOptions && isJsonObject(providerOptions)) {
+      serializable.providerOptions = providerOptions;
     }
   }
-  const extra = sanitizeMetadata(config.extra);
-  if (extra !== undefined) {
-    serializable.extra = extra;
+  if (config.toolPolicy) {
+    serializable.toolPolicy = {
+      preapproved: config.toolPolicy.preapproved.map((grant) => ({ ...grant })),
+    };
   }
   if (config.systemPrompt) {
     serializable.systemPrompt = config.systemPrompt;
@@ -359,6 +487,20 @@ function sanitizePersistenceHandle(
   return sanitized;
 }
 
+function projectPersistenceHandleForWire(
+  handle: AgentPersistenceHandle | null,
+): AgentPersistenceHandle | null {
+  const projected = sanitizePersistenceHandle(handle);
+  if (!projected?.metadata) {
+    return projected;
+  }
+  delete projected.metadata.mcpServers;
+  if (Object.keys(projected.metadata).length === 0) {
+    delete projected.metadata;
+  }
+  return projected;
+}
+
 function cloneCapabilities(capabilities: AgentCapabilityFlags): AgentCapabilityFlags {
   return { ...capabilities };
 }
@@ -367,8 +509,15 @@ function cloneAvailableModes(modes: AgentMode[]): AgentMode[] {
   return modes.map((mode) => ({ ...mode }));
 }
 
-function normalizeFeatures(features: AgentFeature[] | null | undefined): AgentFeature[] {
-  return Array.isArray(features) ? features.map((feature) => ({ ...feature })) : [];
+function normalizeControls(
+  controls: AgentOptionControl[] | null | undefined,
+): AgentOptionControl[] {
+  return Array.isArray(controls) ? controls.map((control) => ({ ...control })) : [];
+}
+
+function sanitizeEffectiveOptions(options: Record<string, unknown>): ProviderOptions {
+  const sanitized = sanitizeOptionalJson(options);
+  return sanitized && isJsonObject(sanitized) ? sanitized : {};
 }
 
 function sanitizeOptionalJson(value: unknown): JsonValue | undefined {

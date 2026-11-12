@@ -2,7 +2,7 @@ import { useCallback, useMemo, useReducer, useState, type ReactNode } from "reac
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import type { ScheduleCadence } from "@getpaseo/protocol/schedule/types";
-import type { FieldControlSize } from "@/components/ui/control-geometry";
+import type { ControlSize } from "@/components/ui/control-geometry";
 import { Field, FormTextInput } from "@/components/ui/form-field";
 import { SelectField, type SelectFieldOption } from "@/components/ui/select-field";
 import {
@@ -20,7 +20,7 @@ export interface CadenceEditorProps {
   value: ScheduleCadence;
   onChange: (next: ScheduleCadence) => void;
   error?: string;
-  size?: FieldControlSize;
+  size?: ControlSize;
 }
 
 const PRESET_OPTIONS: SelectFieldOption<string>[] = CADENCE_PRESET_OPTIONS.map((option) => ({
@@ -110,7 +110,6 @@ export function CadenceEditor({ value, onChange, error, size = "md" }: CadenceEd
           accessibilityLabel="Cron expression"
           initialValue={cronText}
           resetKey={`cadence-cron-${fieldResetKey}`}
-          value={cronText}
           onChangeText={handleCronChange}
           placeholder="0 9 * * *"
           autoCapitalize="none"
@@ -132,11 +131,11 @@ const styles = StyleSheet.create((theme) => ({
     fontFamily: theme.fontFamily.mono,
   },
   preview: {
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
   },
   error: {
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     color: theme.colors.palette.red[300],
   },
 }));

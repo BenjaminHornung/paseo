@@ -9,5 +9,12 @@ export {
   decrypt,
 } from "./crypto.js";
 
-export { createClientChannel, createDaemonChannel, EncryptedChannel } from "./encrypted-channel.js";
+export {
+  base64EncryptedWireByteLength,
+  createClientChannel,
+  createDaemonChannel,
+  EncryptedChannel,
+  maxBase64EncryptedPlaintextByteLength,
+} from "./encrypted-channel.js";
+export { maxSecuredPlaintextByteLength } from "./secure-channel.js";
 export type { Transport, EncryptedChannelEvents } from "./encrypted-channel.js";

@@ -2,19 +2,24 @@ import { describe, expect, it } from "vitest";
 
 import { AGENT_LIFECYCLE_STATUSES } from "./agent-manager.js";
 import {
+  buildStoredAgentPayload,
   toAgentPayload,
+  toAgentListItemPayload,
   toRecentProviderSessionDescriptorPayload,
   toStoredAgentRecord,
   type ManagedAgent,
 } from "./agent-projections.js";
 import type { AgentSession } from "./agent-sdk-types.js";
 import type {
-  AgentFeature,
+  AgentOptionControl,
   ImportableProviderSession,
   AgentPermissionRequest,
   AgentPersistenceHandle,
   AgentSessionConfig,
 } from "./agent-sdk-types.js";
+
+/** A provider with no defaults of its own: the effective options are the agent's own. */
+const ownOptionsOnly = (_provider: string, own: Record<string, unknown> | undefined) => own ?? {};
 
 type ManagedAgentOverrides = Omit<Partial<ManagedAgent>, "config" | "pendingPermissions"> & {
   config?: Partial<AgentSessionConfig>;
@@ -28,9 +33,7 @@ function createManagedAgent(overrides: ManagedAgentOverrides = {}): ManagedAgent
     cwd: "/tmp/project",
     modeId: "plan",
     model: "claude-3.5-sonnet",
-    extra: {
-      claude: { tone: "friendly" },
-    },
+    providerOptions: { allowedTools: ["Read"] },
   };
 
   const basePersistence: AgentPersistenceHandle = {
@@ -79,6 +82,8 @@ function createManagedAgent(overrides: ManagedAgentOverrides = {}): ManagedAgent
     currentModeId: "plan",
     pendingPermissions: pendingPermissionsOverride ?? new Map<string, AgentPermissionRequest>(),
     activeForegroundTurnId: activeForegroundTurnIdValue,
+    activeTurnId: activeForegroundTurnIdValue,
+    activeTurnStartedAt: lifecycle === "running" ? new Date("2025-01-01T00:00:01.000Z") : null,
     foregroundTurnWaiters: new Set(),
     unsubscribeSession: null,
     timeline: [],
@@ -105,6 +110,13 @@ function createManagedAgent(overrides: ManagedAgentOverrides = {}): ManagedAgent
   };
 }
 
+it("projects the daemon-owned active turn identity", () => {
+  expect(toAgentPayload(createManagedAgent({ lifecycle: "running" })).activeTurn).toEqual({
+    turnId: "test-turn-id",
+    startedAt: "2025-01-01T00:00:01.000Z",
+  });
+});
+
 function createPermission(overrides: Partial<AgentPermissionRequest> = {}): AgentPermissionRequest {
   const base: AgentPermissionRequest = {
     id: "perm-1",
@@ -118,16 +130,6 @@ function createPermission(overrides: Partial<AgentPermissionRequest> = {}): Agen
     metadata: { requestedAt: new Date("2025-02-01T12:00:00.000Z") },
   };
   return { ...base, ...overrides };
-}
-
-function createFeature(overrides: Partial<AgentFeature> = {}): AgentFeature {
-  return {
-    type: "toggle",
-    id: "fast_mode",
-    label: "Fast mode",
-    value: true,
-    ...overrides,
-  };
 }
 
 describe("toStoredAgentRecord", () => {
@@ -172,11 +174,11 @@ describe("toStoredAgentRecord", () => {
     expect(record.config).toEqual({
       modeId: agent.config.modeId,
       model: agent.config.model,
-      extra: { claude: { tone: "friendly" } },
+      providerOptions: { allowedTools: ["Read"] },
     });
 
-    record.config!.extra!.claude!.tone = "serious";
-    expect(agent.config.extra!.claude!.tone).toBe("friendly");
+    record.config!.providerOptions!.allowedTools = ["Bash"];
+    expect(agent.config.providerOptions!.allowedTools).toEqual(["Read"]);
     record.persistence!.sessionId = "mutated";
     expect(agent.persistence!.sessionId).toBe("persist-2");
   });
@@ -199,7 +201,8 @@ describe("toStoredAgentRecord", () => {
       config: {
         modeId: undefined,
         model: undefined,
-        extra: undefined,
+        providerOptions: undefined,
+        toolPolicy: undefined,
       },
     });
 
@@ -268,6 +271,19 @@ describe("toAgentPayload", () => {
     expect(permissionA.title).toBe("Run command");
   });
 
+  it("changes the usage scope key when the harness session or its model changes", () => {
+    function usageScopeKey(usageSession: ReturnType<NonNullable<AgentSession["usageSession"]>>) {
+      const session = { usageSession: () => usageSession } as unknown as AgentSession;
+      return toAgentPayload(createManagedAgent({ session })).usageScopeKey;
+    }
+    const scope = { provider: "claude", model: "opus", env: {}, sessionKey: "session-a" };
+
+    expect(usageScopeKey(scope)).toBe(usageScopeKey({ ...scope }));
+    expect(usageScopeKey({ ...scope, sessionKey: "session-b" })).not.toBe(usageScopeKey(scope));
+    expect(usageScopeKey({ ...scope, model: "sonnet" })).not.toBe(usageScopeKey(scope));
+    expect(usageScopeKey(null)).toBeUndefined();
+  });
+
   it("omits usage when any numeric usage field is NaN", () => {
     const fields = [
       "inputTokens",
@@ -319,7 +335,16 @@ describe("toAgentPayload", () => {
         provider: "codex",
         sessionId: "persist-99",
         nativeHandle: { id: "native" } as unknown,
-        metadata: { restored: new Date("2025-03-01T00:00:00.000Z"), empty: {} },
+        metadata: {
+          restored: new Date("2025-03-01T00:00:00.000Z"),
+          empty: {},
+          mcpServers: {
+            hub: {
+              type: "http",
+              headers: { Authorization: "Bearer projection-secret" },
+            },
+          },
+        },
       },
     });
     const payload = toAgentPayload(agent);
@@ -331,6 +356,139 @@ describe("toAgentPayload", () => {
     });
     (payload.persistence as AgentPersistenceHandle).sessionId = "mutated";
     expect(agent.persistence!.sessionId).toBe("persist-99");
+  });
+
+  it("removes empty persistence metadata after projecting MCP configuration", () => {
+    const payload = toAgentPayload(
+      createManagedAgent({
+        provider: "codex",
+        config: { provider: "codex" },
+        persistence: {
+          provider: "codex",
+          sessionId: "persist-mcp-only",
+          metadata: { mcpServers: { hub: { type: "http", url: "https://hub.test/mcp" } } },
+        },
+      }),
+    );
+
+    expect(payload.persistence).toEqual({
+      provider: "codex",
+      sessionId: "persist-mcp-only",
+    });
+  });
+
+  it("strips MCP metadata from stored wire payloads while preserving private persistence", () => {
+    const record = toStoredAgentRecord(
+      createManagedAgent({
+        provider: "codex",
+        config: { provider: "codex" },
+        persistence: {
+          provider: "codex",
+          sessionId: "persist-stored",
+          metadata: {
+            conversationId: "conversation-stored",
+            mcpServers: {
+              hub: {
+                type: "http",
+                headers: { Authorization: "Bearer stored-projection-secret" },
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    const payload = buildStoredAgentPayload(record, ["codex"], ownOptionsOnly);
+
+    expect(record.persistence?.metadata).toEqual({
+      conversationId: "conversation-stored",
+      mcpServers: {
+        hub: {
+          type: "http",
+          headers: { Authorization: "Bearer stored-projection-secret" },
+        },
+      },
+    });
+    expect(payload.persistence?.metadata).toEqual({
+      conversationId: "conversation-stored",
+    });
+  });
+
+  it("projects a closed agent's stored controls and options", () => {
+    const controls: AgentOptionControl[] = [
+      {
+        type: "select",
+        key: "service_tier",
+        label: "Speed",
+        defaultValue: "default",
+        choices: [
+          { value: "default", label: "Normal" },
+          { value: "priority", label: "Fast" },
+        ],
+      },
+    ];
+    const record = toStoredAgentRecord(
+      createManagedAgent({
+        provider: "codex",
+        lifecycle: "closed",
+        controls,
+        config: {
+          provider: "codex",
+          providerOptions: { service_tier: "priority", sandbox_mode: "read-only" },
+        },
+      }),
+    );
+
+    const payload = buildStoredAgentPayload(record, ["codex"], ownOptionsOnly);
+
+    expect(payload.status).toBe("closed");
+    expect(payload.controls).toEqual(controls);
+    expect(payload.options).toEqual({ service_tier: "priority", sandbox_mode: "read-only" });
+    expect(payload.features).toEqual([
+      {
+        type: "select",
+        id: "service_tier",
+        label: "Speed",
+        value: "priority",
+        options: [
+          { id: "default", label: "Normal", isDefault: true },
+          { id: "priority", label: "Fast" },
+        ],
+      },
+    ]);
+  });
+
+  it("projects a closed agent's options with the provider defaults under its own, like a live one", () => {
+    const record = toStoredAgentRecord(
+      createManagedAgent({
+        provider: "claude",
+        lifecycle: "closed",
+        controls: [{ type: "toggle", key: "fast_mode", label: "Fast" }],
+        config: { provider: "claude", providerOptions: {} },
+      }),
+    );
+    const withConfigDefaults = (_provider: string, own: Record<string, unknown> | undefined) => ({
+      fast_mode: true,
+      ...own,
+    });
+
+    const payload = buildStoredAgentPayload(record, ["claude"], withConfigDefaults);
+
+    expect(payload.options).toEqual({ fast_mode: true });
+    expect(payload.features).toEqual([
+      { type: "toggle", id: "fast_mode", label: "Fast", value: true },
+    ]);
+  });
+
+  it("carries a stored lastError onto the payload", () => {
+    const record = toStoredAgentRecord(
+      createManagedAgent({ provider: "codex", config: { provider: "codex" }, lastError: "boom" }),
+    );
+
+    expect(buildStoredAgentPayload(record, ["codex"], ownOptionsOnly).lastError).toBe("boom");
+    expect(
+      buildStoredAgentPayload({ ...record, lastError: null }, ["codex"], ownOptionsOnly),
+    ).not.toHaveProperty("lastError");
   });
 
   it("omits lastUsage when not available", () => {
@@ -389,13 +547,44 @@ describe("toAgentPayload", () => {
     });
   });
 
-  it("includes features in the snapshot payload", () => {
-    const features = [createFeature()];
-    const agent = createManagedAgent({ features });
+  it("projects controls, effective options, and legacy features from the same source", () => {
+    const controls: AgentOptionControl[] = [
+      { type: "toggle", key: "fast_mode", label: "Fast mode" },
+      {
+        type: "select",
+        key: "service_tier",
+        label: "Speed",
+        defaultValue: "default",
+        choices: [
+          { value: "default", label: "Normal" },
+          { value: "fast", label: "Fast" },
+        ],
+      },
+    ];
+    // `config.json` supplies fast_mode; the agent itself sets nothing for service_tier.
+    // Options without a control are part of the snapshot too.
+    const agent = createManagedAgent({
+      controls,
+      effectiveOptions: { fast_mode: true, sandbox_mode: "workspace-write" },
+    });
 
     const payload = toAgentPayload(agent);
 
-    expect(payload.features).toEqual(features);
+    expect(payload.controls).toEqual(controls);
+    expect(payload.options).toEqual({ fast_mode: true, sandbox_mode: "workspace-write" });
+    expect(payload.features).toEqual([
+      { type: "toggle", id: "fast_mode", label: "Fast mode", value: true },
+      {
+        type: "select",
+        id: "service_tier",
+        label: "Speed",
+        value: "default",
+        options: [
+          { id: "default", label: "Normal", isDefault: true },
+          { id: "fast", label: "Fast" },
+        ],
+      },
+    ]);
   });
 });
 
@@ -452,5 +641,13 @@ describe("toRecentProviderSessionDescriptorPayload", () => {
       firstPromptPreview: null,
       lastPromptPreview: null,
     });
+  });
+});
+
+it("omits unknown background work and preserves known summary in list items", () => {
+  const snapshot = toAgentPayload(createManagedAgent());
+  expect(toAgentListItemPayload(snapshot)).not.toHaveProperty("backgroundWork");
+  expect(toAgentListItemPayload({ ...snapshot, backgroundWork: { count: 2 } })).toMatchObject({
+    backgroundWork: { count: 2 },
   });
 });

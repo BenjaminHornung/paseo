@@ -1,3 +1,4 @@
+import type { DaemonTarget } from "../../utils/daemon-target.js";
 import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
 import type { CommandError, CommandOptions } from "../../output/index.js";
 import type {
@@ -19,15 +20,16 @@ export interface ScheduleCommandOptions extends CommandOptions {
 }
 
 export async function connectScheduleClient(
-  host: string | undefined,
+  target: DaemonTarget,
 ): Promise<{ client: ScheduleDaemonClient; host: string }> {
-  const resolvedHost = getDaemonHost({ host });
+  const resolvedHost = getDaemonHost({ target });
   try {
     const client = (await connectToDaemon({
-      host,
+      target,
     })) as unknown as ScheduleDaemonClient;
     return { client, host: resolvedHost };
   } catch (error) {
+    if (error && typeof error === "object" && "code" in error) throw error;
     const message = error instanceof Error ? error.message : String(error);
     throw {
       code: "DAEMON_NOT_RUNNING",
@@ -114,7 +116,7 @@ function resolveScheduleTarget(args: {
   if (hasExplicitNewAgentOption) {
     throw {
       code: "INVALID_TARGET",
-      message: "--provider/--mode can only be used with a new-agent target",
+      message: "--provider/--mode/--thinking can only be used with a new-agent target",
       details: "Use --target new-agent or omit --target to create a new agent schedule",
     } satisfies CommandError;
   }
@@ -144,8 +146,10 @@ export function parseScheduleCreateInput(options: {
   target?: string;
   provider?: string;
   mode?: string;
+  thinking?: string;
   cwd?: string;
   host?: string;
+  daemonTarget: import("../../utils/daemon-target.js").DaemonTarget;
   maxRuns?: string;
   expiresIn?: string;
   runNow?: boolean;
@@ -167,7 +171,7 @@ export function parseScheduleCreateInput(options: {
   }
 
   const cwdInput = options.cwd?.trim();
-  if (options.host !== undefined && !cwdInput) {
+  if (options.daemonTarget.kind === "endpoint" && !cwdInput) {
     throw {
       code: "MISSING_CWD",
       message:
@@ -179,7 +183,15 @@ export function parseScheduleCreateInput(options: {
 
   const targetValue = options.target?.trim();
   const modeId = options.mode?.trim();
-  const hasExplicitNewAgentOption = options.provider !== undefined || options.mode !== undefined;
+  const thinkingOptionId = options.thinking?.trim();
+  if (options.thinking !== undefined && !thinkingOptionId) {
+    throw {
+      code: "INVALID_THINKING_OPTION",
+      message: "--thinking cannot be empty",
+    } satisfies CommandError;
+  }
+  const hasExplicitNewAgentOption =
+    options.provider !== undefined || options.mode !== undefined || options.thinking !== undefined;
   const createNewAgentTarget = (): ScheduleTarget => {
     const resolvedProviderModel = resolveProviderAndModel({
       provider: options.provider,
@@ -191,6 +203,7 @@ export function parseScheduleCreateInput(options: {
         cwd: cwdInput ?? process.cwd(),
         ...(resolvedProviderModel.model ? { model: resolvedProviderModel.model } : {}),
         ...(modeId ? { modeId } : {}),
+        ...(thinkingOptionId ? { thinkingOptionId } : {}),
       },
     };
   };

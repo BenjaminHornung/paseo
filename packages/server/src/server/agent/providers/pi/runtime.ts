@@ -1,5 +1,5 @@
+import type { PiTranscript } from "./transcript.js";
 import type {
-  PiAgentMessage,
   PiModel,
   PiPromptAck,
   PiRpcSlashCommand,
@@ -26,6 +26,7 @@ export interface PiRuntimeLaunch {
 
 export interface PiStartSessionInput {
   cwd: string;
+  signal?: AbortSignal;
   env?: Record<string, string>;
   protocolMode?: "rpc" | "rpc-ui";
   model?: string;
@@ -39,16 +40,22 @@ export interface PiStartSessionInput {
 }
 
 export interface PiRuntimeSession {
+  readonly environment: Record<string, string>;
   onEvent(callback: (event: PiRuntimeEvent) => void): () => void;
   prompt(
     message: string,
     images?: Array<{ type: "image"; data: string; mimeType: string }>,
   ): Promise<PiPromptAck>;
+  steer(
+    message: string,
+    images?: Array<{ type: "image"; data: string; mimeType: string }>,
+  ): Promise<void>;
+  clearQueue(): Promise<void>;
   compact(customInstructions?: string): Promise<void>;
   setAutoCompaction(enabled: boolean): Promise<void>;
   abort(): Promise<void>;
   getState(): Promise<PiSessionState>;
-  getMessages(): Promise<PiAgentMessage[]>;
+  getHistory(): Promise<PiTranscript>;
   getAvailableModels(timeoutMs?: number | null): Promise<PiModel[]>;
   setModel(provider: string, modelId: string): Promise<PiModel>;
   setThinkingLevel(level: string): Promise<void>;

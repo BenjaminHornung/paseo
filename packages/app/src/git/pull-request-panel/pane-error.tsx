@@ -15,7 +15,7 @@ export function PullRequestPaneError({
   return (
     <View style={styles.root} testID="pr-pane-error">
       <Text style={styles.message}>{message ?? t("workspace.git.diff.failedRefresh")}</Text>
-      <Button variant="ghost" size="xs" leftIcon={RotateCw} onPress={onRetry}>
+      <Button variant="ghost" size="sm" leftIcon={RotateCw} onPress={onRetry}>
         {t("common.actions.retry")}
       </Button>
     </View>
@@ -32,7 +32,7 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surfaceSidebar,
   },
   message: {
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
     textAlign: "center",
   },

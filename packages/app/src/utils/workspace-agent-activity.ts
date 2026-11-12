@@ -8,6 +8,11 @@ export interface WorkspaceAgentActivity {
   enteredAt: Date | null;
 }
 
+function workspaceAgentStatus(agent: Agent): Agent["status"] {
+  if (agent.turn.phase === "open") return "running";
+  return agent.status === "running" ? "idle" : agent.status;
+}
+
 export function buildWorkspaceAgentActivityIndex(
   agents: ReadonlyMap<string, Agent>,
   previous?: ReadonlyMap<string, WorkspaceAgentActivity>,
@@ -17,7 +22,12 @@ export function buildWorkspaceAgentActivityIndex(
 
   for (const agent of agents.values()) {
     const parentAgent = agent.parentAgentId ? agents.get(agent.parentAgentId) : undefined;
-    if (agent.archivedAt || !agent.workspaceId || !isWorkspaceRootAgent(agent, parentAgent)) {
+    if (
+      agent.archivedAt ||
+      agent.background ||
+      !agent.workspaceId ||
+      !isWorkspaceRootAgent(agent, parentAgent)
+    ) {
       continue;
     }
 
@@ -29,7 +39,8 @@ export function buildWorkspaceAgentActivityIndex(
     latestActivityAtByWorkspaceId.set(agent.workspaceId, enteredAt);
 
     const status = deriveSidebarStateBucket({
-      status: agent.status,
+      status: workspaceAgentStatus(agent),
+      backgroundWork: agent.backgroundWork,
       pendingPermissionCount: agent.pendingPermissions.length,
       requiresAttention: agent.requiresAttention,
       attentionReason: agent.attentionReason,

@@ -1,4 +1,5 @@
 import { resolve as resolvePath } from "node:path";
+import { createContext, runInContext } from "node:vm";
 
 import { describe, expect, test, vi } from "vitest";
 import type {
@@ -33,11 +34,15 @@ class FakeImage implements TabImage {
 }
 
 class FakeTab implements TabContents {
+  public withFrameProduction<T>(capture: () => Promise<T>): Promise<T> {
+    return capture();
+  }
   public readonly loadedUrls: string[] = [];
   public readonly scripts: string[] = [];
   public readonly actions: string[] = [];
-  public readonly capturedViewports: Array<{ stayHidden?: boolean }> = [];
+  public readonly capturedViewports: AbortSignal[] = [];
   public readonly debugCommands: Array<{ command: string; params?: Record<string, unknown> }> = [];
+  public readonly insertedText: string[] = [];
   public readonly inputEvents: IsolatedKeyboardInputEvent[] = [];
   private readonly captureStartWaiters: Array<() => void> = [];
   private readonly deferredCaptures: Array<(image: TabImage) => void> = [];
@@ -64,10 +69,10 @@ class FakeTab implements TabContents {
   public networkEntries: unknown[] = [];
   public consoleMessages: BrowserAutomationConsoleLogEntry[] = [];
   public dialogsToCapture: BrowserAutomationDialogEvent[] = [];
+  public paintDelayMs = 0;
   public captureNeverPaints = false;
   public captureThrows = false;
   public captureErrorMessage = "capture failed";
-  public viewportCaptureFailuresBeforeSuccess = 0;
   public deferCaptures = false;
   public fullPageScreenshotThrows = false;
   public fullPageScreenshotErrorMessage = "UnknownVizError";
@@ -115,6 +120,9 @@ class FakeTab implements TabContents {
 
   public async executeJavaScript(code: string): Promise<unknown> {
     this.scripts.push(code);
+    if (code.includes("requestAnimationFrame") && this.paintDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.paintDelayMs));
+    }
     if (code.includes("document.body.innerText")) {
       return this.bodyText;
     }
@@ -161,14 +169,10 @@ class FakeTab implements TabContents {
     this.actions.push("reload");
   }
 
-  public async capturePage(options?: { stayHidden?: boolean }): Promise<TabImage> {
-    this.capturedViewports.push(options ?? {});
+  public async captureFrame(signal: AbortSignal): Promise<TabImage> {
+    this.capturedViewports.push(signal);
     this.actions.push("capture");
     this.resolveCaptureStartWaiters();
-    if (this.viewportCaptureFailuresBeforeSuccess > 0) {
-      this.viewportCaptureFailuresBeforeSuccess -= 1;
-      throw new Error(this.captureErrorMessage);
-    }
     if (this.captureThrows) {
       throw new Error(this.captureErrorMessage);
     }
@@ -227,6 +231,10 @@ class FakeTab implements TabContents {
 
   public sendInputEvent(event: IsolatedKeyboardInputEvent): void {
     this.inputEvents.push(event);
+  }
+
+  public async insertText(text: string): Promise<void> {
+    this.insertedText.push(text);
   }
 
   public waitForCaptureStart(count: number): Promise<void> {
@@ -425,6 +433,54 @@ function snapshotResult(nodes: FakeTab["snapshotNodes"]) {
 
 function containsScript(tab: FakeTab, ...parts: string[]): boolean {
   return tab.scripts.some((script) => parts.every((part) => script.includes(part)));
+}
+
+/**
+ * A browser whose tab runs the network script the host injects against `performance`, the way a
+ * page runs it, so the test sees what the script reads from Chromium's timing entries.
+ */
+function browserWithTimingEntries(entries: { resource: unknown[]; navigation: unknown[] }) {
+  const browser = new BrowserAutomationHarness();
+  const fakeAnswer = browser.tab.executeJavaScript.bind(browser.tab);
+  const page = createContext({
+    performance: {
+      getEntriesByType: (type: string) =>
+        type === "navigation" ? entries.navigation : entries.resource,
+    },
+  });
+  browser.tab.executeJavaScript = async (script: string) =>
+    script.includes("performance.getEntriesByType")
+      ? runInContext(script, page)
+      : fakeAnswer(script);
+  return browser;
+}
+
+/**
+ * Runs the script the host injects into a page the way Chromium runs it on a page whose Content
+ * Security Policy omits 'unsafe-eval': injected code runs, but code in the page cannot turn a
+ * string into code (eval, new Function). Node's vm refuses string code generation the same way.
+ */
+function pageRunningInjectedScripts(input: {
+  allowEval: boolean;
+  globals?: Record<string, unknown>;
+}) {
+  const page = createContext(
+    { document: { title: "Fixture" }, ...input.globals },
+    { codeGeneration: { strings: input.allowEval, wasm: input.allowEval } },
+  );
+  return (script: string): unknown => runInContext(script, page);
+}
+
+/** A browser whose tab runs the evaluate script in `page`; its other scripts keep the fake answers. */
+function browserEvaluatingIn(page: (script: string) => unknown) {
+  const browser = new BrowserAutomationHarness();
+  const fakeAnswer = browser.tab.executeJavaScript.bind(browser.tab);
+  browser.tab.executeJavaScript = async (script: string) => {
+    if (!script.includes("__PASEO_BROWSER_EVALUATE__")) return fakeAnswer(script);
+    browser.tab.scripts.push(script);
+    return page(script);
+  };
+  return browser;
 }
 
 function requireSnapshotRefs(result: Awaited<ReturnType<BrowserAutomationHarness["snapshot"]>>) {
@@ -1102,15 +1158,29 @@ describe("executeAutomationCommand", () => {
       ok: true,
       result: { command: "type", browserId: BROWSER_A, ref: "@e1", x: 40, y: 30 },
     });
-    expect(browser.tab.debugCommands.at(-1)).toEqual({
-      command: "Input.insertText",
-      params: { text: "Ada" },
-    });
-    expect(browser.tab.debugCommands.slice(0, 3).map((entry) => entry.command)).toEqual([
+    expect(browser.tab.insertedText).toEqual(["Ada"]);
+    expect(browser.tab.debugCommands.map((entry) => entry.command)).toEqual([
       "Input.dispatchMouseEvent",
       "Input.dispatchMouseEvent",
       "Input.dispatchMouseEvent",
     ]);
+  });
+
+  test("type inserts text through the tab, not the window-wide debugger input", async () => {
+    const browser = new BrowserAutomationHarness();
+
+    const action = await browser.execute({
+      command: "type",
+      args: { browserId: BROWSER_A, text: "Ada" },
+    });
+
+    expect(action).toEqual({
+      requestId: "req-type",
+      ok: true,
+      result: { command: "type", browserId: BROWSER_A },
+    });
+    expect(browser.tab.insertedText).toEqual(["Ada"]);
+    expect(browser.tab.debugCommands).toEqual([]);
   });
 
   test("keypress dispatches a trusted key to the focused element when ref is omitted", async () => {
@@ -1385,6 +1455,72 @@ describe("executeAutomationCommand", () => {
     });
   });
 
+  test("logs reports the HTTP status the browser recorded, and none it did not", async () => {
+    const timing = (name: string, initiatorType: string, responseStatus?: number) => ({
+      name,
+      initiatorType,
+      startTime: 1,
+      duration: 2,
+      transferSize: 3,
+      ...(responseStatus === undefined ? {} : { responseStatus }),
+    });
+    const browser = browserWithTimingEntries({
+      resource: [
+        timing("https://a.test/api/orders", "fetch", 404),
+        // Chromium reports 0 for a cross-origin response that sends no Timing-Allow-Origin.
+        timing("https://cdn.test/lib.js", "script", 0),
+        // A browser without the field.
+        timing("https://a.test/old.css", "css"),
+      ],
+      navigation: [timing("https://a.test/form", "navigation", 200)],
+    });
+
+    const result = await browser.execute({ command: "logs", args: { browserId: BROWSER_A } });
+
+    expect(result).toEqual({
+      requestId: "req-logs",
+      ok: true,
+      result: {
+        command: "logs",
+        browserId: BROWSER_A,
+        console: [],
+        network: [
+          {
+            url: "https://a.test/api/orders",
+            type: "fetch",
+            status: 404,
+            startTime: 1,
+            duration: 2,
+            transferSize: 3,
+          },
+          {
+            url: "https://cdn.test/lib.js",
+            type: "script",
+            startTime: 1,
+            duration: 2,
+            transferSize: 3,
+          },
+          {
+            url: "https://a.test/old.css",
+            type: "css",
+            startTime: 1,
+            duration: 2,
+            transferSize: 3,
+          },
+          {
+            url: "https://a.test/form",
+            method: "GET",
+            type: "navigation",
+            status: 200,
+            startTime: 1,
+            duration: 2,
+            transferSize: 3,
+          },
+        ],
+      },
+    });
+  });
+
   test("evaluate returns primitive JSON from the page context", async () => {
     const browser = new BrowserAutomationHarness();
     browser.tab.evaluateScriptResult = { ok: true, resultJson: "42" };
@@ -1537,6 +1673,99 @@ describe("executeAutomationCommand", () => {
     expect(containsScript(browser.tab, "resultJson.slice(0, 79000)")).toBe(true);
   });
 
+  describe.each([
+    { page: "allows eval", allowEval: true },
+    { page: "forbids eval (its Content Security Policy omits 'unsafe-eval')", allowEval: false },
+  ])("evaluate on a page that $page", ({ allowEval }) => {
+    const evaluate = (browser: BrowserAutomationHarness, source: string) =>
+      browser.execute({
+        command: "evaluate",
+        args: { browserId: BROWSER_A, function: source },
+      });
+
+    test("runs the function and returns its result as JSON", async () => {
+      const browser = browserEvaluatingIn(pageRunningInjectedScripts({ allowEval }));
+
+      expect(await evaluate(browser, "() => document.title")).toEqual({
+        requestId: "req-evaluate",
+        ok: true,
+        result: {
+          command: "evaluate",
+          browserId: BROWSER_A,
+          resultJson: '"Fixture"',
+          truncated: false,
+        },
+      });
+    });
+
+    test("awaits an async function", async () => {
+      const browser = browserEvaluatingIn(pageRunningInjectedScripts({ allowEval }));
+
+      const result = await evaluate(
+        browser,
+        "async () => { await Promise.resolve(); return 6 * 7; }",
+      );
+
+      expect(result).toMatchObject({ ok: true, result: { resultJson: "42" } });
+    });
+
+    test("resolves names against the page's globals, never the wrapper's own", async () => {
+      const globals = {
+        element: "page element",
+        args: "page args",
+        value: "page value",
+        resultJson: "page json",
+        userFunction: "page function",
+        __paseoEvaluate: "page wrapper",
+        readFunction: "page reader",
+      };
+      const browser = browserEvaluatingIn(pageRunningInjectedScripts({ allowEval, globals }));
+
+      const result = await evaluate(
+        browser,
+        "() => [element, args, value, resultJson, userFunction, __paseoEvaluate, readFunction]",
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        result: { resultJson: JSON.stringify(Object.values(globals)) },
+      });
+    });
+
+    test("reports what the function throws", async () => {
+      const browser = browserEvaluatingIn(pageRunningInjectedScripts({ allowEval }));
+
+      expect(await evaluate(browser, "() => { throw new Error('boom'); }")).toMatchObject({
+        ok: false,
+        error: { code: "browser_unknown_error", message: "boom" },
+      });
+    });
+
+    test("reports an expression that is not a function", async () => {
+      const browser = browserEvaluatingIn(pageRunningInjectedScripts({ allowEval }));
+
+      expect(await evaluate(browser, "document.title")).toMatchObject({
+        ok: false,
+        error: {
+          code: "browser_unknown_error",
+          message: "browser_evaluate input must evaluate to a function.",
+        },
+      });
+    });
+
+    test("reports a syntax error with the compiler's own message, without touching the page", async () => {
+      const browser = browserEvaluatingIn(pageRunningInjectedScripts({ allowEval }));
+
+      const result = await evaluate(browser, "() => {");
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: "browser_unknown_error", message: expect.stringMatching(/^Unexpected /) },
+      });
+      expect(containsScript(browser.tab, "__PASEO_BROWSER_EVALUATE__")).toBe(false);
+    });
+  });
+
   test("screenshot captures the painted viewport", async () => {
     const browser = new BrowserAutomationHarness();
 
@@ -1557,7 +1786,8 @@ describe("executeAutomationCommand", () => {
         height: 480,
       },
     });
-    expect(browser.tab.capturedViewports).toEqual([{ stayHidden: false }]);
+    expect(browser.tab.capturedViewports).toHaveLength(1);
+    expect(browser.tab.capturedViewports[0].aborted).toBe(true);
     expect(browser.tab.actions).toEqual(["invalidate", "capture"]);
   });
 
@@ -1583,6 +1813,32 @@ describe("executeAutomationCommand", () => {
         },
       });
       expect(browser.tab.actions).toEqual(["invalidate", "capture"]);
+      expect(browser.tab.capturedViewports[0].aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("paint and pixel capture share the five-second screenshot budget", async () => {
+    vi.useFakeTimers();
+    try {
+      const browser = new BrowserAutomationHarness();
+      browser.tab.paintDelayMs = 4_000;
+      browser.tab.captureNeverPaints = true;
+      let result: unknown;
+      void browser
+        .execute({
+          command: "screenshot",
+          args: { browserId: BROWSER_A },
+        })
+        .then((value) => {
+          result = value;
+          return value;
+        });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(result).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(result).toMatchObject({ ok: false, error: { code: "screenshot_no_frame" } });
     } finally {
       vi.useRealTimers();
     }
@@ -1600,76 +1856,6 @@ describe("executeAutomationCommand", () => {
     ).rejects.toThrow("capture failed");
 
     expect(browser.tab.actions).toEqual(["invalidate", "capture"]);
-  });
-
-  test("screenshot retries UnknownVizError until the first viewport frame appears", async () => {
-    vi.useFakeTimers();
-    try {
-      const browser = new BrowserAutomationHarness();
-      browser.tab.captureErrorMessage = "UnknownVizError";
-      browser.tab.viewportCaptureFailuresBeforeSuccess = 2;
-
-      const resultPromise = browser.execute({
-        command: "screenshot",
-        args: { browserId: BROWSER_A },
-      });
-      await vi.advanceTimersByTimeAsync(400);
-
-      await expect(resultPromise).resolves.toEqual({
-        requestId: "req-screenshot",
-        ok: true,
-        result: {
-          command: "screenshot",
-          browserId: BROWSER_A,
-          mimeType: "image/png",
-          dataBase64: "iVBORwECAw==",
-          width: 640,
-          height: 480,
-        },
-      });
-      expect(browser.tab.capturedViewports).toHaveLength(3);
-      expect(browser.tab.actions).toEqual([
-        "invalidate",
-        "capture",
-        "invalidate",
-        "capture",
-        "invalidate",
-        "capture",
-      ]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  test("screenshot returns no-frame after UnknownVizError spends the retry budget", async () => {
-    vi.useFakeTimers();
-    try {
-      const browser = new BrowserAutomationHarness();
-      browser.tab.captureThrows = true;
-      browser.tab.captureErrorMessage = "UnknownVizError";
-
-      const resultPromise = browser.execute({
-        command: "screenshot",
-        args: { browserId: BROWSER_A },
-      });
-      await vi.advanceTimersByTimeAsync(5_000);
-
-      await expect(resultPromise).resolves.toEqual({
-        requestId: "req-screenshot",
-        ok: false,
-        error: {
-          code: "screenshot_no_frame",
-          message: "The tab has not painted yet. Retry the screenshot.",
-          retryable: true,
-        },
-      });
-      expect(browser.tab.capturedViewports.length).toBeGreaterThan(1);
-      expect(browser.tab.actions.filter((action) => action === "invalidate")).toHaveLength(
-        browser.tab.capturedViewports.length,
-      );
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   test("overlapping screenshots serialize through the shared capture queue", async () => {

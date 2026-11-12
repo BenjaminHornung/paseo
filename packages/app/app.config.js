@@ -1,9 +1,19 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const pkg = require("./package.json");
+const withAndroidAsyncStorageSize = require("./plugins/with-android-async-storage-size");
+const withAndroidOptionalCamera = require("./plugins/with-android-optional-camera");
+const withAndroidProfileable = require("./plugins/with-android-profileable");
 const withFdroidAutolinking = require("./plugins/with-fdroid-autolinking");
+const withPasteInput = require("./plugins/with-paste-input");
+const withAndroidScroll = require("./modules/paseo-scroll/app.plugin");
+const { getNativeReleaseVersion } = require("./native-release-version");
 const appVariant = process.env.APP_VARIANT ?? "production";
+const isAdvancedDistribution = process.env.EXPO_PUBLIC_PASEO_DISTRIBUTION === "advanced";
+const imageDirectory = isAdvancedDistribution ? "./assets/images/advanced" : "./assets/images";
 const isFdroidBuild = process.env.PASEO_FDROID_BUILD === "1";
+const isWatchdogBuild = process.env.PASEO_WATCHDOG_BUILD === "1";
+const isProfileBuild = process.env.PASEO_PROFILE_BUILD === "1";
 
 const buildProfile = isFdroidBuild
   ? {
@@ -15,7 +25,6 @@ const buildProfile = isFdroidBuild
       cameraPlugins: [],
       fdroidPlugins: [withFdroidAutolinking],
       notificationPlugins: [],
-      updates: { enabled: false },
     }
   : {
       androidPermissions: [
@@ -39,37 +48,12 @@ const buildProfile = isFdroidBuild
         [
           "expo-notifications",
           {
-            icon: "./assets/images/notification-icon.png",
+            icon: `${imageDirectory}/notification-icon.png`,
             color: "#20744A",
           },
         ],
       ],
-      updates: {},
     };
-
-function getNativeBuildVersionCode(version) {
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(version);
-  if (!match) {
-    throw new Error(`Cannot derive Android versionCode from non-semver version: ${version}`);
-  }
-
-  const [, majorText, minorText, patchText] = match;
-  const major = Number(majorText);
-  const minor = Number(minorText);
-  const patch = Number(patchText);
-
-  if (minor > 999 || patch > 999) {
-    throw new Error(`Cannot derive collision-free Android versionCode from version: ${version}`);
-  }
-
-  const versionCode = major * 1_000_000 + minor * 1_000 + patch;
-
-  if (!Number.isSafeInteger(versionCode) || versionCode <= 0 || versionCode > 2_100_000_000) {
-    throw new Error(`Derived Android versionCode is out of range: ${versionCode}`);
-  }
-
-  return versionCode;
-}
 
 function resolveSecretFile(params) {
   const fromEnv = process.env[params.envKey];
@@ -113,25 +97,18 @@ const variants = {
 };
 
 const variant = variants[appVariant] ?? variants.production;
-const nativeBuildVersionCode = getNativeBuildVersionCode(pkg.version);
+const nativeReleaseVersion = getNativeReleaseVersion(pkg.version);
 
 export default {
   expo: {
-    name: variant.name,
+    name: isAdvancedDistribution ? "Paseo Advanced" : variant.name,
     slug: "voice-mobile",
-    version: pkg.version,
-    orientation: "portrait",
-    icon: "./assets/images/icon.png",
+    version: nativeReleaseVersion.appVersion,
+    orientation: "default",
+    icon: `${imageDirectory}/icon.png`,
     scheme: "paseo",
     userInterfaceStyle: "automatic",
     newArchEnabled: true,
-    runtimeVersion: {
-      policy: "appVersion",
-    },
-    updates: {
-      url: "https://u.expo.dev/0e7f65ce-0367-46c8-a238-2b65963d235a",
-      ...buildProfile.updates,
-    },
     ios: {
       supportsTablet: true,
       infoPlist: {
@@ -142,12 +119,12 @@ export default {
       ...(variant.googleServiceInfoPlist
         ? { googleServicesFile: variant.googleServiceInfoPlist }
         : {}),
-      buildNumber: String(nativeBuildVersionCode),
+      buildNumber: nativeReleaseVersion.iosBuildNumber,
     },
     android: {
       adaptiveIcon: {
-        backgroundColor: "#000000",
-        foregroundImage: "./assets/images/android-icon-foreground.png",
+        backgroundColor: isAdvancedDistribution ? "#C2410C" : "#000000",
+        foregroundImage: `${imageDirectory}/android-icon-foreground.png`,
       },
       edgeToEdgeEnabled: true,
       predictiveBackGestureEnabled: false,
@@ -156,23 +133,28 @@ export default {
       usesCleartextTraffic: true,
       permissions: buildProfile.androidPermissions,
       package: variant.packageId,
-      versionCode: nativeBuildVersionCode,
+      versionCode: nativeReleaseVersion.androidVersionCode,
       ...(variant.googleServicesFile ? { googleServicesFile: variant.googleServicesFile } : {}),
     },
     web: {
       output: "single",
-      favicon: "./assets/images/favicon.png",
+      favicon: `${imageDirectory}/favicon.png`,
     },
     autolinking: {
       searchPaths: ["../../node_modules", "./node_modules"],
     },
     plugins: [
+      "./modules/paseo-hardware-keyboard/app.plugin",
       "expo-router",
+      withPasteInput,
+      withAndroidScroll,
+      [withAndroidAsyncStorageSize, 64],
       ...buildProfile.cameraPlugins,
+      withAndroidOptionalCamera,
       [
         "expo-splash-screen",
         {
-          image: "./assets/images/splash-icon.png",
+          image: `${imageDirectory}/splash-icon.png`,
           imageWidth: 200,
           resizeMode: "contain",
           backgroundColor: "#ffffff",
@@ -193,6 +175,7 @@ export default {
       [
         "expo-build-properties",
         {
+          ios: { enableSceneSupport: true },
           android: {
             minSdkVersion: 29,
             kotlinVersion: "2.1.20",
@@ -202,6 +185,7 @@ export default {
         },
       ],
       ...buildProfile.fdroidPlugins,
+      ...(isProfileBuild || isWatchdogBuild ? [withAndroidProfileable] : []),
     ],
     experiments: {
       typedRoutes: true,
@@ -210,6 +194,10 @@ export default {
     },
     extra: {
       fdroidBuild: isFdroidBuild,
+      profileBuild: isProfileBuild,
+      watchdogBuild: isWatchdogBuild,
+      diagnosticRevision: process.env.PASEO_DIAGNOSTIC_REVISION,
+      diagnosticBuildTime: process.env.PASEO_DIAGNOSTIC_BUILD_TIME,
       router: {},
       eas: {
         projectId: "0e7f65ce-0367-46c8-a238-2b65963d235a",

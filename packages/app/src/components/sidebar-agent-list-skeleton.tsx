@@ -1,23 +1,16 @@
-import { useEffect, useMemo, useRef } from "react";
-import { Animated, View, type StyleProp, type ViewStyle } from "react-native";
+import { useMemo } from "react";
+import { Animated, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
+import { projectIconRadius } from "@/components/project-icon-view";
+import { SkeletonPulse, useSkeletonPulse } from "@/components/ui/skeleton";
+
+const PROJECT_ICON_SIZE = 16;
 
 const SECTION_OPACITIES: readonly number[] = [1, 0.7, 0.4];
 const SECTION_KEYS = SECTION_OPACITIES.map((_, i) => `skeleton-section-${i}`);
 const ROW_KEYS_BY_SECTION: readonly (readonly string[])[] = SECTION_OPACITIES.map((_, sIdx) =>
   [0, 1, 2].map((r) => `skeleton-row-${sIdx}-${r}`),
 );
-
-function SkeletonPulse({ pulse, style }: { pulse: Animated.Value; style: StyleProp<ViewStyle> }) {
-  const opacity = pulse.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.4, 0.8],
-  });
-
-  const pulseStyle = useMemo(() => [style, { opacity }], [style, opacity]);
-
-  return <Animated.View style={pulseStyle} />;
-}
 
 function SkeletonSection({
   pulse,
@@ -54,27 +47,7 @@ function SkeletonSection({
 }
 
 export function SidebarAgentListSkeleton() {
-  const pulse = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    const animation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, {
-          toValue: 1,
-          duration: 1000,
-          useNativeDriver: true,
-        }),
-        Animated.timing(pulse, {
-          toValue: 0,
-          duration: 1000,
-          useNativeDriver: true,
-        }),
-      ]),
-    );
-
-    animation.start();
-    return () => animation.stop();
-  }, [pulse]);
+  const pulse = useSkeletonPulse();
 
   return (
     <View style={styles.container}>
@@ -116,9 +89,10 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface2,
   },
   projectIcon: {
-    width: 16,
-    height: 16,
-    borderRadius: theme.borderRadius.sm,
+    width: PROJECT_ICON_SIZE,
+    height: PROJECT_ICON_SIZE,
+    // Matches the real icon it stands in for, so the skeleton doesn't change shape on load.
+    borderRadius: projectIconRadius(PROJECT_ICON_SIZE),
     backgroundColor: theme.colors.surface2,
   },
   sectionTitle: {

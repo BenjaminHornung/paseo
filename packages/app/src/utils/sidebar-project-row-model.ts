@@ -1,8 +1,12 @@
 import type { SidebarProjectEntry } from "@/hooks/use-sidebar-workspaces-list";
+import { createProjectIconTarget, type ProjectIconTarget } from "@/projects/icon-target";
 
 export interface SidebarProjectHostTarget {
   serverId: string;
+  projectId: string;
   iconWorkingDir: string;
+  customIconRevision?: string | null;
+  iconRevision?: string;
 }
 
 export type SidebarProjectTrailingAction =
@@ -18,16 +22,24 @@ export interface SidebarProjectSectionRowModel {
 export type SidebarProjectRowModel = SidebarProjectSectionRowModel;
 
 const EMPTY_MULTIPLICITY_MAP: ReadonlyMap<string, boolean> = new Map();
-
 function hostTarget(input: {
   serverId: string;
+  projectId: string;
   iconWorkingDir: string;
+  customIconRevision?: string | null;
+  iconRevision?: string;
 }): SidebarProjectHostTarget | null {
   const iconWorkingDir = input.iconWorkingDir.trim();
   if (!input.serverId || !iconWorkingDir) {
     return null;
   }
-  return { serverId: input.serverId, iconWorkingDir };
+  return {
+    serverId: input.serverId,
+    projectId: input.projectId,
+    iconWorkingDir,
+    customIconRevision: input.customIconRevision,
+    iconRevision: input.iconRevision,
+  };
 }
 
 export function resolveSidebarProjectIconTarget(
@@ -42,6 +54,28 @@ export function resolveSidebarProjectIconTarget(
   return null;
 }
 
+export type SidebarProjectIconTarget = ProjectIconTarget;
+
+export function resolveSidebarProjectIconTargets(
+  projects: readonly SidebarProjectEntry[],
+): SidebarProjectIconTarget[] {
+  return projects.flatMap((project) => {
+    const target = resolveSidebarProjectIconTarget(project);
+    const iconTarget = target
+      ? createProjectIconTarget({ projectViewKey: project.viewKey, placement: target })
+      : null;
+    return iconTarget ? [iconTarget] : [];
+  });
+}
+
+export function resolveSidebarProjectLocalPath(
+  project: SidebarProjectEntry,
+  localServerId: string | null,
+): string {
+  if (!localServerId) return "";
+  return project.hosts.find((host) => host.serverId === localServerId)?.iconWorkingDir.trim() ?? "";
+}
+
 // A project can host a brand-new workspace on a host when that host can create a
 // git worktree (git projects) OR the host supports running multiple independent
 // workspaces per directory (`workspaceMultiplicity`), which is what lets non-git
@@ -51,30 +85,41 @@ export function resolveSidebarProjectIconTarget(
 function resolveNewWorkspaceTarget(
   project: SidebarProjectEntry,
   supportsMultiplicityByServerId: ReadonlyMap<string, boolean>,
+  preferredServerId: string | null | undefined,
 ): SidebarProjectHostTarget | null {
+  let fallbackTarget: SidebarProjectHostTarget | null = null;
   for (const host of project.hosts) {
-    if (!host.canCreateWorktree && !supportsMultiplicityByServerId.get(host.serverId)) {
+    if (
+      host.worktreeSupport === "unsupported" &&
+      !supportsMultiplicityByServerId.get(host.serverId)
+    ) {
       continue;
     }
     const target = hostTarget(host);
-    if (target) {
-      return target;
-    }
+    if (!target) continue;
+    if (host.serverId === preferredServerId) return target;
+    fallbackTarget ??= target;
   }
-  return null;
+  return fallbackTarget;
 }
 
 function projectTrailingAction(
   project: SidebarProjectEntry,
   supportsMultiplicityByServerId: ReadonlyMap<string, boolean>,
+  preferredServerId: string | null | undefined,
 ): SidebarProjectTrailingAction {
-  const target = resolveNewWorkspaceTarget(project, supportsMultiplicityByServerId);
+  const target = resolveNewWorkspaceTarget(
+    project,
+    supportsMultiplicityByServerId,
+    preferredServerId,
+  );
   return target ? { kind: "new_workspace", target } : { kind: "none" };
 }
 
 export function buildSidebarProjectRowModel(input: {
   project: SidebarProjectEntry;
   collapsed: boolean;
+  preferredServerId?: string | null;
   supportsMultiplicityByServerId?: ReadonlyMap<string, boolean>;
 }): SidebarProjectRowModel {
   return {
@@ -83,6 +128,7 @@ export function buildSidebarProjectRowModel(input: {
     trailingAction: projectTrailingAction(
       input.project,
       input.supportsMultiplicityByServerId ?? EMPTY_MULTIPLICITY_MAP,
+      input.preferredServerId,
     ),
   };
 }

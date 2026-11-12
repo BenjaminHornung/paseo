@@ -1,13 +1,145 @@
 import { describe, expect, it } from "vitest";
 import {
+  resolveDesktopDivisionLayout,
+  resolveWorkspaceActionPlacement,
+  resolveWorkspaceBarActions,
+  type WindowLayout,
+} from "@/window-layout";
+import {
   canDesktopAppSidebarShare,
   resolveDesktopAppChromeLayout,
   resolveDesktopAppContentMinimum,
-  resolveDesktopExplorerWidth,
+  resolveDesktopSidebarInsetLeft,
+  resolveDesktopSidebarVisibility,
+  resolveSidebarActivity,
   resolveDesktopSidebarWidth,
+  resolveLeftSidebarPresentation,
 } from "@/components/desktop-sidebar-layout";
 
 describe("desktop sidebar layout", () => {
+  const geometry: WindowLayout = {
+    bounds: { x: 0, y: 0, width: 951, height: 669 },
+    verticalBarEdge: "trailing",
+    verticalBar: { x: 875, y: 160, width: 44, height: 450 },
+    divisions: [{ x: 465, y: 0, width: 21, height: 669 }],
+  };
+
+  it("places workspace action symbols in the reported trailing bar", () => {
+    expect(resolveWorkspaceActionPlacement(geometry)).toBe("vertical-bar");
+    expect(resolveWorkspaceActionPlacement(null)).toBe("header");
+    expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBarEdge: "none" })).toBe(
+      "header",
+    );
+    expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBar: null })).toBe("header");
+    expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBarEdge: "leading" })).toBe(
+      "header",
+    );
+  });
+
+  it("shows the tab count only for the compact header selection", () => {
+    expect(resolveWorkspaceBarActions("compact")).toEqual(["tab-count", "overflow", "explorer"]);
+    expect(resolveWorkspaceBarActions("full")).toEqual(["overflow", "explorer"]);
+  });
+
+  it("allocates both panels around a live division without clamping to saved sidebar widths", () => {
+    const input = {
+      geometry,
+      windowWidth: 951,
+      windowHeight: 669,
+      leftInset: 0,
+      rightInset: 84,
+    };
+    expect(resolveDesktopDivisionLayout(input)).toEqual({
+      sidebarWidth: 465,
+      gap: 21,
+      contentWidth: 381,
+    });
+    expect(
+      resolveDesktopDivisionLayout({ ...input, geometry: { ...geometry, divisions: [] } }),
+    ).toBeNull();
+    expect(
+      resolveDesktopDivisionLayout({ ...input, windowWidth: 669, windowHeight: 951 }),
+    ).toBeNull();
+    expect(resolveDesktopDivisionLayout({ ...input, geometry: null })).toBeNull();
+    expect(
+      resolveDesktopDivisionLayout({
+        ...input,
+        geometry: { ...geometry, divisions: [{ x: 0, y: 325, width: 951, height: 19 }] },
+      }),
+    ).toBeNull();
+  });
+
+  it("activates a revealed folded sidebar while preserving closed desktop intent", () => {
+    expect(resolveSidebarActivity(true, false, false)).toBe(true);
+    expect(resolveSidebarActivity(false, false, false)).toBe(false);
+    expect(resolveSidebarActivity(true, true, false)).toBe(false);
+    expect(resolveSidebarActivity(true, true, true)).toBe(true);
+  });
+
+  it("temporarily reveals navigation for a division without changing the saved closed intent", () => {
+    const visibility = {
+      chromeEnabled: true,
+      isCompactLayout: false,
+      isMounted: true,
+      isOpen: false,
+      canShare: false,
+    };
+    expect(
+      resolveDesktopSidebarVisibility({
+        ...visibility,
+        divisionLayout: { sidebarWidth: 465, gap: 21, contentWidth: 381 },
+      }),
+    ).toBe(true);
+    expect(resolveDesktopSidebarVisibility({ ...visibility, divisionLayout: null })).toBe(false);
+    expect(visibility.isOpen).toBe(false);
+  });
+
+  it("keeps a retained sidebar hidden while app chrome is suppressed", () => {
+    expect(
+      resolveDesktopSidebarVisibility({
+        chromeEnabled: false,
+        isCompactLayout: false,
+        isMounted: true,
+        isOpen: true,
+        canShare: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("offers an overlay only after wide navigation yields its dock", () => {
+    const input = {
+      chromeEnabled: true,
+      isCompactLayout: false,
+      isFocusModeEnabled: false,
+    };
+    expect(resolveLeftSidebarPresentation({ ...input, desktopSidebarVisible: true })).toBe("dock");
+    expect(resolveLeftSidebarPresentation({ ...input, desktopSidebarVisible: false })).toBe(
+      "overlay",
+    );
+  });
+
+  it("does not reveal navigation over a focused workspace or suppressed chrome", () => {
+    const input = {
+      chromeEnabled: true,
+      isCompactLayout: false,
+      isFocusModeEnabled: false,
+      desktopSidebarVisible: false,
+    };
+    expect(resolveLeftSidebarPresentation({ ...input, isFocusModeEnabled: true })).toBe("hidden");
+    expect(resolveLeftSidebarPresentation({ ...input, chromeEnabled: false })).toBe("hidden");
+  });
+
+  it("keeps phone navigation available independently of saved wide focus mode", () => {
+    expect(
+      resolveLeftSidebarPresentation({
+        chromeEnabled: true,
+        isCompactLayout: true,
+        isFocusModeEnabled: true,
+        desktopSidebarVisible: false,
+      }),
+    ).toBe("overlay");
+  });
+
   it("keeps the sidebar toggle window-owned beside left window controls", () => {
     expect(
       resolveDesktopAppChromeLayout({
@@ -66,18 +198,8 @@ describe("desktop sidebar layout", () => {
     expect(resolveDesktopSidebarWidth({ requestedWidth: 600, viewportWidth: 1440 })).toBe(600);
   });
 
-  it("keeps a temporarily narrow explorer render-only", () => {
-    expect(resolveDesktopExplorerWidth({ requestedWidth: 400, viewportWidth: 751 })).toBe(351);
-    expect(resolveDesktopExplorerWidth({ requestedWidth: 400, viewportWidth: 1440 })).toBe(400);
-  });
-
-  it("yields app navigation when settings or Explorer need the shell width", () => {
-    const settingsMinimum = resolveDesktopAppContentMinimum({
-      isSettingsRoute: true,
-      isWorkspaceExplorerOpen: false,
-      requestedExplorerWidth: 400,
-      viewportWidth: 751,
-    });
+  it("yields app navigation when settings needs the shell width", () => {
+    const settingsMinimum = resolveDesktopAppContentMinimum({ isSettingsRoute: true });
     expect(settingsMinimum).toBe(720);
     expect(
       canDesktopAppSidebarShare({
@@ -86,32 +208,43 @@ describe("desktop sidebar layout", () => {
         viewportWidth: 751,
       }),
     ).toBe(false);
+  });
 
-    const explorerMinimum = resolveDesktopAppContentMinimum({
-      isSettingsRoute: false,
-      isWorkspaceExplorerOpen: true,
-      requestedExplorerWidth: 400,
-      viewportWidth: 751,
-    });
-    expect(explorerMinimum).toBe(751);
+  it("imposes no content minimum outside settings", () => {
+    expect(resolveDesktopAppContentMinimum({ isSettingsRoute: false })).toBe(0);
     expect(
       canDesktopAppSidebarShare({
-        contentMinimumWidth: explorerMinimum,
+        contentMinimumWidth: resolveDesktopAppContentMinimum({ isSettingsRoute: false }),
         requestedSidebarWidth: 320,
         viewportWidth: 751,
       }),
-    ).toBe(false);
-    expect(
-      canDesktopAppSidebarShare({
-        contentMinimumWidth: resolveDesktopAppContentMinimum({
-          isSettingsRoute: false,
-          isWorkspaceExplorerOpen: true,
-          requestedExplorerWidth: 400,
-          viewportWidth: 1120,
-        }),
-        requestedSidebarWidth: 320,
-        viewportWidth: 1120,
-      }),
     ).toBe(true);
   });
+});
+
+it("reserves room for Explorer and the workspace before showing app navigation", () => {
+  const contentMinimumWidth = resolveDesktopAppContentMinimum({
+    isSettingsRoute: false,
+    explorerVisible: true,
+  });
+  expect(contentMinimumWidth).toBe(600);
+  expect(
+    canDesktopAppSidebarShare({
+      contentMinimumWidth,
+      requestedSidebarWidth: 320,
+      viewportWidth: 744,
+    }),
+  ).toBe(false);
+  expect(
+    canDesktopAppSidebarShare({
+      contentMinimumWidth,
+      requestedSidebarWidth: 320,
+      viewportWidth: 951,
+    }),
+  ).toBe(true);
+});
+
+it("insets an overlay sidebar's content by the left safe area and leaves the dock to app chrome", () => {
+  expect(resolveDesktopSidebarInsetLeft({ overlay: true, safeAreaLeft: 20 })).toBe(20);
+  expect(resolveDesktopSidebarInsetLeft({ overlay: false, safeAreaLeft: 20 })).toBe(0);
 });

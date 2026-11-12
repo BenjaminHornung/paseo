@@ -1,0 +1,25 @@
+{
+  "name": "@paseo-advanced/orchestrator",
+  "version": "1.16.0-beta.2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.ts",
+    "typecheck": "tsgo --noEmit && tsgo --noEmit -p paseo-plugin/tsconfig.json",
+    "build": "node scripts/build.mjs",
+    "doctor": "node src/cli.ts doctor"
+  },
+  "dependencies": {
+    "@getpaseo/client": "0.16.0-beta.2",
+    "proper-lockfile": "4.1.2",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.6.0",
+    "@types/proper-lockfile": "4.1.4",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

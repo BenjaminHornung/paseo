@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonClientConfig } from "@getpaseo/client/internal/daemon-client";
+import { DaemonAuthenticationError } from "@getpaseo/client/internal/daemon-client";
 import type { DaemonConnectionDependencies, DaemonProbeClient } from "./test-daemon-connection";
+import { createHostLogger } from "@/runtime/host-logger";
 
 class FakeDaemonClient implements DaemonProbeClient {
   readonly lastError: string | null;
+  private connected = false;
 
   constructor(
     private readonly probe: FakeDaemonProbe,
@@ -16,9 +19,11 @@ class FakeDaemonClient implements DaemonProbeClient {
     if (this.probe.nextConnectError) {
       throw this.probe.nextConnectError;
     }
+    this.connected = true;
   }
 
   getLastServerInfoMessage() {
+    if (!this.connected) return null;
     return {
       serverId: "srv_probe_test",
       hostname: "probe-host",
@@ -26,11 +31,13 @@ class FakeDaemonClient implements DaemonProbeClient {
   }
 
   async close(): Promise<void> {
+    this.connected = false;
     this.probe.closedClients.push(this);
   }
 }
 
 class FakeDaemonProbe {
+  diagnosticLines: string[] = [];
   createdClients: FakeDaemonClient[] = [];
   closedClients: FakeDaemonClient[] = [];
   clientIdsRequested = 0;
@@ -38,14 +45,24 @@ class FakeDaemonProbe {
   nextLastError: string | null = null;
 
   readonly deps: DaemonConnectionDependencies<FakeDaemonClient> = {
+    createLogger: (readServerId) => {
+      const capture = (...values: unknown[]) => {
+        this.diagnosticLines.push(values.map(String).join(" "));
+      };
+      return createHostLogger(readServerId, { log: capture, warn: capture, error: capture });
+    },
     getClientId: async () => {
       this.clientIdsRequested += 1;
       return "cid_shared_probe_test";
     },
     resolveAppVersion: () => null,
-    createLocalTransportFactory: () => null,
-    buildLocalTransportUrl: ({ transportType, transportPath }) =>
-      `paseo+local://${transportType}?path=${encodeURIComponent(transportPath)}`,
+    createDesktopTransportFactory: () => null,
+    buildDesktopTransportUrl: (target) => {
+      if (target.transportType === "ssh") {
+        return `paseo+desktop://ssh?host=${encodeURIComponent(target.host)}`;
+      }
+      return `paseo+desktop://${target.transportType}?path=${encodeURIComponent(target.transportPath)}`;
+    },
     createClient: (config) => {
       const client = new FakeDaemonClient(this, config);
       this.createdClients.push(client);
@@ -69,6 +86,53 @@ describe("test-daemon-connection connectToDaemon", () => {
   beforeEach(() => {
     vi.stubGlobal("__DEV__", false);
     probe = new FakeDaemonProbe();
+  });
+
+  it.each([undefined, "srv_probe_test"])(
+    "logs learned host identity on an adopted probe initially given %s",
+    async (serverId) => {
+      const { connectToDaemon } = await import("./test-daemon-connection");
+      const result = await connectToDaemon(
+        { id: "direct:test", type: "directTcp", endpoint: "localhost:6767" },
+        { serverId },
+        probe.deps,
+      );
+      try {
+        result.client.config.logger!.error({ err: new Error("socket closed") }, "connection_error");
+        const record = JSON.parse(probe.diagnosticLines[0]!.slice("connection_error ".length));
+        expect(record.serverId).toBe("srv_probe_test");
+        expect(record.err.message).toBe("socket closed");
+        await result.client.close();
+        expect(result.client.getLastServerInfoMessage()).toBeNull();
+        result.client.config.logger!.error({ err: new Error("disconnected") }, "connection_error");
+        const closedRecord = JSON.parse(
+          probe.diagnosticLines[1]!.slice("connection_error ".length),
+        );
+        expect(closedRecord.serverId).toBe("srv_probe_test");
+        expect(closedRecord.err.message).toBe("disconnected");
+      } finally {
+        await result.client.close();
+      }
+    },
+  );
+
+  it.each([
+    { id: "direct:lan:6767", type: "directTcp" as const, endpoint: "lan:6767" },
+    {
+      id: "relay:test",
+      type: "relay" as const,
+      relayEndpoint: "relay.paseo.sh:443",
+      daemonPublicKeyB64: "pubkey",
+    },
+  ])("adoptable $type probe clients use the app WebSocket factory", async (connection) => {
+    const { connectToDaemon } = await import("./test-daemon-connection");
+    const { createAppWebSocketFactory } = await import("@/runtime/websocket-factory");
+    const result = await connectToDaemon(connection, { serverId: "srv_probe_test" }, probe.deps);
+    try {
+      expect(result.client.config.webSocketFactory).toBe(createAppWebSocketFactory());
+    } finally {
+      await result.client.close();
+    }
   });
 
   it("reuses the app clientId for direct connections", async () => {
@@ -101,6 +165,46 @@ describe("test-daemon-connection connectToDaemon", () => {
     expect(probe.clientIdsRequested).toBe(2);
   });
 
+  it("keeps direct TCP probes on the renderer WebSocket", async () => {
+    const { connectToDaemon } = await import("./test-daemon-connection");
+    const deps = {
+      ...probe.deps,
+      createWebSocketTransportFactory: () => {
+        throw new Error("Direct TCP must not use the desktop WebSocket bridge");
+      },
+    };
+
+    const result = await connectToDaemon(
+      {
+        id: "direct:lan:6767",
+        type: "directTcp",
+        endpoint: "lan:6767",
+      },
+      undefined,
+      deps,
+    );
+    await result.client.close();
+
+    expect(probe.createdConfigs()[0]?.transportFactory).toBeUndefined();
+  });
+
+  it("keeps the bundle cache factory on a probe client that the host runtime can adopt", async () => {
+    const { connectToDaemon } = await import("./test-daemon-connection");
+    const createPluginClientBundleStore = () => ({
+      async load() {
+        return [];
+      },
+      async replace() {},
+    });
+    const { client } = await connectToDaemon(
+      { id: "direct:lan:6767", type: "directTcp", endpoint: "lan:6767" },
+      { createPluginClientBundleStore },
+      probe.deps,
+    );
+    expect(client.config.createPluginClientBundleStore).toBe(createPluginClientBundleStore);
+    await client.close();
+  });
+
   it("encodes the local socket target into the client config", async () => {
     const { connectToDaemon } = await import("./test-daemon-connection");
     const result = await connectToDaemon(
@@ -114,24 +218,69 @@ describe("test-daemon-connection connectToDaemon", () => {
     );
     await result.client.close();
 
-    expect(probe.createdConfigs()[0]?.url).toBe("paseo+local://socket?path=%2Ftmp%2Fpaseo.sock");
+    expect(probe.createdConfigs()[0]?.url).toBe("paseo+desktop://socket?path=%2Ftmp%2Fpaseo.sock");
   });
 
-  it("passes direct TCP connection passwords into the client config", async () => {
+  it("uses the desktop transport for Remote SSH connections", async () => {
+    const { connectToDaemon } = await import("./test-daemon-connection");
+    const transportFactory = vi.fn();
+    const result = await connectToDaemon(
+      {
+        id: "ssh:deploy%40example.com:2222:%2Fkeys%2Fpaseo",
+        type: "remoteSsh",
+        host: "deploy@example.com",
+        sshPort: 2222,
+        daemonPort: 7777,
+      },
+      undefined,
+      {
+        ...probe.deps,
+        createDesktopTransportFactory: () => transportFactory,
+      },
+    );
+    await result.client.close();
+
+    expect(probe.createdConfigs()[0]).toMatchObject({
+      url: "paseo+desktop://ssh?host=deploy%40example.com",
+      transportFactory,
+    });
+  });
+
+  it("passes the host password into the client config", async () => {
     const { connectToDaemon } = await import("./test-daemon-connection");
     const result = await connectToDaemon(
       {
         id: "direct:lan:6767",
         type: "directTcp",
         endpoint: "lan:6767",
-        password: "shared-secret",
       },
-      undefined,
+      { password: "shared-secret" },
       probe.deps,
     );
     await result.client.close();
 
     expect(probe.createdConfigs()[0]?.password).toBe("shared-secret");
+  });
+
+  it("passes performance tracing into the connected client", async () => {
+    const { connectToDaemon } = await import("./test-daemon-connection");
+    const trace = {
+      isEnabled: () => true,
+      beginSection: vi.fn(),
+      endSection: vi.fn(),
+    };
+    const result = await connectToDaemon(
+      {
+        id: "direct:lan:6767",
+        type: "directTcp",
+        endpoint: "lan:6767",
+      },
+      { trace },
+      probe.deps,
+    );
+    await result.client.close();
+
+    expect(probe.createdConfigs()[0]?.trace).toBe(trace);
   });
 
   it("uses relay TLS from the stored connection", async () => {
@@ -169,7 +318,7 @@ describe("test-daemon-connection connectToDaemon", () => {
   it("surfaces auth rejection as an incorrect password", async () => {
     const { connectToDaemon } = await import("./test-daemon-connection");
     probe.failNextConnection(
-      new Error("Transport closed (code 4001)"),
+      new DaemonAuthenticationError("incorrect_password"),
       "Transport closed (code 4001)",
     );
 
@@ -179,13 +328,13 @@ describe("test-daemon-connection connectToDaemon", () => {
           id: "direct:lan:6767",
           type: "directTcp",
           endpoint: "lan:6767",
-          password: "wrong-secret",
         },
-        undefined,
+        { password: "wrong-secret" },
         probe.deps,
       ),
     ).rejects.toMatchObject({
       message: "Incorrect password",
+      authFailureReason: "incorrect_password",
     });
   });
 
@@ -199,9 +348,8 @@ describe("test-daemon-connection connectToDaemon", () => {
           id: "direct:lan:6767",
           type: "directTcp",
           endpoint: "lan:6767",
-          password: "shared-secret",
         },
-        undefined,
+        { password: "shared-secret" },
         probe.deps,
       ),
     ).rejects.toMatchObject({

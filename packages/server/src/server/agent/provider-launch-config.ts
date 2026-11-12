@@ -3,7 +3,11 @@ import {
   executableExists,
   findExecutable,
 } from "../../executable-resolution/executable-resolution.js";
-import { createExternalProcessEnv, type ProcessEnvRecord } from "../paseo-env.js";
+import {
+  createExternalProcessEnv,
+  type ProcessEnvRecord,
+  type ExternalProcessEnv,
+} from "../paseo-env.js";
 export {
   AgentProviderRuntimeSettingsMapSchema,
   ProviderCommandSchema,
@@ -39,6 +43,7 @@ export interface ResolvedProviderLaunch {
   command: string;
   args: string[];
   source: ProviderLaunchSource;
+  env?: ProcessEnvRecord;
 }
 
 export interface ProviderLaunchAvailability {
@@ -51,6 +56,14 @@ export interface ProviderLaunchDefault {
   resolvePath?: () => Promise<string | null>;
 }
 
+/** Custom launchers can restore tools or run hooks before sampler restrictions apply. */
+export function supportsIsolatedTextGeneration(settings?: ProviderRuntimeSettings): boolean {
+  const command = settings?.command;
+  return (
+    !command || command.mode === "default" || (command.mode === "append" && !command.args?.length)
+  );
+}
+
 function normalizeLaunchDefault(
   defaultBinary: string | ProviderLaunchDefault,
 ): ProviderLaunchDefault {
@@ -60,8 +73,8 @@ function normalizeLaunchDefault(
   return defaultBinary;
 }
 
-async function resolveLaunchPath(command: string): Promise<string | null> {
-  const found = await findExecutable(command);
+async function resolveLaunchPath(command: string, env?: ProcessEnvRecord): Promise<string | null> {
+  const found = await findExecutable(command, { env });
   if (found) {
     return found;
   }
@@ -116,7 +129,7 @@ export async function checkProviderLaunchAvailable(
   const resolvedPath =
     defaultBinary && launch.source !== "override"
       ? await resolveDefaultLaunchPath(defaultBinary)
-      : await resolveLaunchPath(launch.command);
+      : await resolveLaunchPath(launch.command, launch.env);
   return {
     available: resolvedPath !== null,
     resolvedPath,
@@ -242,7 +255,7 @@ export function createProviderEnvSpec(options: ProviderEnvOptions = {}): Provide
   };
 }
 
-export function createProviderEnv(options: ProviderEnvOptions = {}): NodeJS.ProcessEnv {
+export function createProviderEnv(options: ProviderEnvOptions = {}): ExternalProcessEnv {
   const spec = createProviderEnvSpec(options);
   return createExternalProcessEnv(spec.baseEnv ?? process.env, spec.envOverlay);
 }

@@ -1,17 +1,21 @@
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, { type ReactElement, useCallback, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, Text, View } from "react-native";
+import { Alert, Text, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import { useTranslation } from "react-i18next";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { settingsStyles } from "@/styles/settings";
-import { SettingsSection } from "@/screens/settings/settings-section";
-import { ArrowUpRight, Copy, FileText, Activity } from "lucide-react-native";
+import { SettingsSection } from "@/components/settings/headings/settings-section";
+import { Copy, FileText, Activity } from "lucide-react-native";
 import { AdaptiveModalSheet, type SheetHeader } from "@/components/adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { openExternalUrl } from "@/utils/open-external-url";
 import { isVersionMismatch } from "@/desktop/updates/desktop-updates";
-import { getCliDaemonStatus, shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
+import {
+  getCliDaemonStatus,
+  shouldUseDesktopDaemon,
+  confirmAndStopDesktopDaemon,
+} from "@/desktop/daemon/desktop-daemon";
 import { useBuiltInDaemonManagement } from "@/desktop/hooks/use-built-in-daemon-management";
 import { useDaemonStatus } from "@/desktop/hooks/use-daemon-status";
 import { useDesktopSettings, type DesktopSettings } from "@/desktop/settings/desktop-settings";
@@ -182,12 +186,10 @@ function DaemonCliStatusModal({
           {cliStatusOutput ?? ""}
         </Text>
         <View style={styles.modalActions}>
-          <Button variant="outline" size="sm" onPress={onClose}>
+          <Button variant="outline" onPress={onClose}>
             {t("common.actions.close")}
           </Button>
-          <Button size="sm" onPress={onCopy}>
-            {t("common.actions.copy")}
-          </Button>
+          <Button onPress={onCopy}>{t("common.actions.copy")}</Button>
         </View>
       </View>
     </AdaptiveModalSheet>
@@ -279,13 +281,12 @@ function DaemonInfoCard(props: DaemonInfoCardProps) {
         </View>
         <View style={styles.actionGroup}>
           {daemonLogs?.logPath ? (
-            <Button variant="outline" size="sm" leftIcon={copyIcon} onPress={handleCopyLogPath}>
+            <Button variant="outline" leftIcon={copyIcon} onPress={handleCopyLogPath}>
               {t("desktop.daemon.logs.copyPath")}
             </Button>
           ) : null}
           <Button
             variant="outline"
-            size="sm"
             leftIcon={fileTextIcon}
             onPress={handleOpenLogs}
             disabled={!daemonLogs}
@@ -301,7 +302,6 @@ function DaemonInfoCard(props: DaemonInfoCardProps) {
         </View>
         <Button
           variant="outline"
-          size="sm"
           leftIcon={activityIcon}
           onPress={handleRunCliStatus}
           disabled={isLoadingCliStatus}
@@ -329,6 +329,17 @@ export function LocalDaemonSection() {
   const daemonStatus = data?.status ?? null;
   const daemonLogs = data?.logs ?? null;
   const daemonVersion = daemonStatus?.version ?? null;
+  const [isStopping, setIsStopping] = useState(false);
+  const handleStop = useCallback(() => {
+    setIsStopping(true);
+    void confirmAndStopDesktopDaemon()
+      .then((status) => {
+        if (status) setStatus(status);
+        return undefined;
+      })
+      .catch((error) => Alert.alert(t("desktop.daemon.lifecycle.stopFailed"), String(error)))
+      .finally(() => setIsStopping(false));
+  }, [setStatus, t]);
 
   const daemonVersionMismatch = isVersionMismatch(appVersion, daemonVersion);
   const daemonStatusStateText =
@@ -370,15 +381,6 @@ export function LocalDaemonSection() {
     void handleOpenCliStatus();
   }, [handleOpenCliStatus]);
 
-  const handleOpenAdvancedSettings = useCallback(
-    () => void openExternalUrl(ADVANCED_DAEMON_SETTINGS_URL),
-    [],
-  );
-
-  const advancedSettingsIcon = useMemo(
-    () => <ArrowUpRight size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />,
-    [theme.iconSize.sm, theme.colors.foregroundMuted],
-  );
   const copyIcon = useMemo(
     () => <Copy size={theme.iconSize.sm} color={theme.colors.foreground} />,
     [theme.iconSize.sm, theme.colors.foreground],
@@ -392,21 +394,13 @@ export function LocalDaemonSection() {
     [theme.iconSize.sm, theme.colors.foreground],
   );
 
-  const advancedSettingsButton = useMemo(
-    () => (
-      <Button
-        variant="ghost"
-        size="sm"
-        leftIcon={advancedSettingsIcon}
-        textStyle={settingsStyles.sectionHeaderLinkText}
-        style={settingsStyles.sectionHeaderLink}
-        onPress={handleOpenAdvancedSettings}
-        accessibilityLabel={t("desktop.daemon.openAdvancedSettings")}
-      >
-        {t("desktop.daemon.advancedSettings")}
-      </Button>
-    ),
-    [advancedSettingsIcon, handleOpenAdvancedSettings, t],
+  const advancedSettingsLink = useMemo(
+    () => ({
+      href: ADVANCED_DAEMON_SETTINGS_URL,
+      label: t("desktop.daemon.advancedSettings"),
+      accessibilityLabel: t("desktop.daemon.openAdvancedSettings"),
+    }),
+    [t],
   );
 
   if (!showSection) {
@@ -416,12 +410,12 @@ export function LocalDaemonSection() {
   return (
     <SettingsSection
       title={t("desktop.daemon.title")}
-      trailing={advancedSettingsButton}
+      link={advancedSettingsLink}
       testID="host-page-daemon-lifecycle-card"
     >
       {isLoading || isLoadingSettings ? (
         <View style={[settingsStyles.card, styles.loadingCard]}>
-          <ActivityIndicator size="small" color={theme.colors.foregroundMuted} />
+          <LoadingSpinner size="small" color={theme.colors.foregroundMuted} />
         </View>
       ) : (
         <>
@@ -443,6 +437,26 @@ export function LocalDaemonSection() {
             handleRunCliStatus={handleRunCliStatus}
             isLoadingCliStatus={isLoadingCliStatus}
           />
+
+          {daemonStatus?.pid ? (
+            <View style={settingsStyles.card}>
+              <View style={settingsStyles.row}>
+                <View style={settingsStyles.rowContent}>
+                  <Text style={settingsStyles.rowTitle}>
+                    {daemonStatus.ownedByDesktop
+                      ? t("desktop.daemon.lifecycle.owned")
+                      : t("desktop.daemon.lifecycle.attached")}
+                  </Text>
+                  <Text style={settingsStyles.rowHint}>{daemonStatus.home}</Text>
+                </View>
+                <Button variant="outline" onPress={handleStop} disabled={isStopping}>
+                  {isStopping
+                    ? t("desktop.daemon.lifecycle.stopping")
+                    : t("desktop.daemon.lifecycle.stop")}
+                </Button>
+              </View>
+            </View>
+          ) : null}
 
           {daemonVersionMismatch ? (
             <View style={styles.warningCard}>
@@ -488,11 +502,11 @@ const styles = StyleSheet.create((theme) => ({
   },
   valueText: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
   },
   valueSubtext: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
   },
   warningCard: {
     marginTop: theme.spacing[3],
@@ -505,7 +519,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   warningText: {
     color: theme.colors.palette.amber[500],
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
   },
   modalBody: {
     gap: theme.spacing[3],
@@ -513,7 +527,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   logOutput: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     lineHeight: 18,
   },

@@ -11,26 +11,15 @@ export const settingsStyles = StyleSheet.create((theme) => ({
     marginBottom: theme.spacing[3],
     marginLeft: theme.spacing[1],
   },
-  sectionTitle: {
-    color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
-    fontWeight: theme.fontWeight.normal,
-    marginBottom: theme.spacing[3],
-    marginLeft: theme.spacing[1],
-  },
   sectionHeaderTitle: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.normal,
   },
   sectionHeaderLink: {
     alignItems: "center",
     flexDirection: "row",
     gap: theme.spacing[1],
-  },
-  sectionHeaderLinkText: {
-    color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
   },
   card: {
     backgroundColor: theme.colors.surface1,
@@ -60,12 +49,12 @@ export const settingsStyles = StyleSheet.create((theme) => ({
   },
   rowHint: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     marginTop: theme.spacing[1],
   },
   rowError: {
     color: theme.colors.statusDanger,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     marginTop: theme.spacing[1],
   },
 }));

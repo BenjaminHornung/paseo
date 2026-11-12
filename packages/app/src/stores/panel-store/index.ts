@@ -1,67 +1,53 @@
 import { create } from "zustand";
-import { persist, createJSONStorage } from "zustand/middleware";
+import { persist } from "zustand/middleware";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
-  buildExplorerCheckoutKey,
-  coerceExplorerTabForCheckout,
-  resolveExplorerTabForCheckout,
-  type ExplorerTab,
-} from "../explorer-tab-memory";
-import { type ExplorerCheckoutContext } from "../explorer-checkout-context";
-import {
-  buildOpenFileExplorerPatch,
-  buildToggleFileExplorerPatch,
-  clampExplorerFilesSplitRatio,
-  clampExplorerWidth,
+  clampTreeRailWidth,
   clampSidebarWidth,
-  DEFAULT_EXPLORER_FILES_SPLIT_RATIO,
-  DEFAULT_EXPLORER_SIDEBAR_WIDTH,
+  DEFAULT_TREE_RAIL_WIDTH,
+  dropOverlayAgentList,
   DEFAULT_SIDEBAR_WIDTH,
-  MAX_EXPLORER_FILES_SPLIT_RATIO,
-  MAX_EXPLORER_SIDEBAR_WIDTH,
+  MAX_TREE_RAIL_WIDTH,
   MAX_SIDEBAR_WIDTH,
-  MIN_EXPLORER_FILES_SPLIT_RATIO,
-  MIN_EXPLORER_SIDEBAR_WIDTH,
+  MIN_TREE_RAIL_WIDTH,
   MIN_SIDEBAR_WIDTH,
   migratePanelState,
+  PanelPersistedStateSchema,
   selectIsAgentListOpen,
-  selectIsFileExplorerOpen,
+  selectIsCompactFileExplorerOpen,
   setMobilePanelTarget,
-  selectPanelVisibility,
+  reconcileMobilePanel,
   type DesktopSidebarState,
-  type ExplorerPanelIntent,
   type MobilePanelView,
   type MobilePanelSelection,
+  type PanelLayout,
   type PanelLayoutInput,
-  type PanelVisibilityState,
   type SortOption,
 } from "./state";
 import { isWeb } from "@/constants/platform";
-export type { ExplorerTab } from "../explorer-tab-memory";
-export type { ExplorerCheckoutContext } from "../explorer-checkout-context";
+import { createValidatedPersistStorage } from "@/storage/validated-persist-storage";
 export type {
   DesktopSidebarState,
-  ExplorerPanelIntent,
+  LeftSidebarPresentation,
   MobilePanelView,
   MobilePanelSelection,
+  PanelLayout,
   PanelLayoutInput,
-  PanelVisibilityState,
   SortOption,
 } from "./state";
 export {
-  DEFAULT_EXPLORER_FILES_SPLIT_RATIO,
-  DEFAULT_EXPLORER_SIDEBAR_WIDTH,
+  DEFAULT_TREE_RAIL_WIDTH,
   DEFAULT_SIDEBAR_WIDTH,
-  MAX_EXPLORER_FILES_SPLIT_RATIO,
-  MAX_EXPLORER_SIDEBAR_WIDTH,
+  MAX_TREE_RAIL_WIDTH,
   MAX_SIDEBAR_WIDTH,
-  MIN_EXPLORER_FILES_SPLIT_RATIO,
-  MIN_EXPLORER_SIDEBAR_WIDTH,
+  MIN_TREE_RAIL_WIDTH,
   MIN_SIDEBAR_WIDTH,
+  clampTreeRailWidth,
   selectIsAgentListOpen,
-  selectIsFileExplorerOpen,
-  selectPanelVisibility,
+  selectIsCompactFileExplorerOpen,
 };
+
+export type ExpandedPathsUpdate = string[] | ((currentPaths: string[]) => string[]);
 
 export interface PanelState {
   // Mobile: React's durable target plus the generation that owns it.
@@ -71,48 +57,45 @@ export interface PanelState {
   desktop: DesktopSidebarState;
 
   // File explorer settings (shared between mobile/desktop)
-  explorerTab: ExplorerTab;
-  explorerTabByCheckout: Record<string, ExplorerTab>;
   expandedPathsByWorkspace: Record<string, string[]>;
-  diffExpandedPathsByWorkspace: Record<string, string[]>;
   // Changes-view folder tree. Inverted semantics vs the fields above:
   // this stores COLLAPSED directory paths (empty = all folders expanded), keyed
   // by full uncompressed dir path, so folders default to expanded and new
   // folders stay expanded as the diff changes.
   diffCollapsedFoldersByWorkspace: Record<string, string[]>;
+  collapsedFilePathsByWorkspace: Record<string, string[]>;
   sidebarWidth: number;
-  explorerWidth: number;
   explorerSortOption: SortOption;
   explorerShowHiddenFiles: boolean;
-  explorerFilesSplitRatio: number;
+  treeRailWidth: number;
+  // File panel's tree rail. The changes panel keeps its own flag in
+  // `useChangesPreferences`; the two rails open and close independently.
+  fileTreeVisible: boolean;
 
   // Actions
   toggleFocusMode: () => void;
+  exitFocusMode: () => void;
   showMobileAgent: () => void;
   showMobileAgentList: () => void;
+  showMobileFileExplorer: () => void;
   toggleMobileAgentList: () => void;
   openDesktopAgentList: () => void;
   closeDesktopAgentList: () => void;
   toggleDesktopAgentList: () => void;
-  closeDesktopFileExplorer: () => void;
   openAgentListForLayout: (input: PanelLayoutInput) => void;
   closeAgentListForLayout: (input: PanelLayoutInput) => void;
   toggleAgentListForLayout: (input: PanelLayoutInput) => void;
-  openFileExplorerForCheckout: (input: ExplorerPanelIntent) => void;
-  toggleFileExplorerForCheckout: (input: ExplorerPanelIntent) => void;
+  applyPanelLayout: (layout: PanelLayout) => void;
 
   // File explorer settings actions
-  setExplorerTab: (tab: ExplorerTab) => void;
-  setExplorerTabForCheckout: (params: ExplorerCheckoutContext & { tab: ExplorerTab }) => void;
-  setExpandedPathsForWorkspace: (workspaceKey: string, paths: string[]) => void;
-  setDiffExpandedPathsForWorkspace: (workspaceKey: string, paths: string[]) => void;
+  setExpandedPathsForWorkspace: (workspaceKey: string, paths: ExpandedPathsUpdate) => void;
   setDiffCollapsedFoldersForWorkspace: (workspaceKey: string, dirPaths: string[]) => void;
-  activateExplorerTabForCheckout: (checkout: ExplorerCheckoutContext) => void;
+  setCollapsedFilePathsForWorkspace: (workspaceKey: string, paths: string[]) => void;
   setSidebarWidth: (width: number) => void;
-  setExplorerWidth: (width: number) => void;
   setExplorerSortOption: (option: SortOption) => void;
   toggleExplorerShowHiddenFiles: () => void;
-  setExplorerFilesSplitRatio: (ratio: number) => void;
+  setTreeRailWidth: (width: number) => void;
+  toggleFileTreeVisible: () => void;
 }
 
 const DEFAULT_DESKTOP_OPEN = isWeb;
@@ -125,6 +108,13 @@ function setMobilePanelTargetPatch(
   return mobilePanel === state.mobilePanel ? state : { mobilePanel };
 }
 
+function dockAgentListPatch(state: PanelState): Pick<PanelState, "desktop" | "mobilePanel"> {
+  return {
+    desktop: { ...state.desktop, agentListOpen: true },
+    mobilePanel: dropOverlayAgentList(state.mobilePanel),
+  };
+}
+
 export const usePanelStore = create<PanelState>()(
   persist(
     (set) => ({
@@ -134,30 +124,36 @@ export const usePanelStore = create<PanelState>()(
       // Desktop defaults based on platform
       desktop: {
         agentListOpen: DEFAULT_DESKTOP_OPEN,
-        fileExplorerOpen: false,
         focusModeEnabled: false,
       },
 
       // File explorer defaults
-      explorerTab: "changes",
-      explorerTabByCheckout: {},
       expandedPathsByWorkspace: {},
-      diffExpandedPathsByWorkspace: {},
       diffCollapsedFoldersByWorkspace: {},
+      collapsedFilePathsByWorkspace: {},
       sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
-      explorerWidth: DEFAULT_EXPLORER_SIDEBAR_WIDTH,
       explorerSortOption: "name",
       explorerShowHiddenFiles: true,
-      explorerFilesSplitRatio: DEFAULT_EXPLORER_FILES_SPLIT_RATIO,
+      treeRailWidth: DEFAULT_TREE_RAIL_WIDTH,
+      fileTreeVisible: true,
 
       toggleFocusMode: () =>
         set((state) => ({
           desktop: { ...state.desktop, focusModeEnabled: !state.desktop.focusModeEnabled },
         })),
 
+      exitFocusMode: () =>
+        set((state) =>
+          state.desktop.focusModeEnabled
+            ? { desktop: { ...state.desktop, focusModeEnabled: false } }
+            : state,
+        ),
+
       showMobileAgent: () => set((state) => setMobilePanelTargetPatch(state, "agent")),
 
       showMobileAgentList: () => set((state) => setMobilePanelTargetPatch(state, "agent-list")),
+      showMobileFileExplorer: () =>
+        set((state) => setMobilePanelTargetPatch(state, "file-explorer")),
 
       toggleMobileAgentList: () =>
         set((state) =>
@@ -168,12 +164,7 @@ export const usePanelStore = create<PanelState>()(
         ),
 
       openDesktopAgentList: () =>
-        set((state) => {
-          if (state.desktop.agentListOpen) {
-            return state;
-          }
-          return { desktop: { ...state.desktop, agentListOpen: true } };
-        }),
+        set((state) => (state.desktop.agentListOpen ? state : dockAgentListPatch(state))),
 
       closeDesktopAgentList: () =>
         set((state) => {
@@ -184,26 +175,18 @@ export const usePanelStore = create<PanelState>()(
         }),
 
       toggleDesktopAgentList: () =>
-        set((state) => ({
-          desktop: { ...state.desktop, agentListOpen: !state.desktop.agentListOpen },
-        })),
-
-      closeDesktopFileExplorer: () =>
-        set((state) => {
-          if (!state.desktop.fileExplorerOpen) {
-            return state;
-          }
-          return { desktop: { ...state.desktop, fileExplorerOpen: false } };
-        }),
+        set((state) =>
+          state.desktop.agentListOpen
+            ? { desktop: { ...state.desktop, agentListOpen: false } }
+            : dockAgentListPatch(state),
+        ),
 
       openAgentListForLayout: ({ isCompact }) =>
         set((state) => {
           if (isCompact) {
             return setMobilePanelTargetPatch(state, "agent-list");
           }
-          return state.desktop.agentListOpen
-            ? state
-            : { desktop: { ...state.desktop, agentListOpen: true } };
+          return state.desktop.agentListOpen ? state : dockAgentListPatch(state);
         }),
 
       closeAgentListForLayout: ({ isCompact }) =>
@@ -224,45 +207,28 @@ export const usePanelStore = create<PanelState>()(
               state.mobilePanel.target === "agent-list" ? "agent" : "agent-list",
             );
           }
+          return state.desktop.agentListOpen
+            ? { desktop: { ...state.desktop, agentListOpen: false } }
+            : dockAgentListPatch(state);
+        }),
+
+      applyPanelLayout: (layout) =>
+        set((state) => {
+          const mobilePanel = reconcileMobilePanel(state.mobilePanel, layout);
+          return mobilePanel === state.mobilePanel ? state : { mobilePanel };
+        }),
+
+      setExpandedPathsForWorkspace: (workspaceKey, paths) =>
+        set((state) => {
+          const currentPaths = state.expandedPathsByWorkspace[workspaceKey] ?? ["."];
+          const nextPaths = typeof paths === "function" ? paths(currentPaths) : paths;
           return {
-            desktop: { ...state.desktop, agentListOpen: !state.desktop.agentListOpen },
+            expandedPathsByWorkspace: {
+              ...state.expandedPathsByWorkspace,
+              [workspaceKey]: nextPaths,
+            },
           };
         }),
-
-      openFileExplorerForCheckout: (input) =>
-        set((state) => buildOpenFileExplorerPatch(state, input)),
-
-      toggleFileExplorerForCheckout: (input) =>
-        set((state) => buildToggleFileExplorerPatch(state, input)),
-
-      setExplorerTab: (tab) => set({ explorerTab: tab }),
-      setExplorerTabForCheckout: ({ serverId, cwd, isGit, tab }) =>
-        set((state) => {
-          const resolvedTab = coerceExplorerTabForCheckout(tab, isGit);
-          const key = buildExplorerCheckoutKey(serverId, cwd);
-          const nextState: Partial<PanelState> = { explorerTab: resolvedTab };
-          if (key) {
-            const current = state.explorerTabByCheckout[key];
-            if (current !== resolvedTab) {
-              nextState.explorerTabByCheckout = {
-                ...state.explorerTabByCheckout,
-                [key]: resolvedTab,
-              };
-            }
-          }
-          return nextState;
-        }),
-      setExpandedPathsForWorkspace: (workspaceKey, paths) =>
-        set((state) => ({
-          expandedPathsByWorkspace: { ...state.expandedPathsByWorkspace, [workspaceKey]: paths },
-        })),
-      setDiffExpandedPathsForWorkspace: (workspaceKey, paths) =>
-        set((state) => ({
-          diffExpandedPathsByWorkspace: {
-            ...state.diffExpandedPathsByWorkspace,
-            [workspaceKey]: paths,
-          },
-        })),
       setDiffCollapsedFoldersForWorkspace: (workspaceKey, dirPaths) =>
         set((state) => ({
           diffCollapsedFoldersByWorkspace: {
@@ -270,101 +236,36 @@ export const usePanelStore = create<PanelState>()(
             [workspaceKey]: dirPaths,
           },
         })),
-      activateExplorerTabForCheckout: (checkout) =>
+      setCollapsedFilePathsForWorkspace: (workspaceKey, paths) =>
         set((state) => ({
-          explorerTab: resolveExplorerTabForCheckout({
-            serverId: checkout.serverId,
-            cwd: checkout.cwd,
-            isGit: checkout.isGit,
-            explorerTabByCheckout: state.explorerTabByCheckout,
-          }),
+          collapsedFilePathsByWorkspace: {
+            ...state.collapsedFilePathsByWorkspace,
+            [workspaceKey]: paths,
+          },
         })),
       setSidebarWidth: (width) => set({ sidebarWidth: clampSidebarWidth(width) }),
-      setExplorerWidth: (width) => set({ explorerWidth: clampExplorerWidth(width) }),
       setExplorerSortOption: (option) => set({ explorerSortOption: option }),
       toggleExplorerShowHiddenFiles: () =>
         set((state) => ({ explorerShowHiddenFiles: !state.explorerShowHiddenFiles })),
-      setExplorerFilesSplitRatio: (ratio) =>
-        set({
-          explorerFilesSplitRatio: Number.isFinite(ratio)
-            ? clampExplorerFilesSplitRatio(ratio)
-            : DEFAULT_EXPLORER_FILES_SPLIT_RATIO,
-        }),
+      setTreeRailWidth: (width) => set({ treeRailWidth: clampTreeRailWidth(width) }),
+      toggleFileTreeVisible: () => set((state) => ({ fileTreeVisible: !state.fileTreeVisible })),
     }),
     {
       name: "panel-state",
-      version: 12,
-      storage: createJSONStorage(() => AsyncStorage),
-      migrate: (persistedState, version) =>
-        migratePanelState(persistedState, version, { isWeb }) as unknown as PanelState,
+      version: 17,
+      storage: createValidatedPersistStorage(AsyncStorage, PanelPersistedStateSchema),
+      migrate: (persistedState, version) => migratePanelState(persistedState, version),
       partialize: (state) => ({
         desktop: state.desktop,
-        explorerTab: state.explorerTab,
-        explorerTabByCheckout: state.explorerTabByCheckout,
         expandedPathsByWorkspace: state.expandedPathsByWorkspace,
-        diffExpandedPathsByWorkspace: state.diffExpandedPathsByWorkspace,
         diffCollapsedFoldersByWorkspace: state.diffCollapsedFoldersByWorkspace,
+        collapsedFilePathsByWorkspace: state.collapsedFilePathsByWorkspace,
         sidebarWidth: state.sidebarWidth,
-        explorerWidth: state.explorerWidth,
         explorerSortOption: state.explorerSortOption,
         explorerShowHiddenFiles: state.explorerShowHiddenFiles,
-        explorerFilesSplitRatio: state.explorerFilesSplitRatio,
+        treeRailWidth: state.treeRailWidth,
+        fileTreeVisible: state.fileTreeVisible,
       }),
     },
   ),
 );
-
-/**
- * Hook that provides platform-aware panel state.
- *
- * On mobile, uses the revisioned mobile panel target.
- * On desktop, uses independent booleans (desktop.agentListOpen, desktop.fileExplorerOpen).
- *
- * @param isMobile - Whether the current breakpoint is mobile
- */
-export function usePanelState(isMobile: boolean) {
-  const isAgentListOpen = usePanelStore((state) =>
-    selectIsAgentListOpen(state, { isCompact: isMobile }),
-  );
-  const isFileExplorerOpen = usePanelStore((state) =>
-    selectIsFileExplorerOpen(state, { isCompact: isMobile }),
-  );
-  const showMobileAgent = usePanelStore((state) => state.showMobileAgent);
-  const openAgentListForLayout = usePanelStore((state) => state.openAgentListForLayout);
-  const closeAgentListForLayout = usePanelStore((state) => state.closeAgentListForLayout);
-  const toggleAgentListForLayout = usePanelStore((state) => state.toggleAgentListForLayout);
-  const closeDesktopFileExplorer = usePanelStore((state) => state.closeDesktopFileExplorer);
-  const explorerTab = usePanelStore((state) => state.explorerTab);
-  const explorerTabByCheckout = usePanelStore((state) => state.explorerTabByCheckout);
-  const explorerWidth = usePanelStore((state) => state.explorerWidth);
-  const explorerSortOption = usePanelStore((state) => state.explorerSortOption);
-  const explorerFilesSplitRatio = usePanelStore((state) => state.explorerFilesSplitRatio);
-  const setExplorerTab = usePanelStore((state) => state.setExplorerTab);
-  const setExplorerTabForCheckout = usePanelStore((state) => state.setExplorerTabForCheckout);
-  const activateExplorerTabForCheckout = usePanelStore(
-    (state) => state.activateExplorerTabForCheckout,
-  );
-  const setExplorerWidth = usePanelStore((state) => state.setExplorerWidth);
-  const setExplorerSortOption = usePanelStore((state) => state.setExplorerSortOption);
-  const setExplorerFilesSplitRatio = usePanelStore((state) => state.setExplorerFilesSplitRatio);
-
-  return {
-    isAgentListOpen,
-    isFileExplorerOpen,
-    openAgentList: () => openAgentListForLayout({ isCompact: isMobile }),
-    closeAgentList: () => closeAgentListForLayout({ isCompact: isMobile }),
-    closeFileExplorer: isMobile ? showMobileAgent : closeDesktopFileExplorer,
-    toggleAgentList: () => toggleAgentListForLayout({ isCompact: isMobile }),
-    explorerTab,
-    explorerTabByCheckout,
-    explorerWidth,
-    explorerSortOption,
-    explorerFilesSplitRatio,
-    setExplorerTab,
-    setExplorerTabForCheckout,
-    activateExplorerTabForCheckout,
-    setExplorerWidth,
-    setExplorerSortOption,
-    setExplorerFilesSplitRatio,
-  };
-}

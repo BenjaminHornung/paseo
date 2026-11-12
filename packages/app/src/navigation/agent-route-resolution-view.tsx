@@ -57,10 +57,10 @@ export function AgentRouteResolutionView({
           <Text style={styles.error}>{resolution.error}</Text>
         </View>
         <View style={styles.actions}>
-          <Button size="sm" variant="default" leftIcon={RotateCw} onPress={onRetry}>
+          <Button variant="default" leftIcon={RotateCw} onPress={onRetry}>
             {t("common.actions.retry")}
           </Button>
-          <Button size="sm" variant="outline" leftIcon={ArrowLeftToLine} onPress={onBack}>
+          <Button variant="outline" leftIcon={ArrowLeftToLine} onPress={onBack}>
             {t("common.actions.back")}
           </Button>
         </View>
@@ -95,10 +95,10 @@ export function AgentRouteResolutionView({
       </View>
       {!isConnecting ? (
         <View style={styles.actions}>
-          <Button size="sm" variant="default" leftIcon={RotateCw} onPress={onRetry}>
+          <Button variant="default" leftIcon={RotateCw} onPress={onRetry}>
             {t("common.actions.retry")}
           </Button>
-          <Button size="sm" variant="outline" leftIcon={Settings} onPress={onManageHost}>
+          <Button variant="outline" leftIcon={Settings} onPress={onManageHost}>
             {t("workspace.route.manageHost")}
           </Button>
         </View>
@@ -128,13 +128,13 @@ const styles = StyleSheet.create((theme) => ({
   },
   description: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     textAlign: "center",
   },
   error: {
     color: theme.colors.destructive,
-    fontSize: theme.fontSize.sm,
-    lineHeight: Math.round(theme.fontSize.sm * 1.4),
+    fontSize: theme.fontSize.base,
+    lineHeight: Math.round(theme.fontSize.base * 1.4),
     textAlign: "center",
   },
   actions: {

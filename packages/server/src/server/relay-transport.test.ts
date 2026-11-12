@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type pino from "pino";
+import pino from "pino";
 import { startRelayTransport } from "./relay-transport";
 
 function createMockLogger() {
@@ -32,7 +32,10 @@ class FakeRelayWebSocket {
   sent: Array<string | Uint8Array | ArrayBuffer> = [];
   terminateCalls = 0;
   pingCalls = 0;
+  deferSendCompletion = false;
+  onSend: ((data: string | Uint8Array | ArrayBuffer) => void) | null = null;
   private readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+  private readonly pendingSendCallbacks: Array<(error?: Error) => void> = [];
 
   constructor(readonly url: string) {}
 
@@ -61,11 +64,22 @@ class FakeRelayWebSocket {
     this.emit("close", 1006, "");
   }
 
-  send(data: string | Uint8Array | ArrayBuffer) {
+  send(data: string | Uint8Array | ArrayBuffer, callback?: (error?: Error) => void) {
     if (this.readyState !== FakeRelayWebSocket.OPEN) {
       throw new Error(`WebSocket not open (readyState=${this.readyState})`);
     }
     this.sent.push(data);
+    this.onSend?.(data);
+    if (!callback) return;
+    if (this.deferSendCompletion) {
+      this.pendingSendCallbacks.push(callback);
+      return;
+    }
+    callback();
+  }
+
+  completeNextSend() {
+    this.pendingSendCallbacks.shift()?.();
   }
 
   ping() {
@@ -80,8 +94,8 @@ class FakeRelayWebSocket {
     this.emit("open");
   }
 
-  message(data: unknown) {
-    this.emit("message", data);
+  message(data: unknown, isBinary = data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+    this.emit("message", data, isBinary);
   }
 
   pong() {

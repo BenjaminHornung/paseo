@@ -1,4 +1,5 @@
 import type { ServerInfoStatusPayload } from "@getpaseo/protocol/messages";
+import { appDisplayName } from "@/constants/app-brand";
 import type { HostRuntimeSnapshot } from "@/runtime/host-runtime";
 import type { HostConnection, HostProfile } from "@/types/host-connection";
 
@@ -22,7 +23,7 @@ export function formatAppDiagnosticHeader(input: {
   isDesktopApp: boolean;
   hostCount: number;
 }): string {
-  return formatDiagnosticSection("Paseo app diagnostics", [
+  return formatDiagnosticSection(`${appDisplayName} app diagnostics`, [
     { label: "Collected at", value: new Date().toISOString() },
     { label: "App version", value: input.appVersion ?? "unknown" },
     { label: "Platform", value: input.platform },
@@ -45,7 +46,7 @@ export function formatHostRuntimeSection(input: {
         ? describeConnectionKind(snapshot.activeConnection.type)
         : "none",
     },
-    { label: "Last online", value: snapshot?.lastOnlineAt ?? "never" },
+    { label: "Last online", value: snapshot?.lastOnlineAt ?? "unknown" },
     { label: "Last error", value: snapshot?.lastError ?? "none" },
     {
       label: "Agent directory",
@@ -100,6 +101,8 @@ export function describeConnectionKind(type: HostConnection["type"] | string): s
       return "local pipe";
     case "relay":
       return "relay";
+    case "routed":
+      return "routed";
     default:
       return "unknown";
   }
@@ -125,11 +128,11 @@ export function redactAppDiagnosticReport(report: string, hosts: HostProfile[]):
 function collectSensitiveHostValues(hosts: HostProfile[]): string[] {
   const values = new Set<string>();
   for (const host of hosts) {
+    if (host.password) values.add(host.password);
     for (const connection of host.connections) {
       values.add(connection.id);
       if (connection.type === "directTcp") {
         values.add(connection.endpoint);
-        if (connection.password) values.add(connection.password);
       } else if (connection.type === "relay") {
         values.add(connection.relayEndpoint);
         values.add(connection.daemonPublicKeyB64);

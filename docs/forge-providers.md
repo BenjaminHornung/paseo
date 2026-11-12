@@ -26,8 +26,9 @@ For forge `acme`, the expected end state is:
 3. **App modules** - a forge splits into a pure logic half and a view half so
    logic consumers (URL builders, merge-capability, native checks, and the
    Node-based e2e harness) never pull the client rendering stack:
-   - `packages/app/src/git/forges/acme.ts` - logic: `id`, optional `urlGrammar`,
-     optional `facts` (schema, merge-capability, native-check fallbacks). No
+   - `packages/app/src/git/forges/acme.ts` - logic: `id`, optional `urlGrammar`
+     (source links and pasted issue/change-request reference paths), optional
+     `facts` (schema, merge-capability, native-check fallbacks). No
      React/React-Native imports. Register in `CLIENT_FORGE_LOGIC_MODULES` in
      `packages/app/src/git/forges/index.ts`.
    - `packages/app/src/git/forges/acme.view.tsx` - view: `icon` (SVG component
@@ -57,8 +58,20 @@ schema-mismatched facts render neutrally instead of failing the whole message
 parse. This is the version-skew win: an old client can receive facts from a
 newer forge and still show the PR/MR in a neutral state.
 
+Check results keep a stable normalized `status` for aggregation and an optional
+open `traits: string[]` for composable forge-neutral refinements such as
+`manual`, `action_required`, and `warning`. Consumers ignore unknown traits and
+fall back to `status`; `rawStatus` preserves provider-native detail. Do not add
+provider vocabulary to the normalized status union. Producers and the
+presentation layer share the trait constants in
+`packages/protocol/src/check-traits.ts` — use those instead of string literals
+so classification and emission cannot drift apart.
+
 Shipped GitHub compatibility stays separate:
 
+- The forge compatibility layer first shipped in `v0.2.0-beta.1`. Its initial
+  six-month cleanup target is `2027-01-17`, after supported client and daemon
+  floors reach stable `v0.2.0`.
 - `status.github` remains accepted for released peers.
 - The server keeps the `COMPAT(forgeSpecific)` mirror that copies GitHub facts
   into `status.github` for older clients.
@@ -84,19 +97,15 @@ Register the adapter in `defaultForgeRegistry` with:
 - `matchesHost` from manifest `cloudHosts`
 - `probeHost` when self-hosted/Enterprise detection is supported
 
-Current change-request lookup uses two identities deliberately:
+Current change-request lookup matches the branch and repository for both open and
+terminal requests. Prefer an open request, then a terminal request at the local
+HEAD, then the most recently updated terminal request. A reused branch can show
+its previous request until a new one opens. Auto-archive separately requires an
+observed open-to-merged transition and a fresh exact match between checkout HEAD
+and the PR head, along with the existing workspace safety checks.
 
-- An open PR/MR belongs to the checkout when its head branch and head repository
-  match. Its remote head SHA may differ because the checkout can be ahead,
-  behind, or contain commits that have not been pushed yet.
-- A merged or closed PR/MR belongs to the checkout only when its recorded head
-  SHA exactly matches the checkout's current `HEAD`. Branch names are reusable;
-  selecting the newest terminal request by branch alone can silently attach an
-  old promotion or feature request to new work.
-
-Thread the checkout head SHA through adapter cache and poll identities as well
-as the lookup itself. Otherwise a commit made on the same branch can inherit the
-previous commit's cached terminal status until the cache expires.
+Keep checkout HEAD in adapter cache and poll identities so checkout changes
+refresh the facts used by archive eligibility.
 
 Cloud hosts in the manifest are a bounded public-host list, not a self-host
 allowlist. Self-hosted detection is a trust gate: Paseo only talks to a forge
@@ -112,7 +121,8 @@ rendering stack:
 `acme.ts` exports a `ClientForgeLogicModule`:
 
 - `id`
-- optional `urlGrammar`
+- optional `urlGrammar` (including `referencePaths` for composer auto-attachment
+  and Markdown shorthand references)
 - optional `facts` registration (schema, merge-capability, native-check fallbacks)
 
 `acme.view.tsx` exports a `ClientForgeViewModule`:
@@ -181,10 +191,38 @@ are stale, run `npm run build:server`.
   real shims tagged with `COMPAT(name)`.
 - Gitea-family facts use `forgeSpecific.forge === "gitea"` even when the
   top-level brand is Forgejo or Codeberg.
+- Gitea's legacy Actions task endpoint cannot filter by commit, may enforce a
+  page size below the requested limit, and omits rerun-attempt numbers. Walk a
+  bounded number of pages using `total_count` and filter locally. Preserve
+  ambiguous same-run tasks: display names are not stable job identities, so
+  name-based deduplication can hide a real failure.
+- A blocked Gitea Actions task is not necessarily manual: only add the
+  `action_required` trait when the matching run metadata reports
+  `need_approval`.
 - Brand icons are bundled React components, so they cannot come from protocol
   manifest data.
 - Source URL grammars are app-side because blob/tree path syntax is
   forge-specific. If a forge has no grammar, omit the "Open on ..." source link
   rather than constructing a wrong URL.
+- Pasted issue/change-request URL recognition is also app-side and registry
+  driven. Put the forge's route infixes in `urlGrammar.referencePaths`; the
+  neutral extractor matches the pasted host and full repository path against
+  the current remote before it invokes cwd-routed forge search. Do not add a
+  central forge switch or guess a self-hosted Gitea-family brand from URL shape.
+- Shorthand references in rendered Markdown (`#12`, GitLab and Gitea `!12`,
+  cross-repository `owner/repo#12`) come from the `sigil` on each
+  `referencePaths` entry. Leave `sigil` off a kind the forge does not link in
+  prose: GitHub has no `!`, and its `#` targets `/issues/`, which GitHub
+  redirects to the pull request. `packages/app/src/git/forge-shorthand` builds
+  the recognition pattern from the workspace descriptor's forge and remote.
 - GitLab pipeline status constants belong to the GitLab adapter/client module,
   not protocol.
+- GitLab `manual` jobs need `allow_failure` to distinguish optional gray jobs
+  (`manual`) from blocking jobs (`manual` plus `action_required`). A failed
+  allowed-failure job carries the `warning` trait, and `canceling` remains active
+  until GitLab reports a terminal status.
+- GitHub PR polling owns one account-wide GraphQL budget. Coordinate retained
+  targets per host, batch their reads, and stop until GitHub's reset time when
+  the reserve is exhausted. Never add a per-target GitHub request to the poll
+  path. Resolve fork PRs through their parent repository without abandoning the
+  shared batch.

@@ -3,13 +3,7 @@ import { AlertTriangle, Copy, FileText, Plus, RotateCw, Trash2 } from "lucide-re
 import type { TFunction } from "i18next";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  ActivityIndicator,
-  Pressable,
-  type PressableStateCallbackType,
-  Text,
-  View,
-} from "react-native";
+import { Pressable, type PressableStateCallbackType, Text, View } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import {
   AdaptiveModalSheet,
@@ -25,11 +19,11 @@ import { useToast } from "@/contexts/toast-context";
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
 import { useDaemonConfig } from "@/hooks/use-daemon-config";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
+import { useTimeAgo } from "@/hooks/use-time-ago";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { settingsStyles } from "@/styles/settings";
 import { resolveProviderLabel } from "@/utils/provider-definitions";
-import { formatTimeAgo } from "@/utils/time";
-import { compareMatchScores, scoreTextFields } from "@/utils/score-match";
+import { compareMatchScores, scoreTextFields } from "@getpaseo/protocol/search/text-match";
 import type { AgentModelDefinition, AgentProvider } from "@getpaseo/protocol/agent-types";
 import type { ProviderProfileModel } from "@getpaseo/protocol/provider-config";
 import {
@@ -101,11 +95,11 @@ function CustomModelRow({
 
   return (
     <View style={sheetStyles.modelRow}>
-      <Text style={sheetStyles.modelTitle} numberOfLines={1}>
+      <Text style={[sheetStyles.modelTitle, sheetStyles.customModelText]} numberOfLines={1}>
         {model.label}
       </Text>
       <Text
-        style={sheetStyles.monoHint}
+        style={[sheetStyles.monoHint, sheetStyles.customModelText]}
         numberOfLines={1}
         selectable
         dataSet={CODE_SURFACE_DATASET}
@@ -216,7 +210,6 @@ function AddCustomModelSubSheet({
         <AdaptiveTextInput
           initialValue={input}
           resetKey={`add-custom-${visible}`}
-          value={input}
           onChangeText={setInput}
           onSubmitEditing={handleAdd}
           placeholder={t("settings.providers.models.modelIdPlaceholder")}
@@ -229,10 +222,10 @@ function AddCustomModelSubSheet({
         />
         {error ? <Text style={sheetStyles.errorText}>{error}</Text> : null}
         <View style={sheetStyles.formActions}>
-          <Button variant="secondary" size="sm" onPress={onClose} disabled={saving}>
+          <Button variant="secondary" onPress={onClose} disabled={saving}>
             {t("common.actions.cancel")}
           </Button>
-          <Button variant="default" size="sm" onPress={handleAdd} disabled={!canAdd || saving}>
+          <Button variant="default" onPress={handleAdd} disabled={!canAdd || saving}>
             {saving ? t("settings.providers.models.adding") : t("settings.providers.models.add")}
           </Button>
         </View>
@@ -365,7 +358,7 @@ function DiagnosticSubSheet({
     body = (
       <SurfaceCard key={visible ? "visible" : "hidden"}>
         <View style={sheetStyles.codeBlockLoading}>
-          <ActivityIndicator size="small" color={theme.colors.foregroundMuted} />
+          <LoadingSpinner size="small" color={theme.colors.foregroundMuted} />
           <Text style={sheetStyles.mutedText}>{t("settings.providers.diagnostic.running")}</Text>
         </View>
       </SurfaceCard>
@@ -416,7 +409,7 @@ interface ProviderModalBodyProps {
 }
 
 interface ProviderSheetFooterInput {
-  fetchedAtLabel: string | null;
+  fetchedAt: string | null;
   isCompact: boolean;
   modelsRefreshing: boolean;
   t: TFunction;
@@ -426,7 +419,7 @@ interface ProviderSheetFooterInput {
 }
 
 function renderProviderSheetFooter({
-  fetchedAtLabel,
+  fetchedAt,
   isCompact,
   modelsRefreshing,
   t,
@@ -437,30 +430,17 @@ function renderProviderSheetFooter({
   const contentStyle = isCompact ? sheetStyles.compactFooterContent : sheetStyles.footerContent;
   const actionsStyle = isCompact ? sheetStyles.compactFooterActions : sheetStyles.footerActions;
   const buttonStyle = isCompact ? sheetStyles.compactFooterButton : null;
-  const metaStyle = isCompact
-    ? [sheetStyles.footerMeta, sheetStyles.compactFooterMeta]
-    : sheetStyles.footerMeta;
-
   return (
     <View style={contentStyle}>
-      {fetchedAtLabel || !isCompact ? (
-        <Text style={metaStyle} numberOfLines={1}>
-          {fetchedAtLabel ? t("settings.providers.models.updated", { time: fetchedAtLabel }) : ""}
-        </Text>
+      {fetchedAt || !isCompact ? (
+        <ProviderUpdatedLabel fetchedAt={fetchedAt} isCompact={isCompact} />
       ) : null}
       <View style={actionsStyle}>
-        <Button
-          variant="secondary"
-          size="sm"
-          leftIcon={Plus}
-          onPress={onOpenAddSheet}
-          style={buttonStyle}
-        >
+        <Button variant="secondary" leftIcon={Plus} onPress={onOpenAddSheet} style={buttonStyle}>
           {t("settings.providers.models.addModel")}
         </Button>
         <Button
           variant="secondary"
-          size="sm"
           leftIcon={FileText}
           onPress={onOpenDiagSheet}
           style={buttonStyle}
@@ -469,7 +449,6 @@ function renderProviderSheetFooter({
         </Button>
         <Button
           variant="default"
-          size="sm"
           leftIcon={modelsRefreshing ? undefined : RotateCw}
           onPress={onRefreshModels}
           disabled={modelsRefreshing}
@@ -481,6 +460,25 @@ function renderProviderSheetFooter({
         </Button>
       </View>
     </View>
+  );
+}
+
+function ProviderUpdatedLabel({
+  fetchedAt,
+  isCompact,
+}: {
+  fetchedAt: string | null;
+  isCompact: boolean;
+}) {
+  const { t } = useTranslation();
+  const label = useTimeAgo(fetchedAt ? new Date(fetchedAt) : null);
+  const style = isCompact
+    ? [sheetStyles.footerMeta, sheetStyles.compactFooterMeta]
+    : sheetStyles.footerMeta;
+  return (
+    <Text style={style} numberOfLines={1}>
+      {fetchedAt ? t("settings.providers.models.updated", { time: label }) : ""}
+    </Text>
   );
 }
 
@@ -504,7 +502,7 @@ function ProviderModalBody(props: ProviderModalBodyProps) {
   if (discoveredCount === 0 && additionalCount === 0 && providerSnapshotRefreshing) {
     return (
       <View style={sheetStyles.emptyState}>
-        <ActivityIndicator size="small" color={theme.colors.foregroundMuted} />
+        <LoadingSpinner size="small" color={theme.colors.foregroundMuted} />
         <Text style={sheetStyles.mutedText}>{t("settings.providers.models.loading")}</Text>
       </View>
     );
@@ -514,7 +512,7 @@ function ProviderModalBody(props: ProviderModalBodyProps) {
       <View style={sheetStyles.emptyState}>
         <AlertTriangle size={theme.iconSize.md} color={theme.colors.foregroundMuted} />
         <Text style={sheetStyles.mutedText}>{providerErrorMessage}</Text>
-        <Button variant="default" size="sm" onPress={onRefresh} disabled={modelsRefreshing}>
+        <Button variant="default" onPress={onRefresh} disabled={modelsRefreshing}>
           {modelsRefreshing
             ? t("settings.providers.models.retrying")
             : t("settings.providers.models.retry")}
@@ -616,18 +614,6 @@ export function ProviderDiagnosticSheet({
   });
   stableDiscoveredRef.current = nextDiscoveredCache;
 
-  const [clockTick, setClockTick] = useState(0);
-  useEffect(() => {
-    if (!visible) return;
-    const id = setInterval(() => setClockTick((tick) => tick + 1), 10_000);
-    return () => clearInterval(id);
-  }, [visible]);
-  const fetchedAtLabel = useMemo(() => {
-    if (!providerEntry?.fetchedAt) return null;
-    void clockTick;
-    return formatTimeAgo(new Date(providerEntry.fetchedAt));
-  }, [providerEntry?.fetchedAt, clockTick]);
-
   useEffect(() => {
     if (!visible) {
       setQuery("");
@@ -693,7 +679,7 @@ export function ProviderDiagnosticSheet({
         onClose={onClose}
         testID="provider-settings-sheet"
         footer={renderProviderSheetFooter({
-          fetchedAtLabel,
+          fetchedAt: providerEntry?.fetchedAt ?? null,
           isCompact,
           modelsRefreshing,
           t,
@@ -737,7 +723,7 @@ export function ProviderDiagnosticSheet({
 
 const sheetStyles = StyleSheet.create((theme) => ({
   mutedText: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     color: theme.colors.foregroundMuted,
   },
   monoHint: {
@@ -748,11 +734,11 @@ const sheetStyles = StyleSheet.create((theme) => ({
   },
   descriptionInline: {
     flex: 1,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
   },
   errorText: {
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     color: theme.colors.destructive,
   },
   formInput: {
@@ -763,11 +749,12 @@ const sheetStyles = StyleSheet.create((theme) => ({
     color: theme.colors.foreground,
     borderWidth: 1,
     borderColor: theme.colors.border,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
   },
   iconButton: {
     width: 28,
     height: 28,
+    flexShrink: 0,
     borderRadius: theme.borderRadius.full,
     alignItems: "center",
     justifyContent: "center",
@@ -810,8 +797,12 @@ const sheetStyles = StyleSheet.create((theme) => ({
   },
   modelTitle: {
     color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     flexShrink: 0,
+  },
+  customModelText: {
+    flexShrink: 1,
+    minWidth: 0,
   },
   modelRowFiller: {
     flex: 1,
@@ -834,7 +825,7 @@ const sheetStyles = StyleSheet.create((theme) => ({
   },
   footerMeta: {
     flex: 1,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
   },
   compactFooterMeta: {
@@ -855,7 +846,7 @@ const sheetStyles = StyleSheet.create((theme) => ({
     gap: theme.spacing[3],
   },
   formLabel: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.foreground,
   },

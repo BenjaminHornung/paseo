@@ -21,6 +21,32 @@ export interface MobilePanelTransition {
   state: MobilePanelMotionState;
 }
 
+export function getMobilePanelAnchor(panel: MobilePanelView): number {
+  "worklet";
+  if (panel === "agent-list") {
+    return -1;
+  }
+  if (panel === "file-explorer") {
+    return 1;
+  }
+  return 0;
+}
+
+function settleMobilePanelAtPosition(
+  state: MobilePanelMotionState,
+  position: number,
+): MobilePanelTransition {
+  "worklet";
+  const isCanonicalMotion = state.target === state.motionTarget;
+  const isAtTarget = Math.abs(position - getMobilePanelAnchor(state.target)) <= 0.002;
+  if (state.gesture || !isCanonicalMotion || !isAtTarget || state.settledTarget === state.target) {
+    return { state };
+  }
+  return {
+    state: { ...state, settledTarget: state.target },
+  };
+}
+
 export type MobilePanelEvent =
   | { type: "command"; selection: MobilePanelSelection }
   | { type: "gesture.begin"; origin: MobilePanelView }
@@ -30,7 +56,7 @@ export type MobilePanelEvent =
       success: boolean;
       target: MobilePanelView;
     }
-  | { type: "animation.finished"; revision: number; target: MobilePanelView };
+  | { type: "position.changed"; position: number };
 
 export function createMobilePanelMotionState(
   selection: MobilePanelSelection,
@@ -52,8 +78,11 @@ export function transitionMobilePanel(
     if (event.selection.revision <= state.revision) {
       return { state };
     }
+    // An interrupted drag left the position between anchors, so it moves back even when the
+    // target is unchanged. Without a drag, the command adopts motion already heading there.
+    const continuesCurrentMotion = !state.gesture && state.motionTarget === event.selection.target;
     return {
-      animationTarget: event.selection.target,
+      animationTarget: continuesCurrentMotion ? undefined : event.selection.target,
       state: {
         ...state,
         ...event.selection,
@@ -101,26 +130,7 @@ export function transitionMobilePanel(
     };
   }
 
-  const ownsCurrentRevision = event.revision === state.revision;
-  const isCanonicalTarget = event.target === state.target;
-  const isCurrentMotionTarget = event.target === state.motionTarget;
-  if (!ownsCurrentRevision || !isCanonicalTarget || !isCurrentMotionTarget) {
-    return { state };
-  }
-  return {
-    state: { ...state, settledTarget: event.target },
-  };
-}
-
-export function getMobilePanelAnchor(panel: MobilePanelView): number {
-  "worklet";
-  if (panel === "agent-list") {
-    return -1;
-  }
-  if (panel === "file-explorer") {
-    return 1;
-  }
-  return 0;
+  return settleMobilePanelAtPosition(state, event.position);
 }
 
 export function canBeginMobilePanelGesture(
@@ -141,6 +151,13 @@ export function isMobilePanelGestureCurrent(
 ): boolean {
   "worklet";
   return state.revision === startedRevision && state.gesture?.startedRevision === startedRevision;
+}
+
+export function isMobilePanelActive(
+  state: MobilePanelMotionState,
+  panel: MobilePanelView,
+): boolean {
+  return state.settledTarget === panel;
 }
 
 export function getMobilePanelFrame(position: number, width: number) {

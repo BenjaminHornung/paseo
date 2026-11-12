@@ -1,19 +1,30 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import type { ToolPolicy } from "@getpaseo/protocol/agent-types";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import type {
   AgentClient,
-  AgentFeature,
+  AgentDraftControls,
   AgentModelDefinition,
   AgentMode,
   AgentSessionConfig,
   ProviderCatalog,
 } from "./agent-sdk-types.js";
 
+const CLAUDE_CUSTOM_THINKING_FIELDS = {
+  thinkingOptions: [
+    { id: "low", label: "Low" },
+    { id: "medium", label: "Medium" },
+    { id: "high", label: "High", isDefault: true },
+    { id: "max", label: "Max" },
+  ],
+  defaultThinkingOptionId: "high",
+} satisfies Partial<AgentModelDefinition>;
+
 const mockState = vi.hoisted(() => {
   interface ConstructorEntry {
     runtimeSettings?: unknown;
-    providerParams?: unknown;
+
     commandsRpcType?: unknown;
   }
 
@@ -25,12 +36,14 @@ const mockState = vi.hoisted(() => {
       cursor: [] as Array<{
         command: string[];
         env?: Record<string, string>;
-        providerParams?: unknown;
       }>,
       trae: [] as Array<{
         command: string[];
         env?: Record<string, string>;
-        providerParams?: unknown;
+      }>,
+      kimi: [] as Array<{
+        command: string[];
+        env?: Record<string, string>;
       }>,
       pi: [] as ConstructorEntry[],
       genericAcp: [] as Array<{
@@ -38,24 +51,26 @@ const mockState = vi.hoisted(() => {
         env?: Record<string, string>;
         providerId?: string;
         label?: string;
-        providerParams?: unknown;
       }>,
     },
     isCommandAvailable: vi.fn(async (_command: string) => false),
     runtimeModels: new Map<string, AgentModelDefinition[]>(),
     cursorListFeaturesConfigs: [] as AgentSessionConfig[],
+    codexNativeArchiveCalls: [] as Array<{ state: "archive" | "restore"; handle: unknown }>,
     reset() {
       this.constructorArgs.claude = [];
       this.constructorArgs.codex = [];
       this.constructorArgs.copilot = [];
       this.constructorArgs.cursor = [];
       this.constructorArgs.trae = [];
+      this.constructorArgs.kimi = [];
       this.constructorArgs.pi = [];
       this.constructorArgs.genericAcp = [];
       this.isCommandAvailable.mockReset();
       this.isCommandAvailable.mockImplementation(async (_command: string) => false);
       this.runtimeModels.clear();
       this.cursorListFeaturesConfigs = [];
+      this.codexNativeArchiveCalls = [];
     },
   };
 });
@@ -64,55 +79,62 @@ vi.mock("../../executable-resolution/executable-resolution.js", () => ({
   isCommandAvailable: mockState.isCommandAvailable,
 }));
 
-vi.mock("./providers/claude/agent.js", () => ({
-  ClaudeAgentClient: class ClaudeAgentClient {
-    readonly capabilities = {
-      supportsStreaming: true,
-      supportsSessionPersistence: true,
-      supportsDynamicModes: true,
-      supportsMcpServers: true,
-      supportsReasoningStream: true,
-      supportsToolInvocations: true,
-    };
-    readonly provider = "claude";
-    readonly runtimeSettings?: unknown;
-
-    constructor(options: { runtimeSettings?: unknown }) {
-      this.runtimeSettings = options.runtimeSettings;
-      mockState.constructorArgs.claude.push({
-        runtimeSettings: options.runtimeSettings,
-      });
-    }
-
-    async createSession(): Promise<never> {
-      throw new Error("not implemented");
-    }
-
-    async resumeSession(): Promise<never> {
-      throw new Error("not implemented");
-    }
-
-    async fetchCatalog(): Promise<ProviderCatalog> {
-      return {
-        models: mockState.runtimeModels.get(this.provider) ?? [],
-        modes: [],
+vi.mock("./providers/claude/agent.js", async () => {
+  const { resolveConfiguredClaudeModel } = await import("./providers/claude/models.js");
+  return {
+    ClaudeAgentClient: class ClaudeAgentClient {
+      readonly capabilities = {
+        supportsStreaming: true,
+        supportsSessionPersistence: true,
+        supportsDynamicModes: true,
+        supportsMcpServers: true,
+        supportsReasoningStream: true,
+        supportsToolInvocations: true,
       };
-    }
+      readonly provider = "claude";
+      readonly runtimeSettings?: unknown;
 
-    async isAvailable(): Promise<boolean> {
-      const command: { mode?: string; argv?: string[] } | undefined =
-        typeof this.runtimeSettings === "object" && this.runtimeSettings !== null
-          ? Reflect.get(this.runtimeSettings, "command")
-          : undefined;
-      if (command?.mode === "replace") {
-        const { isCommandAvailable } =
-          await import("../../executable-resolution/executable-resolution.js");
-        return await isCommandAvailable(command.argv?.[0] ?? "");
+      constructor(options: { runtimeSettings?: unknown }) {
+        this.runtimeSettings = options.runtimeSettings;
+        mockState.constructorArgs.claude.push({
+          runtimeSettings: options.runtimeSettings,
+        });
       }
-      return true;
-    }
-  },
-}));
+
+      async createSession(): Promise<never> {
+        throw new Error("not implemented");
+      }
+
+      async resumeSession(): Promise<never> {
+        throw new Error("not implemented");
+      }
+
+      async fetchCatalog(): Promise<ProviderCatalog> {
+        return {
+          models: mockState.runtimeModels.get(this.provider) ?? [],
+          modes: [],
+        };
+      }
+
+      resolveConfiguredModel(model: AgentModelDefinition): AgentModelDefinition {
+        return resolveConfiguredClaudeModel(model);
+      }
+
+      async isAvailable(): Promise<boolean> {
+        const command: { mode?: string; argv?: string[] } | undefined =
+          typeof this.runtimeSettings === "object" && this.runtimeSettings !== null
+            ? Reflect.get(this.runtimeSettings, "command")
+            : undefined;
+        if (command?.mode === "replace") {
+          const { isCommandAvailable } =
+            await import("../../executable-resolution/executable-resolution.js");
+          return await isCommandAvailable(command.argv?.[0] ?? "");
+        }
+        return true;
+      }
+    },
+  };
+});
 
 vi.mock("./providers/codex-app-server-agent.js", () => ({
   CodexAppServerAgentClient: class CodexAppServerAgentClient {
@@ -145,6 +167,14 @@ vi.mock("./providers/codex-app-server-agent.js", () => ({
         models: mockState.runtimeModels.get(this.provider) ?? [],
         modes: [],
       };
+    }
+
+    async archiveNativeSession(handle: unknown): Promise<void> {
+      mockState.codexNativeArchiveCalls.push({ state: "archive", handle });
+    }
+
+    async unarchiveNativeSession(handle: unknown): Promise<void> {
+      mockState.codexNativeArchiveCalls.push({ state: "restore", handle });
     }
 
     async isAvailable(): Promise<boolean> {
@@ -227,13 +257,12 @@ vi.mock("./providers/pi/agent.js", () => ({
 
     constructor(options: {
       runtimeSettings?: unknown;
-      providerParams?: unknown;
+
       commandsRpcType?: unknown;
     }) {
       this.runtimeSettings = options.runtimeSettings;
       const entry: ConstructorEntry = {
         runtimeSettings: options.runtimeSettings,
-        providerParams: options.providerParams,
       };
       if (options.commandsRpcType !== undefined) {
         entry.commandsRpcType = options.commandsRpcType;
@@ -280,21 +309,7 @@ vi.mock("./providers/generic-acp-agent.js", () => ({
       env?: Record<string, string>;
       providerId?: string;
       label?: string;
-      providerParams?: unknown;
     }) {
-      const providerParams =
-        options.providerParams &&
-        typeof options.providerParams === "object" &&
-        !Array.isArray(options.providerParams)
-          ? (options.providerParams as Record<string, unknown>)
-          : {};
-      this.capabilities = {
-        ...this.capabilities,
-        supportsMcpServers:
-          typeof providerParams.supportsMcpServers === "boolean"
-            ? providerParams.supportsMcpServers
-            : this.capabilities.supportsMcpServers,
-      };
       this.runtimeSettings = {
         command: {
           mode: "replace",
@@ -307,7 +322,6 @@ vi.mock("./providers/generic-acp-agent.js", () => ({
         env: options.env,
         providerId: options.providerId,
         label: options.label,
-        providerParams: options.providerParams,
       });
     }
 
@@ -345,11 +359,7 @@ vi.mock("./providers/cursor-acp-agent.js", () => ({
     readonly provider = "acp";
     readonly runtimeSettings?: unknown;
 
-    constructor(options: {
-      command: string[];
-      env?: Record<string, string>;
-      providerParams?: unknown;
-    }) {
+    constructor(options: { command: string[]; env?: Record<string, string> }) {
       this.runtimeSettings = {
         command: {
           mode: "replace",
@@ -360,7 +370,6 @@ vi.mock("./providers/cursor-acp-agent.js", () => ({
       mockState.constructorArgs.cursor.push({
         command: options.command,
         env: options.env,
-        providerParams: options.providerParams,
       });
     }
 
@@ -383,17 +392,20 @@ vi.mock("./providers/cursor-acp-agent.js", () => ({
       return true;
     }
 
-    async listFeatures(config: AgentSessionConfig): Promise<AgentFeature[]> {
+    async listControls(config: AgentSessionConfig): Promise<AgentDraftControls> {
       mockState.cursorListFeaturesConfigs.push(config);
-      return [
-        {
-          type: "select",
-          id: "fast",
-          label: "Fast",
-          value: "false",
-          options: [{ id: "false", label: "Off" }],
-        },
-      ];
+      return {
+        options: config.providerOptions ?? {},
+        controls: [
+          {
+            type: "select",
+            key: "fast",
+            label: "Fast",
+            defaultValue: "false",
+            choices: [{ value: "false", label: "Off" }],
+          },
+        ],
+      };
     }
   },
 }));
@@ -411,11 +423,7 @@ vi.mock("./providers/trae-acp-agent.js", () => ({
     readonly provider = "acp";
     readonly runtimeSettings?: unknown;
 
-    constructor(options: {
-      command: string[];
-      env?: Record<string, string>;
-      providerParams?: unknown;
-    }) {
+    constructor(options: { command: string[]; env?: Record<string, string> }) {
       this.runtimeSettings = {
         command: {
           mode: "replace",
@@ -426,7 +434,54 @@ vi.mock("./providers/trae-acp-agent.js", () => ({
       mockState.constructorArgs.trae.push({
         command: options.command,
         env: options.env,
-        providerParams: options.providerParams,
+      });
+    }
+
+    async createSession(): Promise<never> {
+      throw new Error("not implemented");
+    }
+
+    async resumeSession(): Promise<never> {
+      throw new Error("not implemented");
+    }
+
+    async fetchCatalog(): Promise<ProviderCatalog> {
+      return {
+        models: mockState.runtimeModels.get(this.provider) ?? [],
+        modes: [],
+      };
+    }
+
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+  },
+}));
+
+vi.mock("./providers/kimi-acp-agent.js", () => ({
+  KimiACPAgentClient: class KimiACPAgentClient {
+    readonly capabilities = {
+      supportsStreaming: true,
+      supportsSessionPersistence: true,
+      supportsDynamicModes: true,
+      supportsMcpServers: true,
+      supportsReasoningStream: true,
+      supportsToolInvocations: true,
+    };
+    readonly provider = "acp";
+    readonly runtimeSettings?: unknown;
+
+    constructor(options: { command: string[]; env?: Record<string, string> }) {
+      this.runtimeSettings = {
+        command: {
+          mode: "replace",
+          argv: options.command,
+        },
+        env: options.env,
+      };
+      mockState.constructorArgs.kimi.push({
+        command: options.command,
+        env: options.env,
       });
     }
 
@@ -574,6 +629,22 @@ test("new provider extending claude appears in registry", () => {
   expect(registry.zai.createClient(logger).provider).toBe("zai");
 });
 
+test("new provider extending codex archives and unarchives its native sessions", async () => {
+  const registry = buildProviderRegistry(logger, {
+    providerOverrides: { "my-codex": { extends: "codex", label: "My Codex" } },
+  });
+  const client = registry["my-codex"].createClient(logger);
+  const handle = { provider: "my-codex", sessionId: "thread-1", nativeHandle: "thread-1" };
+
+  await client.archiveNativeSession?.(handle);
+  await client.unarchiveNativeSession?.(handle);
+
+  expect(mockState.codexNativeArchiveCalls).toEqual([
+    { state: "archive", handle: { ...handle, provider: "codex" } },
+    { state: "restore", handle: { ...handle, provider: "codex" } },
+  ]);
+});
+
 test("built-in OMP override keeps the real OMP adapter enabled and launchable", async () => {
   const omp = new FakeOmp(["custom-omp"]);
   const registry = buildProviderRegistry(logger, {
@@ -625,7 +696,6 @@ test("new provider extending acp uses GenericACPAgentClient", () => {
       },
       providerId: "my-agent",
       label: "My Agent",
-      providerParams: undefined,
     },
     {
       command: ["my-agent", "--acp"],
@@ -634,48 +704,121 @@ test("new provider extending acp uses GenericACPAgentClient", () => {
       },
       providerId: "my-agent",
       label: "My Agent",
-      providerParams: undefined,
     },
   ]);
 });
 
-test("ACP provider params can disable MCP support", () => {
+test("Hub E2E ACP provider applies exact grants for its injected MCP server", () => {
+  const registry = buildProviderRegistry(logger, {
+    providerOverrides: {
+      "hub-e2e": {
+        extends: "acp",
+        label: "Hub E2E",
+        command: ["hub-e2e-agent"],
+      },
+    },
+  });
+  const config = {
+    provider: "hub-e2e",
+    cwd: "/tmp/hub-e2e",
+    mcpServers: { hub: { type: "http" as const, url: "http://127.0.0.1/execution" } },
+  };
+  const toolPolicy = {
+    preapproved: [
+      { kind: "mcp" as const, server: "hub", tool: "reply" },
+      { kind: "mcp" as const, server: "hub", tool: "finish_execution" },
+    ],
+  };
+
+  expect(registry["hub-e2e"].applyToolPolicy(config, toolPolicy)).toEqual({
+    ...config,
+    toolPolicy,
+  });
+});
+
+test.each([
+  { kind: "mcp", server: "hub", tool: "*" },
+  { kind: "mcp", server: "other", tool: "finish_execution" },
+  { kind: "mcp", server: "hub", tool: "" },
+  { kind: "native", server: "hub", tool: "Bash" },
+])("Hub E2E ACP provider rejects unsupported grant $kind:$server:$tool", (grant) => {
+  const registry = buildProviderRegistry(logger, {
+    providerOverrides: {
+      "hub-e2e": {
+        extends: "acp",
+        label: "Hub E2E",
+        command: ["hub-e2e-agent"],
+      },
+    },
+  });
+
+  expect(() =>
+    registry["hub-e2e"].applyToolPolicy({ provider: "hub-e2e", cwd: "/tmp/hub-e2e" }, {
+      preapproved: [grant],
+    } as unknown as ToolPolicy),
+  ).toThrow(/accepts only exact MCP tool grants for the injected 'hub' server/u);
+});
+
+test("ordinary custom ACP providers remain fail-closed for exact MCP grants", () => {
+  const registry = buildProviderRegistry(logger, {
+    providerOverrides: {
+      "my-agent": {
+        extends: "acp",
+        label: "My Agent",
+        command: ["my-agent"],
+      },
+    },
+  });
+
+  expect(() =>
+    registry["my-agent"].applyToolPolicy(
+      { provider: "my-agent", cwd: "/tmp/my-agent" },
+      { preapproved: [{ kind: "mcp", server: "hub", tool: "finish_execution" }] },
+    ),
+  ).toThrow(/cannot preapprove exact MCP tools for unattended execution/u);
+});
+
+test("ACP provider configuration retains opaque options", () => {
   const registry = buildProviderRegistry(logger, {
     providerOverrides: {
       "no-mcp-acp": {
         extends: "acp",
         label: "No MCP ACP",
         command: ["no-mcp-acp", "serve"],
-        params: {
-          supportsMcpServers: false,
-        },
+        options: { supportsMcpServers: false },
       },
     },
   });
+  expect(registry["no-mcp-acp"].configuration?.providerOptions).toEqual({
+    supportsMcpServers: false,
+  });
+});
 
-  const client = registry["no-mcp-acp"].createClient(logger);
+test("a saved legacy Codex Fast preference wins over a configured service_tier default", () => {
+  const registry = buildProviderRegistry(logger, {
+    providerOverrides: { codex: { options: { service_tier: "default", plan_mode: false } } },
+  });
+  const client = registry.codex.createClient(logger);
 
-  expect(client.capabilities.supportsMcpServers).toBe(false);
-  expect(mockState.constructorArgs.genericAcp).toEqual([
-    {
-      command: ["no-mcp-acp", "serve"],
-      env: undefined,
-      providerId: "no-mcp-acp",
-      label: "No MCP ACP",
-      providerParams: {
-        supportsMcpServers: false,
-      },
-    },
-    {
-      command: ["no-mcp-acp", "serve"],
-      env: undefined,
-      providerId: "no-mcp-acp",
-      label: "No MCP ACP",
-      providerParams: {
-        supportsMcpServers: false,
-      },
-    },
-  ]);
+  // The manager hands the registry a pre-v0.10 record's `fast_mode` already converted.
+  expect(client.effectiveOptions?.({ service_tier: "fast" })).toEqual({
+    service_tier: "fast",
+    plan_mode: false,
+  });
+  expect(client.effectiveOptions?.({})).toEqual({ service_tier: "default", plan_mode: false });
+});
+
+test("a configured legacy Codex Fast default supplies the service_tier default", () => {
+  const registry = buildProviderRegistry(logger, {
+    providerOverrides: { codex: { options: { fast_mode: true } } },
+  });
+  const client = registry.codex.createClient(logger);
+
+  // Removing an agent's own speed falls back to the configured Fast.
+  expect(client.effectiveOptions?.({})).toEqual({ service_tier: "fast" });
+  expect(client.effectiveOptions?.({ service_tier: "default" })).toEqual({
+    service_tier: "default",
+  });
 });
 
 test("cursor provider extending acp uses CursorACPAgentClient", () => {
@@ -699,20 +842,18 @@ test("cursor provider extending acp uses CursorACPAgentClient", () => {
       env: {
         CURSOR_AGENT_LOG: "debug",
       },
-      providerParams: undefined,
     },
     {
       command: ["cursor-agent", "acp"],
       env: {
         CURSOR_AGENT_LOG: "debug",
       },
-      providerParams: undefined,
     },
   ]);
   expect(mockState.constructorArgs.genericAcp).toEqual([]);
 });
 
-test("wrapped cursor client lists ACP features through the inner provider", async () => {
+test("wrapped cursor client lists ACP controls through the inner provider", async () => {
   const registry = buildProviderRegistry(logger, {
     providerOverrides: {
       cursor: {
@@ -726,19 +867,22 @@ test("wrapped cursor client lists ACP features through the inner provider", asyn
   const client = registry.cursor.createClient(logger);
 
   await expect(
-    client.listFeatures?.({
+    client.listControls?.({
       provider: "cursor",
       cwd: "/tmp/cursor",
     }),
-  ).resolves.toEqual([
-    {
-      type: "select",
-      id: "fast",
-      label: "Fast",
-      value: "false",
-      options: [{ id: "false", label: "Off" }],
-    },
-  ]);
+  ).resolves.toEqual({
+    controls: [
+      {
+        type: "select",
+        key: "fast",
+        label: "Fast",
+        defaultValue: "false",
+        choices: [{ value: "false", label: "Off" }],
+      },
+    ],
+    options: {},
+  });
   expect(mockState.cursorListFeaturesConfigs).toEqual([
     {
       provider: "acp",
@@ -763,12 +907,35 @@ test("traecli provider extending acp uses TraeACPAgentClient", () => {
     {
       command: ["traecli", "acp", "serve"],
       env: undefined,
-      providerParams: undefined,
     },
     {
       command: ["traecli", "acp", "serve"],
       env: undefined,
-      providerParams: undefined,
+    },
+  ]);
+  expect(mockState.constructorArgs.genericAcp).toEqual([]);
+});
+
+test("kimi provider extending acp uses KimiACPAgentClient", () => {
+  const registry = buildProviderRegistry(logger, {
+    providerOverrides: {
+      kimi: {
+        extends: "acp",
+        label: "Kimi Code CLI",
+        command: ["kimi", "acp"],
+      },
+    },
+  });
+
+  expect(registry.kimi.createClient(logger).provider).toBe("kimi");
+  expect(mockState.constructorArgs.kimi).toEqual([
+    {
+      command: ["kimi", "acp"],
+      env: undefined,
+    },
+    {
+      command: ["kimi", "acp"],
+      env: undefined,
     },
   ]);
   expect(mockState.constructorArgs.genericAcp).toEqual([]);
@@ -1114,6 +1281,7 @@ describe("model merging", () => {
         provider: "claude",
         id: "profile-fast",
         label: "Profile Fast",
+        ...CLAUDE_CUSTOM_THINKING_FIELDS,
       },
     ]);
   });
@@ -1160,11 +1328,13 @@ describe("model merging", () => {
         provider: "claude",
         id: "shared-model",
         label: "Profile Label",
+        ...CLAUDE_CUSTOM_THINKING_FIELDS,
       },
       {
         provider: "claude",
         id: "profile-model",
         label: "Profile Model",
+        ...CLAUDE_CUSTOM_THINKING_FIELDS,
       },
     ]);
   });
@@ -1249,6 +1419,7 @@ describe("model merging", () => {
         id: "shared-model",
         label: "Profile Label",
         description: "Runtime description",
+        ...CLAUDE_CUSTOM_THINKING_FIELDS,
         metadata: {
           source: "runtime",
         },
@@ -1314,6 +1485,7 @@ describe("model merging", () => {
         id: "profile-default",
         label: "Profile Default",
         isDefault: true,
+        ...CLAUDE_CUSTOM_THINKING_FIELDS,
       },
     ]);
   });
@@ -1343,6 +1515,45 @@ describe("model merging", () => {
         isDefault: true,
       },
     ]);
+  });
+
+  test("Claude configured models can override or disable inferred thinking options", async () => {
+    const registry = buildProviderRegistry(logger, {
+      providerOverrides: {
+        claude: {
+          models: [
+            { id: "custom-defaults", label: "Defaults" },
+            { id: "claude-sonnet-5", label: "Known" },
+            { id: "claude-opus-5", label: "Disabled", thinkingOptions: [] },
+            {
+              id: "custom-explicit",
+              label: "Explicit",
+              thinkingOptions: [{ id: "bespoke", label: "Bespoke", isDefault: true }],
+            },
+          ],
+        },
+      },
+    });
+
+    const { models } = await registry.claude.fetchCatalog({
+      scope: "workspace",
+      cwd: "/tmp/registry-models",
+      force: false,
+    });
+
+    expect(models.find((model) => model.id === "custom-defaults")).toMatchObject(
+      CLAUDE_CUSTOM_THINKING_FIELDS,
+    );
+    expect(
+      models
+        .find((model) => model.id === "claude-sonnet-5")
+        ?.thinkingOptions?.map((option) => option.id),
+    ).toEqual(["off", "low", "medium", "high", "xhigh", "max", "ultracode"]);
+    expect(models.find((model) => model.id === "claude-opus-5")?.thinkingOptions).toEqual([]);
+    expect(models.find((model) => model.id === "custom-explicit")).toMatchObject({
+      thinkingOptions: [{ id: "bespoke", label: "Bespoke", isDefault: true }],
+      defaultThinkingOptionId: "bespoke",
+    });
   });
 
   test("built-in createClient().fetchCatalog() honors profile model replacement (issue #579)", async () => {
@@ -1413,6 +1624,39 @@ describe("model merging", () => {
 
     const defaultModel = catalog.models.find((model) => model.isDefault) ?? catalog.models[0];
     expect(defaultModel?.id).toBe("profile-default");
+  });
+
+  test("explicit additional models override hidden compatibility entries", async () => {
+    mockState.runtimeModels.set("claude", [
+      {
+        provider: "claude",
+        id: "claude-fable-5[1m]",
+        label: "Fable 5",
+        isSelectable: false,
+      },
+    ]);
+    const registry = buildProviderRegistry(logger, {
+      providerOverrides: {
+        claude: {
+          additionalModels: [{ id: "claude-fable-5[1m]", label: "Gateway Fable 5" }],
+        },
+      },
+    });
+
+    const { models } = await registry.claude.fetchCatalog({
+      scope: "workspace",
+      cwd: "/tmp/registry-models",
+      force: false,
+    });
+
+    expect(models).toEqual([
+      expect.objectContaining({
+        id: "claude-fable-5[1m]",
+        label: "Gateway Fable 5",
+        isSelectable: true,
+        defaultThinkingOptionId: "high",
+      }),
+    ]);
   });
 
   test("built-in Claude models override replaces hardcoded first-party models (issue #1299)", async () => {

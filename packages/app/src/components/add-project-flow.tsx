@@ -1,3 +1,8 @@
+import { useOverlayRegistration, type KeyboardInputEvent } from "@/keyboard";
+import { useAddHost } from "@/hosts/add-host";
+import { Modal } from "@/components/ui/modal";
+import { usePanelStore } from "@/stores/panel-store";
+import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { router } from "expo-router";
 import type { WorkspaceProjectDescriptorPayload } from "@getpaseo/protocol/messages";
 import {
@@ -5,23 +10,28 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
-  Github,
   HardDrive,
   Plus,
   Search,
   Server,
 } from "lucide-react-native";
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import {
-  Modal,
-  Pressable,
-  ScrollView,
-  Text,
-  TextInput,
-  View,
-  type PressableStateCallbackType,
-} from "react-native";
+  createElement,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentType,
+  type RefObject,
+} from "react";
+import { Pressable, ScrollView, Text, View, type PressableStateCallbackType } from "react-native";
+import {
+  EditingTextInput as TextInput,
+  type EditingTextInputHandle,
+} from "@/components/ui/text-input";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
+import { GitHubIcon } from "@/components/icons/github-icon";
 import {
   applyAvailableAddProjectHosts,
   backAddProjectPage,
@@ -59,6 +69,8 @@ import {
   type ProjectPickerOption,
 } from "@/components/project-picker-options";
 import { Shortcut } from "@/components/ui/shortcut";
+import { useRevealActiveItem } from "@/components/ui/scroll-reveal";
+import { useHardwareKeyboardPresent } from "@/keyboard";
 import { getIsElectronRuntime } from "@/constants/layout";
 import { isWeb } from "@/constants/platform";
 import { pickDirectory } from "@/desktop/pick-directory";
@@ -66,6 +78,7 @@ import { useFetchQuery } from "@/data/query";
 import { getOpenProjectFailureReason, registerProjectDescriptor } from "@/hooks/open-project";
 import { useIsLocalDaemon, useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
 import { useCloneGithubProject, useOpenProject } from "@/hooks/use-open-project";
+import { OverlayLayerProvider, useGlobalOverlayLayer } from "@/lib/overlay-root";
 import {
   useHosts,
   useHostRuntimeClient,
@@ -77,7 +90,7 @@ import { useRecommendedProjectPaths } from "@/stores/session-store-hooks";
 import type { AddProjectFlowRequest } from "@/stores/add-project-flow-store";
 import type { Theme } from "@/styles/theme";
 import { shortenPath } from "@/utils/shorten-path";
-import { buildNewWorkspaceRoute, buildSettingsAddHostRoute } from "@/utils/host-routes";
+import { buildNewWorkspaceRoute } from "@/utils/host-routes";
 
 interface AddProjectFlowProps {
   request: AddProjectFlowRequest;
@@ -144,7 +157,7 @@ function FlowBackButton({ onPress }: { onPress: () => void }) {
 }
 
 function methodIcon(method: AddProjectMethodId): FlowRowOption["icon"] {
-  if (method === "github") return Github;
+  if (method === "github") return GitHubIcon;
   if (method === "browse") return FolderOpen;
   if (method === "new-directory") return FolderPlus;
   return Search;
@@ -208,12 +221,12 @@ function pageTitle(page: AddProjectPage): string {
   }
 }
 
-function pagePlaceholder(page: AddProjectPage): string {
+type AddProjectInputPage = Exclude<AddProjectPage, { kind: "method" }>;
+
+function pagePlaceholder(page: AddProjectInputPage): string {
   switch (page.kind) {
     case "host":
       return "Search hosts...";
-    case "method":
-      return "Search methods...";
     case "directory-search":
       return "Search directories or enter a path...";
     case "github-search":
@@ -226,7 +239,7 @@ function pagePlaceholder(page: AddProjectPage): string {
   }
 }
 
-function pageInput(page: AddProjectPage): string {
+function pageInput(page: AddProjectInputPage): string {
   return page.kind === "new-directory-name" ? page.name : page.query;
 }
 
@@ -234,7 +247,17 @@ function pathTestId(path: string): string {
   return `add-project-flow-path-${encodeURIComponent(path)}`;
 }
 
-function FlowRow({ option, active }: { option: FlowRowOption; active: boolean }) {
+function FlowRow({
+  option,
+  active,
+  activeItemRef,
+  onRowLayout,
+}: {
+  option: FlowRowOption;
+  active: boolean;
+  activeItemRef: RefObject<View | null>;
+  onRowLayout: () => void;
+}) {
   const accessibilityState = useMemo(
     () => ({ disabled: option.disabled === true, selected: active }),
     [active, option.disabled],
@@ -252,6 +275,8 @@ function FlowRow({ option, active }: { option: FlowRowOption; active: boolean })
       accessibilityRole="button"
       accessibilityState={accessibilityState}
       disabled={option.disabled}
+      ref={active ? activeItemRef : undefined}
+      onLayout={active ? onRowLayout : undefined}
       onPress={option.select}
       style={rowStyle}
       testID={option.testID}
@@ -274,6 +299,9 @@ function FlowRow({ option, active }: { option: FlowRowOption; active: boolean })
 }
 
 function FlowHint({ keys, action }: { keys: string[]; action: string }) {
+  const shortcutsAvailable = useHardwareKeyboardPresent();
+  if (!shortcutsAvailable) return null;
+
   return (
     <View style={styles.footerHint}>
       <Shortcut keys={keys} textStyle={styles.footerKeyText} />
@@ -295,6 +323,7 @@ function setPageStatus(
 // The product flow is intentionally one cohesive page-stack state machine.
 // eslint-disable-next-line complexity
 export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
+  const addHost = useAddHost();
   const hosts = useHosts();
   const hostIds = useMemo(() => hosts.map((host) => host.serverId), [hosts]);
   const connectionStatuses = useHostRuntimeConnectionStatuses(hostIds);
@@ -352,12 +381,23 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
   const recommendedPaths = useRecommendedProjectPaths(hostId);
   const openProject = useOpenProject(hostId);
   const cloneGithubProject = useCloneGithubProject(hostId);
-  const addEmptyProject = useSessionStore((store) => store.addEmptyProject);
+  const upsertProject = useCallback(
+    (
+      targetServerId: string,
+      project: Parameters<ReturnType<typeof getHostRuntimeStore>["acceptProjectSnapshot"]>[1],
+    ) => {
+      getHostRuntimeStore().acceptProjectSnapshot(targetServerId, project);
+    },
+    [],
+  );
   const setHasHydratedWorkspaces = useSessionStore((store) => store.setHasHydratedWorkspaces);
-  const inputRef = useRef<TextInput>(null);
+  const inputRef = useRef<EditingTextInputHandle>(null);
+  const resultsRef = useRef<ScrollView>(null);
   const submissionInFlightRef = useRef(false);
   const browseInFlightRef = useRef(false);
-  const query = page.kind === "new-directory-name" ? "" : page.query;
+  const query = page.kind === "new-directory-name" || page.kind === "method" ? "" : page.query;
+  const pageInputValueRef = useRef(page.kind === "method" ? "" : pageInput(page));
+  pageInputValueRef.current = page.kind === "method" ? "" : pageInput(page);
   const [debouncedQuery, setDebouncedQuery] = useState(query);
 
   useEffect(() => {
@@ -372,6 +412,7 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
   }, [query]);
 
   useEffect(() => {
+    inputRef.current?.replaceText(pageInputValueRef.current);
     const timer = setTimeout(() => inputRef.current?.focus(), 0);
     return () => clearTimeout(timer);
   }, [page.kind]);
@@ -416,17 +457,15 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
   });
 
   const handleBack = useCallback(() => {
-    setState((current) => {
-      const previous = backAddProjectPage(current);
-      if (previous) return previous;
-      onClose();
-      return current;
-    });
-  }, [onClose]);
+    const previous = backAddProjectPage(state);
+    if (previous) setState(previous);
+    else onClose();
+  }, [onClose, state]);
 
   const openNewWorkspaceForProject = useCallback(
     (serverId: string, project: WorkspaceProjectDescriptorPayload) => {
       onClose();
+      usePanelStore.getState().showMobileAgent();
       router.push(
         buildNewWorkspaceRoute({
           serverId,
@@ -573,8 +612,9 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
           icon: Plus,
           testID: "add-project-flow-add-host",
           select: () => {
+            // The native project Modal must release its window before the root sheet opens.
             onClose();
-            router.push(buildSettingsAddHostRoute(Date.now()));
+            addHost();
           },
         });
       }
@@ -582,23 +622,15 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
     }
     if (page.kind === "method") {
       if (!host) return [];
-      const normalized = page.query.trim().toLowerCase();
-      return buildAddProjectMethods(host)
-        .filter(
-          (method) =>
-            !normalized ||
-            method.label.toLowerCase().includes(normalized) ||
-            method.description.toLowerCase().includes(normalized),
-        )
-        .map((method) => ({
-          id: method.id,
-          title: method.label,
-          subtitle: method.description,
-          icon: methodIcon(method.id),
-          disabled: method.disabled,
-          testID: `add-project-flow-method-${method.id}`,
-          select: () => selectMethod(method.id),
-        }));
+      return buildAddProjectMethods(host).map((method) => ({
+        id: method.id,
+        title: method.label,
+        subtitle: method.description,
+        icon: methodIcon(method.id),
+        disabled: method.disabled,
+        testID: `add-project-flow-method-${method.id}`,
+        select: () => selectMethod(method.id),
+      }));
     }
     if (page.kind === "directory-search") {
       return pathOptions.map((option) => {
@@ -631,8 +663,8 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
         title: repository.cloneProtocol
           ? `${repository.nameWithOwner} via ${repository.cloneProtocol.toUpperCase()}`
           : repository.nameWithOwner,
-        subtitle: repository.description ?? repository.visibility,
-        icon: Github,
+        subtitle: repository.description,
+        icon: GitHubIcon,
         testID: `add-project-flow-repository-${repository.id}`,
         select: () =>
           setState((current) => openGithubLocationPage(current, page.hostId, repository)),
@@ -681,6 +713,7 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
     directoryPaths,
     githubQuery.data,
     host,
+    addHost,
     onClose,
     openAddedProject,
     page,
@@ -691,6 +724,13 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
   ]);
 
   const activeIndex = rows.length === 0 ? 0 : Math.min(page.activeIndex, rows.length - 1);
+  const rowListKey = useMemo(() => rows.map((row) => row.id).join("\u0000"), [rows]);
+  const { activeItemRef, contentRef, onItemLayout, onViewportLayout, onScroll } =
+    useRevealActiveItem({
+      activeIndex,
+      listKey: rowListKey,
+      scrollRef: resultsRef,
+    });
   const createDirectory = useCallback(async () => {
     if (page.kind !== "new-directory-name" || !client) return;
     const name = page.name.trim();
@@ -722,7 +762,7 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
       registerProjectDescriptor({
         serverId: page.hostId,
         project: payload.project,
-        addEmptyProject,
+        upsertProject,
         setHasHydratedWorkspaces,
       });
       openNewWorkspaceForProject(page.hostId, payload.project);
@@ -736,7 +776,7 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
     } finally {
       submissionInFlightRef.current = false;
     }
-  }, [addEmptyProject, client, openNewWorkspaceForProject, page, setHasHydratedWorkspaces]);
+  }, [client, openNewWorkspaceForProject, page, setHasHydratedWorkspaces, upsertProject]);
 
   const submitActive = useCallback(() => {
     if (page.kind === "new-directory-name") {
@@ -769,23 +809,21 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
     [activeIndex, handleBack, rows, submitActive],
   );
 
-  useEffect(() => {
-    if (!isWeb || typeof window === "undefined") return;
-    const listener = (event: KeyboardEvent) => {
-      if (handleKey(event.key)) event.preventDefault();
-    };
-    window.addEventListener("keydown", listener, true);
-    return () => window.removeEventListener("keydown", listener, true);
-  }, [handleKey]);
-
-  const handleNativeKeyPress = useCallback(
-    ({ nativeEvent: { key } }: { nativeEvent: { key: string } }) => {
-      if (key === "ArrowDown" || key === "ArrowUp" || key === "Escape") {
-        handleKey(key);
-      }
+  const modalLayer = useGlobalOverlayLayer("modal", true);
+  const handleOverlayKeyDown = useCallback(
+    (event: KeyboardInputEvent) => {
+      if (!handleKey(event.key)) return false;
+      event.preventDefault();
+      return true;
     },
     [handleKey],
   );
+  const setOverlayScope = useOverlayRegistration({
+    keys: ["Escape", "Enter", "ArrowUp", "ArrowDown"],
+    active: true,
+    layer: modalLayer,
+    onKeyDown: handleOverlayKeyDown,
+  });
 
   const handleInputChange = useCallback((value: string) => {
     setState((current) =>
@@ -816,11 +854,12 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
       ? joinDirectoryPath(page.parentPath, page.name.trim())
       : null;
 
-  return (
+  const modal = (
     <Modal visible transparent animationType="fade" onRequestClose={isWeb ? undefined : handleBack}>
       <View style={styles.overlay} testID="add-project-flow">
         <Pressable style={styles.backdrop} onPress={onClose} testID="add-project-flow-backdrop" />
         <View
+          ref={setOverlayScope}
           style={styles.panel}
           testID={`add-project-flow-page-${page.kind}`}
           accessibilityLabel={`Add project: ${page.kind}`}
@@ -839,70 +878,81 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
                 ) : null}
               </View>
             </View>
-            <ThemedTextInput
-              key={page.kind}
-              ref={inputRef}
-              value={pageInput(page)}
-              onChangeText={handleInputChange}
-              onKeyPress={isWeb ? undefined : handleNativeKeyPress}
-              onSubmitEditing={isWeb ? undefined : submitActive}
-              placeholder={pagePlaceholder(page)}
-              style={styles.input}
-              autoCapitalize="none"
-              autoCorrect={false}
-              editable={!isSubmitting}
-              returnKeyType="go"
-              testID="add-project-flow-input"
-            />
+            {page.kind !== "method" ? (
+              <ThemedTextInput
+                ref={inputRef}
+                initialValue={pageInput(page)}
+                onChangeText={handleInputChange}
+                onSubmitEditing={isWeb ? undefined : submitActive}
+                placeholder={pagePlaceholder(page)}
+                style={styles.input}
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!isSubmitting}
+                returnKeyType="go"
+                testID="add-project-flow-input"
+              />
+            ) : null}
           </View>
           <ScrollView
+            ref={resultsRef}
             style={styles.results}
-            contentContainerStyle={styles.resultsContent}
             keyboardShouldPersistTaps="always"
+            onLayout={onViewportLayout}
+            onScroll={onScroll}
+            scrollEventThrottle={16}
             showsVerticalScrollIndicator={false}
             testID="add-project-flow-results"
           >
-            {preview ? (
-              <Text style={styles.preview} testID="add-project-flow-path-preview">
-                {shortenPath(preview)}
-              </Text>
-            ) : null}
-            {isSubmitting ? (
-              <Text style={styles.stateText} testID="add-project-flow-progress">
-                {progressText(page)}
-              </Text>
-            ) : null}
-            {!isSubmitting && page.error ? (
-              <Text style={styles.errorText} testID="add-project-flow-error">
-                {page.error}
-              </Text>
-            ) : null}
-            {!isSubmitting && queryError ? (
-              <Text style={styles.errorText} testID="add-project-flow-query-error">
-                {queryError}
-              </Text>
-            ) : null}
-            {!isSubmitting && loading ? (
-              <Text style={styles.stateText} testID="add-project-flow-loading">
-                Loading...
-              </Text>
-            ) : null}
-            {!isSubmitting &&
-            (!loading || page.kind === "github-search") &&
-            (!queryError || page.kind === "github-search")
-              ? rows.map((option, index) => (
-                  <FlowRow key={option.id} option={option} active={index === activeIndex} />
-                ))
-              : null}
-            {!isSubmitting &&
-            !loading &&
-            !queryError &&
-            rows.length === 0 &&
-            page.kind !== "new-directory-name" ? (
-              <Text style={styles.stateText} testID="add-project-flow-empty">
-                {emptyText(page, host ?? null)}
-              </Text>
-            ) : null}
+            <View ref={contentRef} collapsable={false} style={styles.resultsContent}>
+              {preview ? (
+                <Text style={styles.preview} testID="add-project-flow-path-preview">
+                  {shortenPath(preview)}
+                </Text>
+              ) : null}
+              {isSubmitting ? (
+                <Text style={styles.stateText} testID="add-project-flow-progress">
+                  {progressText(page)}
+                </Text>
+              ) : null}
+              {!isSubmitting && page.error ? (
+                <Text style={styles.errorText} testID="add-project-flow-error">
+                  {page.error}
+                </Text>
+              ) : null}
+              {!isSubmitting && queryError ? (
+                <Text style={styles.errorText} testID="add-project-flow-query-error">
+                  {queryError}
+                </Text>
+              ) : null}
+              {!isSubmitting && loading ? (
+                <Text style={styles.stateText} testID="add-project-flow-loading">
+                  Loading...
+                </Text>
+              ) : null}
+              {!isSubmitting &&
+              (!loading || page.kind === "github-search") &&
+              (!queryError || page.kind === "github-search")
+                ? rows.map((option, index) => (
+                    <FlowRow
+                      key={option.id}
+                      option={option}
+                      activeItemRef={activeItemRef}
+                      active={index === activeIndex}
+                      onRowLayout={onItemLayout}
+                    />
+                  ))
+                : null}
+              {!isSubmitting &&
+              !loading &&
+              !queryError &&
+              rows.length === 0 &&
+              page.kind !== "new-directory-name" ? (
+                <Text style={styles.stateText} testID="add-project-flow-empty">
+                  {emptyText(page, host ?? null)}
+                </Text>
+              ) : null}
+            </View>
           </ScrollView>
           <View style={styles.footer} testID="add-project-flow-footer">
             <FlowHint keys={NAVIGATION_HINT_KEYS} action="Navigate" />
@@ -913,6 +963,8 @@ export function AddProjectFlow({ request, onClose }: AddProjectFlowProps) {
       </View>
     </Modal>
   );
+
+  return createElement(OverlayLayerProvider, { layer: modalLayer }, modal);
 }
 
 const styles = StyleSheet.create((theme) => ({
@@ -923,7 +975,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingTop: theme.spacing[12],
   },
   backdrop: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: "rgba(0, 0, 0, 0.5)",
   },
   panel: {
@@ -970,14 +1022,14 @@ const styles = StyleSheet.create((theme) => ({
     minWidth: 0,
     flexShrink: 1,
     color: theme.colors.foreground,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.normal,
   },
   hostContext: {
     minWidth: 0,
     flexShrink: 1,
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.normal,
   },
   input: {
@@ -999,11 +1051,11 @@ const styles = StyleSheet.create((theme) => ({
   disabled: { opacity: theme.opacity[50] },
   iconSlot: { width: 18, alignItems: "center" },
   rowText: { flex: 1, minWidth: 0 },
-  rowTitle: { color: theme.colors.foreground, fontSize: theme.fontSize.sm },
-  rowSubtitle: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.xs, marginTop: 2 },
+  rowTitle: { color: theme.colors.foreground, fontSize: theme.fontSize.base },
+  rowSubtitle: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm, marginTop: 2 },
   preview: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[2],
   },
@@ -1015,7 +1067,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   errorText: {
     color: theme.colors.destructive,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[3],
   },
@@ -1037,10 +1089,10 @@ const styles = StyleSheet.create((theme) => ({
   },
   footerKeyText: {
     color: theme.colors.foreground,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
   },
   footerAction: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
   },
 }));

@@ -1,25 +1,31 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useAddHost } from "@/hosts/add-host";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import { Pressable, Text, View, ScrollView } from "react-native";
 import { useRouter } from "expo-router";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
-import { QrCode, Link2, ClipboardPaste, ExternalLink, Settings } from "lucide-react-native";
+import {
+  QrCode,
+  Link2,
+  ClipboardPaste,
+  ExternalLink,
+  Settings,
+  Terminal,
+} from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import type { HostProfile } from "@/types/host-connection";
 import { getHostRuntimeStore, isHostRuntimeConnected, useHosts } from "@/runtime/host-runtime";
-import { AddHostModal } from "./add-host-modal";
-import { PairLinkModal } from "./pair-link-modal";
 import { Button } from "@/components/ui/button";
 import { resolveAppVersion } from "@/utils/app-version";
 import { formatVersionWithPrefix } from "@/desktop/updates/desktop-updates";
 import { buildOpenProjectRoute } from "@/utils/host-routes";
-import { PaseoLogo } from "@/components/icons/paseo-logo";
+import { AppLogo } from "@/components/icons/app-logo";
 import { openExternalUrl } from "@/utils/open-external-url";
 import { isFdroidBuild } from "@/constants/build-profile";
 import { isWeb, isNative } from "@/constants/platform";
+import { isElectronRuntime } from "@/desktop/host";
 
 interface WelcomeAction {
-  key: "scan-qr" | "direct-connection" | "paste-pairing-link";
+  key: "scan-qr" | "direct-connection" | "remote-ssh" | "paste-pairing-link";
   label: string;
   testID: string;
   primary: boolean;
@@ -49,13 +55,13 @@ const styles = StyleSheet.create((theme) => ({
   },
   title: {
     color: theme.colors.foreground,
-    fontSize: theme.fontSize.xl,
+    fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.medium,
     textAlign: "center",
   },
   subtitle: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     textAlign: "center",
   },
   copyBlock: {
@@ -99,12 +105,12 @@ const styles = StyleSheet.create((theme) => ({
   },
   setupLinkText: {
     color: theme.colors.accent,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.medium,
   },
   versionLabel: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     textAlign: "center",
     marginTop: theme.spacing[6],
   },
@@ -153,19 +159,13 @@ function useAnyHostOnline(serverIds: string[]): string | null {
   );
 }
 
-export interface WelcomeScreenProps {
-  onHostAdded?: (profile: HostProfile) => void;
-}
-
-export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
+export function WelcomeScreen() {
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const appVersion = resolveAppVersion();
   const appVersionText = formatVersionWithPrefix(appVersion);
-  const [isDirectOpen, setIsDirectOpen] = useState(false);
-  const [isPasteLinkOpen, setIsPasteLinkOpen] = useState(false);
   const hosts = useHosts();
   const anyOnlineServerId = useAnyHostOnline(hosts.map((h) => h.serverId));
 
@@ -186,21 +186,10 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
     router.push("/settings");
   }, [router]);
 
-  const handleOpenDirect = useCallback(() => setIsDirectOpen(true), []);
-  const handleCloseDirect = useCallback(() => setIsDirectOpen(false), []);
-  const handleOpenPasteLink = useCallback(() => setIsPasteLinkOpen(true), []);
-  const handleClosePasteLink = useCallback(() => setIsPasteLinkOpen(false), []);
-  const handleScanQr = useCallback(() => {
-    router.push("/pair-scan?source=onboarding");
-  }, [router]);
-
-  const handleHostSaved = useCallback(
-    ({ profile }: { profile: HostProfile; serverId: string }) => {
-      onHostAdded?.(profile);
-      finishOnboarding();
-    },
-    [onHostAdded, finishOnboarding],
-  );
+  const handleOpenDirect = useAddHost({ method: "direct", onAdded: finishOnboarding });
+  const handleOpenRemoteSsh = useAddHost({ method: "ssh", onAdded: finishOnboarding });
+  const handleOpenPasteLink = useAddHost({ method: "link", onAdded: finishOnboarding });
+  const handleScanQr = useAddHost({ method: "scan", onAdded: finishOnboarding });
 
   const actions: WelcomeAction[] =
     isWeb || isFdroidBuild
@@ -249,6 +238,17 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
           },
         ];
 
+  if (isElectronRuntime()) {
+    actions.splice(1, 0, {
+      key: "remote-ssh",
+      label: t("pairing.connectionMethods.remoteSsh.title"),
+      testID: "welcome-remote-ssh",
+      primary: false,
+      icon: Terminal,
+      onPress: handleOpenRemoteSsh,
+    });
+  }
+
   const scrollContentContainerStyle = useMemo(
     () => [styles.container, { paddingBottom: theme.spacing[6] + insets.bottom }],
     [theme.spacing, insets.bottom],
@@ -263,7 +263,7 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
         testID="welcome-screen"
       >
         <View style={styles.content}>
-          <PaseoLogo size={96} />
+          <AppLogo size={96} />
           <View style={styles.copyBlock}>
             <Text style={styles.title}>{t("onboarding.title")}</Text>
             <Text style={styles.subtitle}>{t("onboarding.subtitle")}</Text>
@@ -283,7 +283,6 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
 
           <Button
             variant="ghost"
-            size="sm"
             leftIcon={Settings}
             onPress={handleOpenSettings}
             style={styles.settingsButton}
@@ -293,18 +292,6 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
           </Button>
         </View>
         <Text style={styles.versionLabel}>{appVersionText}</Text>
-
-        <AddHostModal
-          visible={isDirectOpen}
-          onClose={handleCloseDirect}
-          onSaved={handleHostSaved}
-        />
-
-        <PairLinkModal
-          visible={isPasteLinkOpen}
-          onClose={handleClosePasteLink}
-          onSaved={handleHostSaved}
-        />
       </ScrollView>
     </View>
   );

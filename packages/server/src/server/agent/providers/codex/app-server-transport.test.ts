@@ -1,13 +1,61 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
 import {
   createCodexAppServerChildProcess,
   createFakeCodexAppServer,
 } from "./test-utils/fake-app-server.js";
-import { CodexAppServerClient } from "./app-server-transport.js";
+import { CodexAppServerClient, CodexAppServerExitError } from "./app-server-transport.js";
 
 describe("Codex app-server transport", () => {
+  test("classifies startup diagnostics delivered after the child exits", async () => {
+    const child = createCodexAppServerChildProcess();
+    const client = new CodexAppServerClient(child, createTestLogger());
+    const request = client.request("initialize", {});
+    const result = expect(request).rejects.toMatchObject({
+      name: "CodexAppServerExitError",
+      reason: "sqlite_state_initialization",
+      stderr: "failed to initialize sqlite state runtime",
+    });
+    child.exitCode = 1;
+    child.emit("exit", 1, null);
+    child.stderr.write("failed to initialize sqlite state runtime");
+    child.emit("close", 1, null);
+    try {
+      await result;
+    } finally {
+      child.stdout.end();
+      child.stderr.end();
+      child.stdin.end();
+    }
+  });
+
+  test.each([
+    {
+      stderr: "Error: failed to initialize sqlite state runtime under /isolated/.codex",
+      reason: "sqlite_state_initialization",
+    },
+    { stderr: "database is locked while loading configuration", reason: "other" },
+  ] as const)("classifies a failed startup from child stderr as $reason", async (entry) => {
+    const child = createCodexAppServerChildProcess();
+    const client = new CodexAppServerClient(child, createTestLogger());
+    const request = client.request("initialize", {});
+    child.stderr.write(entry.stderr);
+    child.exitCode = 1;
+    child.emit("exit", 1, null);
+
+    await expect(request).rejects.toMatchObject({
+      name: "CodexAppServerExitError",
+      reason: entry.reason,
+      exitCode: 1,
+      exitSignal: null,
+      stderr: entry.stderr,
+    } satisfies Partial<CodexAppServerExitError>);
+    child.stdout.end();
+    child.stderr.end();
+    child.stdin.end();
+  });
+
   test("ignores non-JSON stdout lines without dropping pending requests", async () => {
     const child = createCodexAppServerChildProcess();
     const client = new CodexAppServerClient(child, createTestLogger());
@@ -20,6 +68,77 @@ describe("Codex app-server transport", () => {
     child.stdout.end();
     child.stderr.end();
     child.stdin.end();
+  });
+
+  test("keeps a JSON message intact when it contains raw U+2028/U+2029", async () => {
+    const child = createCodexAppServerChildProcess();
+    const client = new CodexAppServerClient(child, createTestLogger());
+
+    const request = client.request("thread/resume", {});
+    const text = "a\u2028b\u2029c\u0085d";
+    // Codex does not escape U+2028/U+2029 in JSON output, so write them raw.
+    const message = `{"id":1,"result":{"text":"${text}"}}\n`;
+    const bytes = Buffer.from(message, "utf8");
+    // Split mid-way (inside a multi-byte character) to exercise chunk boundaries.
+    child.stdout.write(bytes.subarray(0, 28));
+    child.stdout.write(bytes.subarray(28));
+
+    await expect(request).resolves.toEqual({ text });
+    child.stdout.end();
+    child.stderr.end();
+    child.stdin.end();
+  });
+
+  test("reads a multi-megabyte JSON message arriving in 64 KB chunks", async () => {
+    const child = createCodexAppServerChildProcess();
+    const client = new CodexAppServerClient(child, createTestLogger());
+
+    const request = client.request("thread/resume", {});
+    // A resumed long thread arrives as one large line, split into 64 KB stdout chunks.
+    const text = "x".repeat(32 * 1024 * 1024);
+    const bytes = Buffer.from(`{"id":1,"result":{"text":"${text}"}}\n`, "utf8");
+    const chunkSize = 64 * 1024;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      child.stdout.write(bytes.subarray(offset, offset + chunkSize));
+    }
+
+    await expect(request).resolves.toEqual({ text });
+    child.stdout.end();
+    child.stderr.end();
+    child.stdin.end();
+  });
+
+  test("dispose rejects pending requests instead of leaving them hanging", async () => {
+    const child = createCodexAppServerChildProcess();
+    const client = new CodexAppServerClient(child, createTestLogger());
+
+    const request = client.request("initialize", {});
+    await client.dispose();
+
+    await expect(request).rejects.toThrow("Codex app-server client is closed");
+  });
+
+  test("dispose rejects until the child has actually exited", async () => {
+    vi.useFakeTimers();
+    const child = createCodexAppServerChildProcess();
+    child.kill = () => true;
+    const client = new CodexAppServerClient(child, createTestLogger());
+    try {
+      for (let i = 0; i < 2; i++) {
+        const closing = expect(client.dispose()).rejects.toThrow(
+          "did not report exit after SIGKILL",
+        );
+        await vi.advanceTimersByTimeAsync(3_000);
+        await closing;
+      }
+      child.exitCode = 0;
+      child.emit("exit", 0, null);
+      await expect(client.dispose()).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      child.stdout.end();
+      child.stderr.end();
+    }
   });
 
   test.each([
@@ -110,5 +229,58 @@ describe("Codex app-server transport", () => {
     codex.child.stdout.end();
     codex.child.stderr.end();
     codex.child.stdin.end();
+  });
+});
+
+describe("Codex stdout byte admission", () => {
+  test("an oversized response fails only its own request", async () => {
+    const child = createCodexAppServerChildProcess();
+    const client = new CodexAppServerClient(child, createTestLogger());
+    const terminations: Error[] = [];
+    client.setUnexpectedTerminationHandler((error) => terminations.push(error));
+    const oversized = client.request("thread/items/list", {}).catch((error: Error) => error);
+    const other = client.request("model/list", {});
+    const chunk = Buffer.alloc(64 * 1024, "x");
+    child.stdout.write('{"id":1,"result":"');
+    for (let index = 0; index < 2049; index++) child.stdout.write(chunk);
+    child.stdout.write('"}\n{"id":2,"result":{"data":[]}}\n');
+
+    expect(await oversized).toMatchObject({
+      name: "CodexAppServerResponseTooLargeError",
+      method: "thread/items/list",
+      limitBytes: 128 * 1024 * 1024,
+    });
+    await expect(other).resolves.toEqual({ data: [] });
+    const next = client.request("model/list", {});
+    child.stdout.write('{"id":3,"result":{"data":["next"]}}\n');
+    await expect(next).resolves.toEqual({ data: ["next"] });
+    expect(terminations).toEqual([]);
+    await client.dispose();
+    child.stdout.end();
+    child.stderr.end();
+  });
+
+  test("an oversized notification fails pending requests and the session", async () => {
+    const child = createCodexAppServerChildProcess();
+    const client = new CodexAppServerClient(child, createTestLogger());
+    const terminations: Error[] = [];
+    client.setUnexpectedTerminationHandler((error) => terminations.push(error));
+    const request = client.request("thread/resume", {}, 1000).catch((error: Error) => error);
+    const chunk = Buffer.alloc(64 * 1024, "x");
+    child.stdout.write('{"method":"item/completed","params":"');
+    for (let index = 0; index < 2048; index++) child.stdout.write(chunk);
+    const error = await request;
+    expect(error).toMatchObject({
+      name: "ProviderStreamLimitError",
+      code: "PROVIDER_STREAM_LINE_TOO_LARGE",
+      limitBytes: 128 * 1024 * 1024,
+    });
+    expect(terminations).toEqual([error]);
+    expect(client.hasPendingRequests()).toBe(false);
+    child.stdout.write('"}\n{"id":1,"result":"late"}\n');
+    await expect(client.request("model/list")).rejects.toThrow("closed");
+    await client.dispose();
+    child.stdout.end();
+    child.stderr.end();
   });
 });

@@ -56,6 +56,9 @@ function spawnRelayDevServer(port: number): ChildProcess {
       wranglerCliPath,
       "dev",
       "--local",
+      // Local execution still inherits production vars; exercise the local Durable Object.
+      "--var",
+      "PASEO_RELAY_UPSTREAM:",
       "--ip",
       "127.0.0.1",
       "--port",
@@ -348,7 +351,7 @@ async function stopRelayProcess(relayProcess: ChildProcess): Promise<void> {
           clientReceivedReady.byteOffset + clientReceivedReady.byteLength,
         ),
       );
-      expect(JSON.parse(decryptedReady as string)).toEqual({ type: "ready" });
+      expect(JSON.parse(new TextDecoder().decode(decryptedReady))).toEqual({ type: "ready" });
 
       // Client sends encrypted message
       const clientMessage = "Hello from client!";
@@ -366,7 +369,7 @@ async function stopRelayProcess(relayProcess: ChildProcess): Promise<void> {
           daemonReceivedMsg.byteOffset + daemonReceivedMsg.byteLength,
         ),
       );
-      expect(decryptedClientMsg).toBe(clientMessage);
+      expect(new TextDecoder().decode(decryptedClientMsg)).toBe(clientMessage);
 
       // Daemon sends encrypted response
       const daemonMessage = "Hello from daemon!";
@@ -384,7 +387,7 @@ async function stopRelayProcess(relayProcess: ChildProcess): Promise<void> {
           clientReceivedMsg.byteOffset + clientReceivedMsg.byteLength,
         ),
       );
-      expect(decryptedDaemonMsg).toBe(daemonMessage);
+      expect(new TextDecoder().decode(decryptedDaemonMsg)).toBe(daemonMessage);
 
       // Cleanup
       daemonWs.close();
@@ -478,7 +481,7 @@ async function stopRelayProcess(relayProcess: ChildProcess): Promise<void> {
       daemonSharedKey,
       received.buffer.slice(received.byteOffset, received.byteOffset + received.byteLength),
     );
-    expect(decrypted).toBe(secret);
+    expect(new TextDecoder().decode(decrypted)).toBe(secret);
 
     daemonControlWs.close();
     daemonWs.close();

@@ -1,56 +1,104 @@
 # Contributing to Paseo
 
-Paseo is an opinionated product maintained by one person right now.
+This guide is here to save us both time and help you find a useful way to contribute.
 
-The product covers a lot of surface: mobile, desktop, web, the daemon, the relay, and both self-hosted and hosted setups.
+Paseo grows through bug reports, testing, workflow discussions, plugins, documentation, and people helping each other. The sections below explain where each contribution belongs and what to expect.
 
-Contributing takes a lot of context that is very hard to transfer. That's why product, design, architecture, and workflow decisions are currently all made by the maintainer.
+## Philosophy
 
-## Becoming a maintainer
+**Paseo has a lean, opinionated core built to be extended.**
 
-There's no formal process to become a maintainer, if you consistently contribute and help out, you'll become one.
+The goal is a low floor and a high ceiling: a polished default experience that is easy to understand, with the flexibility to choose your providers, run on your own infrastructure, and build your own workflows. Paseo should remain self-hosted and respectful of your privacy and control.
 
-Here's the progression:
+The core continues to evolve through improvements to the shared experience. Specialized workflows and integrations belong in the extension ecosystem. Product, design, architecture, and workflow decisions remain with the maintainer.
 
-1. Get involved in the community: answer questions in Discord and on GitHub
-2. Triage bugs: replicate and help fix them
-3. Work on maintainer-approved features
+Read the [product philosophy](docs/product.md) for the reasoning behind these choices and how Paseo develops.
 
-The reason for this progression is so that you can gain all the context you need to take on more responsibility, so that I can see if you have what it takes to be a maintainer.
+## Build a plugin
 
-Learning on the job is fine, I do not care how many years of experience you have, what I care about is that you get the vision and want to contribute.
+Most specialized workflows and integrations are better served by plugins.
 
-## Pull requests
+Plugins let you build what you need, share it, and maintain it independently. Start with the [plugin documentation](https://paseo.sh/docs/plugins). For applications and integrations built around Paseo, see the [SDK documentation](https://paseo.sh/docs/sdk).
 
-✅ Will be accepted
+If an extension point is missing, describe the workflow in [Discussions](https://github.com/getpaseo/paseo/discussions). A reusable capability that enables several plugins may be a better addition than implementing one particular workflow in core.
 
-- Keep it to one focused change
-- Link to an issue
-- Explain the problem you're solving
-- Include repro steps if it's a bug
-- Include QA/testing evidence
-- UI changes need screenshots or video for every affected platform: iOS, Android, desktop, and web
-- If you only tested one platform, say that clearly
+## Report bugs
 
-⛔️ Will be rejected
+Open a [GitHub issue](https://github.com/getpaseo/paseo/issues) and fill out the bug report template.
 
-- Bundle unrelated changes
-- Fail basic checks like typecheck, formatting or linting
-- Add a feature or design change that wasn't discussed first
-- Submit no evidence of testing
-- Skip the linked issue
-- Clearly fully AI-generated PR
+Include:
 
-## Requesting features
+- What you did, what you expected, and what happened.
+- Reproduction steps, Paseo version, and platform.
+- Relevant logs, screenshots, or a recording.
 
-If you need a feature implemented, create a Github issue or a thread in Discord.
+If an agent investigated, include the evidence and reproduction steps it collected. Its explanation of the cause still needs verification.
 
-Explain the problem you want to solve: your use case, where Paseo falls short today, and the flow you expect.
+Focused fixes for reproducible bugs are welcome. If you submit one, follow the pull request and QA guidance below.
 
-## AI assistance
+## Discuss workflows before proposing features
 
-Using AI to help write code is fine, but you must:
+Product discussions, including feature requests, belong in [GitHub Discussions](https://github.com/getpaseo/paseo/discussions). Feature requests opened as issues will be closed.
 
-- Ensure your agents read the docs
-- Understand the code you submit
-- Review and test the code yourself
+Explain:
+
+- What are you trying to do?
+- How do you do it today?
+- Where does Paseo get in the way?
+- What would a better workflow look like?
+
+This helps other people describe their needs and gives me useful context when deciding what to build.
+
+There is no feature request backlog or commitment to implement a discussion. I may read and learn from it without replying.
+
+## If you still want to submit a pull request
+
+After considering plugins and discussing the workflow, you may still want to propose a change to core. Focused fixes for reproducible bugs are also welcome.
+
+**Pull requests are closed by default.** I may reopen the ones I want to take forward. Submit one only if you are comfortable with it being closed without a detailed review or explanation.
+
+Paseo receives more pull requests than I can responsibly review. Reviewing every submission and explaining every decision would consume the time available for developing the product.
+
+I can prompt an agent to write code just as you can. The bottlenecks are choosing what to build, shaping it, verifying its behavior, and taking responsibility for its maintenance. A finished implementation still leaves that work to do.
+
+If you choose to submit a PR, these are the basics to cover.
+
+### What I look for in a core feature
+
+- **Demonstrated demand.** Link a discussion with concrete examples of other users needing the workflow. A feature for a small, specialized use case belongs in a plugin.
+- **Value across workflows.** The feature should improve how existing capabilities work together and benefit a broad set of users. A reusable improvement is more valuable than an isolated control for one task.
+- **A coherent design across platforms and providers.** Shared capabilities should work across platforms and providers wherever applicable. Do not reshape a shared abstraction around one provider while leaving the others unsupported or inconsistent.
+- **A finished experience.** Follow the [design guidelines](docs/design.md). The feature must look and feel right in Paseo, including loading states, layout stability, and interaction performance. PRs with janky or rushed interfaces will be closed. Design judgment remains with the maintainer.
+
+### Keep the scope small
+
+Submit one focused change. PRs adding more than roughly **3,000 lines of production code** are unlikely to be accepted. Prefer the smallest complete improvement that can be tested and understood on its own.
+
+### QA evidence
+
+Run the changed application or service and test the affected workflow yourself. Include detailed QA evidence so I can see what you exercised and what happened. PRs without this verification and evidence will be closed, whether they fix a bug or add a feature.
+
+Explain the problem and link the relevant bug report or discussion. Include:
+
+- Automated tests that exercise the changed behavior. A bug fix needs a regression test that fails on the broken version.
+- The commands you ran and their output.
+- A recording for interactive UI changes, or before-and-after screenshots for static changes.
+- The platforms you tested and any affected platforms you could not test.
+
+The [QA guide](docs/qa.md) explains the expected evidence and available tooling.
+
+Using an agent is welcome. Sending it to implement a change and submitting its output without trying the result yourself does not meet this bar.
+
+**Satisfying all of the above does not mean your pull request will be merged.**
+
+### What happens to your contribution
+
+If I take a contribution forward, I may narrow it, reshape it, or use it as a reference for my own implementation. **You will be credited for your contribution, including when I reimplement it.**
+
+A closed PR does not necessarily mean the underlying problem was dismissed. It means I am not taking that submission forward. Detailed reviews, individual explanations, and follow-up discussions cannot be provided at this volume.
+
+## Help the community
+
+Testing betas, reproducing bugs, improving documentation, sharing plugins, and answering questions all help Paseo develop.
+
+There is no formal process for becoming a maintainer. Consistent involvement and good judgment build the shared context needed to take on more responsibility.

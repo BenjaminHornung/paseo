@@ -1,6 +1,8 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { app, BrowserWindow, Notification, ipcMain, nativeImage } from "electron";
+import { getDesktopSettingsStore } from "../settings/desktop-settings-electron.js";
+import { resolveDesktopDistribution } from "../distribution.js";
 
 interface NotificationInput {
   title?: unknown;
@@ -30,6 +32,9 @@ function toRecord(value: unknown): Record<string, unknown> | undefined {
 
 function getNotificationIcon(): Electron.NativeImage | null {
   const candidates = [
+    ...(app.isPackaged && resolveDesktopDistribution(process.execPath).id === "advanced"
+      ? [path.join(process.resourcesPath, "icon.png")]
+      : []),
     path.resolve(__dirname, "../assets/icon.png"),
     path.resolve(__dirname, "../assets/64x64.png"),
     path.resolve(__dirname, "../assets/128x128.png"),
@@ -95,11 +100,12 @@ export function registerNotificationHandlers(): void {
     const body = toTrimmedString(rawInput?.body) ?? undefined;
     const data = toRecord(rawInput?.data);
     const icon = getNotificationIcon();
+    const settings = await getDesktopSettingsStore().get();
     const notification = new Notification({
       title,
       ...(body ? { body } : {}),
       ...(icon ? { icon } : {}),
-      silent: true,
+      silent: !settings.notifications.playSound,
     });
 
     activeNotifications.add(notification);

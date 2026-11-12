@@ -1,5 +1,98 @@
 import { describe, expect, it } from "vitest";
-import { buildForgeBlobUrl, buildForgeBranchTreeUrl, hasForgeWebUrls } from "./forge-url";
+import {
+  buildForgeBlobUrl,
+  buildForgeBranchTreeUrl,
+  buildForgeChecksUrl,
+  buildForgeReferenceUrl,
+  hasForgeWebUrls,
+} from "./forge-url";
+
+describe("buildForgeReferenceUrl", () => {
+  it.each([
+    ["github", "git@github.com:acme/repo.git", "#", null, "https://github.com/acme/repo/issues/12"],
+    ["github", "git@github.com:acme/repo.git", "!", null, null],
+    [
+      "github",
+      "https://github.com/acme/repo",
+      "#",
+      "other/tools",
+      "https://github.com/other/tools/issues/12",
+    ],
+    ["gitlab", "git@gitlab.com:g/sub/p.git", "#", null, "https://gitlab.com/g/sub/p/-/issues/12"],
+    [
+      "gitlab",
+      "git@gitlab.com:g/sub/p.git",
+      "!",
+      null,
+      "https://gitlab.com/g/sub/p/-/merge_requests/12",
+    ],
+    [
+      "gitlab",
+      "https://gitlab.corp:8443/g/p.git",
+      "!",
+      "g/q",
+      "https://gitlab.corp:8443/g/q/-/merge_requests/12",
+    ],
+    [
+      "codeberg",
+      "https://codeberg.org/acme/repo.git",
+      "!",
+      null,
+      "https://codeberg.org/acme/repo/pulls/12",
+    ],
+    [
+      "gitea",
+      "http://forge.test:3000/team/repo.git",
+      "#",
+      null,
+      "http://forge.test:3000/team/repo/issues/12",
+    ],
+    [
+      "github",
+      "http://github.com/acme/repo.git",
+      "#",
+      null,
+      "https://github.com/acme/repo/issues/12",
+    ],
+    [
+      "forgejo",
+      "git@forge.example:acme/repo.git",
+      "#",
+      null,
+      "https://forge.example/acme/repo/issues/12",
+    ],
+    ["bitbucket", "git@bitbucket.org:acme/repo.git", "#", null, null],
+    ["github", null, "#", null, null],
+    ["github", "git@github.com:acme/repo.git", "#", "../escape", null],
+  ] as const)("builds %s %s %s in %s", (forge, remoteUrl, sigil, repo, expected) => {
+    expect(buildForgeReferenceUrl(forge, { remoteUrl, repo, sigil, number: 12 })).toBe(expected);
+  });
+
+  it("rejects non-positive numbers", () => {
+    const remoteUrl = "git@github.com:acme/repo.git";
+    expect(buildForgeReferenceUrl("github", { remoteUrl, sigil: "#", number: 0 })).toBeNull();
+  });
+});
+
+describe("buildForgeChecksUrl", () => {
+  it.each([
+    [
+      "github",
+      "https://github.com/acme/repo/pull/12",
+      "https://github.com/acme/repo/pull/12/checks",
+    ],
+    [
+      "gitlab",
+      "https://gitlab.com/acme/repo/-/merge_requests/12",
+      "https://gitlab.com/acme/repo/-/merge_requests/12/pipelines",
+    ],
+    ["codeberg", "https://codeberg.org/acme/repo/pulls/12", null],
+    ["bitbucket", "https://bitbucket.org/acme/repo/pull-requests/12", null],
+    ["gitlab", "not a url", null],
+  ] as const)("maps the %s checks URL", (forge, url, expected) => {
+    expect(buildForgeChecksUrl(forge, url)).toBe(expected);
+  });
+});
 
 describe("buildForgeBranchTreeUrl", () => {
   it("builds a branch-specific GitHub tree URL", () => {
@@ -42,6 +135,24 @@ describe("buildForgeBranchTreeUrl", () => {
         branch: "main",
       }),
     ).toBe("https://codeberg.org/acme/repo/src/branch/main");
+  });
+
+  it("preserves a non-default port for a self-hosted https remote", () => {
+    expect(
+      buildForgeBranchTreeUrl("forgejo", {
+        remoteUrl: "https://home-git.example.com:60443/team/repo.git",
+        branch: "master",
+      }),
+    ).toBe("https://home-git.example.com:60443/team/repo/src/branch/master");
+  });
+
+  it("omits the port for a self-hosted remote on the default port", () => {
+    expect(
+      buildForgeBranchTreeUrl("forgejo", {
+        remoteUrl: "https://home-git.example.com/team/repo.git",
+        branch: "master",
+      }),
+    ).toBe("https://home-git.example.com/team/repo/src/branch/master");
   });
 
   it("returns null when the current branch is unavailable", () => {
@@ -129,6 +240,18 @@ describe("buildForgeBlobUrl", () => {
         path: "src/index.ts",
       }),
     ).toBe("https://github.acme.internal/team/repo/blob/main/src/index.ts");
+  });
+
+  it("preserves a non-default port for a self-hosted https remote", () => {
+    expect(
+      buildForgeBlobUrl("forgejo", {
+        remoteUrl: "https://home-git.example.com:60443/team/repo.git",
+        branch: "master",
+        path: "src/index.ts",
+        lineStart: 12,
+        lineEnd: 20,
+      }),
+    ).toBe("https://home-git.example.com:60443/team/repo/src/branch/master/src/index.ts#L12-L20");
   });
 
   it("canonicalizes the github.com SSH-alias host to the web host", () => {

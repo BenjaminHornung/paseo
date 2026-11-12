@@ -20,7 +20,7 @@ A semantic element used in three or more places is a primitive. One of a kind is
 
 Primitives live in `packages/app/src/components/ui/` and `packages/app/src/components/headers/`. Card and row layout live in `packages/app/src/styles/settings.ts`. Section structure lives in `packages/app/src/screens/settings/settings-section.tsx`.
 
-A pressable styled to look like a button is wrong; the button is `<Button>` (`packages/app/src/components/ui/button.tsx`). A bare `<Text>` styled to look like a section header is wrong; the section header is `<SettingsSection>` (`packages/app/src/screens/settings/settings-section.tsx`). A custom `Modal` for a confirmation is wrong; the confirmation is `confirmDialog` (`packages/app/src/utils/confirm-dialog.ts`). A hand-rolled overflow menu is wrong; the menu is `<DropdownMenu>` (`packages/app/src/components/ui/dropdown-menu.tsx`). A hand-rolled status pill is wrong; the pill is `<StatusBadge>` (`packages/app/src/components/ui/status-badge.tsx`).
+A pressable styled to look like a button is wrong; the button is `<Button>` (`packages/app/src/components/ui/button.tsx`). A pressable wrapping an icon is wrong; the icon action is `<ToolbarButton>` (`packages/app/src/components/ui/pane-content-toolbar.tsx`), which owns the hitbox, the rounded `interactionHighlight` fill on hover and press, the compact size, and the tooltip. Rows on a menu surface are `<MenuItem>`, or `<ComposerTrackRow>` in a track panel; other rows are `<PressHighlight>` (`packages/app/src/components/ui/press-highlight.tsx`), which flashes on native the moment a finger lands. A bare `<Text>` styled to look like a section header is wrong; the section header is `<SettingsSection>` (`packages/app/src/components/settings/headings/settings-section.tsx`). A docs link in its header is its `link` prop, which renders `Label ↗` on the title's rail; a ghost button with an arrow is wrong. A custom `Modal` for a confirmation is wrong; the confirmation is `confirmDialog` (`packages/app/src/utils/confirm-dialog.ts`). A hand-rolled overflow menu is wrong; the menu is `<DropdownMenu>` (`packages/app/src/components/ui/dropdown-menu.tsx`). A hand-rolled status pill is wrong; the pill is `<StatusBadge>` (`packages/app/src/components/ui/status-badge.tsx`). A circle pinned over a scrolling surface is wrong; the floating action is `<FloatingActionButton>` (`packages/app/src/components/ui/floating-action-button.tsx`), one per surface, and the surface reserves `FLOATING_ACTION_BUTTON_CLEARANCE` below its content so the button never traps the last row.
 
 Before adding a new component, read `components/ui/`. The primitive usually exists.
 
@@ -28,13 +28,15 @@ Before adding a new component, read `components/ui/`. The primitive usually exis
 
 ## 3. Hierarchy
 
-Hierarchy is conveyed through weight and color, not size. Most labels, titles, and hints across the app are `fontSize.base` or `fontSize.xs`. The distinction between a row's primary line and its secondary line is `foreground` versus `foregroundMuted`.
+Hierarchy is conveyed through weight and color, not size. Most interface text is `fontSize.base`; compact metadata and hints use `fontSize.sm`. The distinction between a row's primary line and its secondary line is `foreground` versus `foregroundMuted`.
+
+The authored interface ramp uses a 14px base. New native installs default to 15px; web and desktop default to 14px. The Appearance **Interface size** setting is the rendered `fontSize.base` value and scales the rest of the UI ramp proportionally. Primary readable content has its own `fontSize.content`, which defaults to 16px on native and 15px on web and desktop. It owns message bodies, composer input, Markdown, and PR prose. Controls, navigation, metadata, tool chrome, code, diffs, editors, and terminals stay on their interface or code tokens. **Code size** remains independent.
 
 Weight has three tiers, applied by role:
 
-- **Screen titles** — the title at the top of a screen — use `<ScreenTitle>` (`packages/app/src/components/headers/screen-title.tsx`), which renders `fontSize.base` at weight `400` on compact and `300` on desktop. Top-of-screen titles are lighter on desktop, not heavier. The workspace screen header follows the same rule (`packages/app/src/screens/workspace/workspace-screen.tsx`).
-- **Structural labels** use `fontWeight.medium`. This applies to section labels above a stack of rows (`packages/app/src/components/agent-list.tsx:519-523`, `packages/app/src/components/keyboard-shortcuts-dialog.tsx:63-67`), form field labels above an input inside a modal (`packages/app/src/components/add-host-modal.tsx:19-23`, `packages/app/src/components/pair-link-modal.tsx:24-28`), the title at the top of a modal/sheet/dialog (`packages/app/src/components/adaptive-modal-sheet.tsx:90-94`, `packages/app/src/components/ui/combobox.tsx:1607-1611`, `packages/app/src/components/welcome-screen.tsx:48-53`), action button labels in tight components such as the sidebar callout actions (`packages/app/src/components/sidebar-callout.tsx:218-221`), and inline data emphasis on dense metadata rows (`packages/app/src/components/git-diff-pane.tsx:2322-2327`, `packages/app/src/components/file-explorer-pane.tsx:1115-1122`).
-- **Content** uses `fontWeight.normal`. This applies to settings rows (`packages/app/src/styles/settings.ts`), sidebar primary list-item titles (`packages/app/src/components/sidebar-workspace-list.tsx:2680-2686`, `packages/app/src/components/agent-list.tsx:572-578`), `<Button>` text (`packages/app/src/components/ui/button.tsx:80-84`), `<StatusBadge>` text (`packages/app/src/components/ui/status-badge.tsx:56-60`), and `<SidebarCallout>` titles (`packages/app/src/components/sidebar-callout.tsx:175-180`).
+- **Screen titles** — the title in app chrome — use `<ScreenTitle>` (`packages/app/src/components/headers/screen-title.tsx`), which renders `fontSize.base` at weight `400` on compact and `300` on desktop. The New workspace hero is the only larger product title; it uses `fontSize["2xl"]` (`packages/app/src/screens/new-workspace-screen.tsx`).
+- **Structural labels** use `fontWeight.medium`. This applies to section labels above a stack of rows (`packages/app/src/components/agent-list.tsx:519-523`, `packages/app/src/components/keyboard-shortcuts-dialog.tsx:63-67`), form field labels above an input inside a modal (`packages/app/src/hosts/add-host/internal/add-host-modal.tsx:19-23`, `packages/app/src/hosts/add-host/internal/pair-link-modal.tsx:24-28`), the title at the top of a modal/sheet/dialog (`packages/app/src/components/adaptive-modal-sheet.tsx:90-94`, `packages/app/src/components/ui/combobox.tsx:1607-1611`, `packages/app/src/components/welcome-screen.tsx:48-53`), action button labels in tight components such as the sidebar callout actions (`packages/app/src/components/sidebar-callout.tsx:218-221`), and inline data emphasis on dense metadata rows (`packages/app/src/components/git-diff-pane.tsx:2322-2327`, `packages/app/src/components/file-explorer-pane.tsx:1115-1122`).
+- **Content** uses `fontWeight.normal`. This applies to settings rows (`packages/app/src/styles/settings.ts`), sidebar primary list-item titles (`packages/app/src/components/sidebar-workspace-list.tsx:2680-2686`, `packages/app/src/components/agent-list.tsx:572-578`), `<StatusBadge>` text (`packages/app/src/components/ui/status-badge.tsx:56-60`), and `<SidebarCallout>` titles (`packages/app/src/components/sidebar-callout.tsx:175-180`).
 
 The rule, condensed: text that _names_ a surface or a group is `medium`. Text that lives _inside_ a surface or a group is `normal`. Top-of-screen titles are `<ScreenTitle>`, which is lighter still.
 
@@ -60,11 +62,21 @@ The button is `<Button>` (`packages/app/src/components/ui/button.tsx`). It has f
 
 `ghost` is structural and non-committal — no border, no fill. Back arrows, header toggles, "Load more" footers (`packages/app/src/screens/sessions-screen.tsx:54-63`), more-affordances. Ghost is used when the affordance is part of the chrome, not a decision.
 
+Header and toolbar controls use `interactionHighlight` for hovered, pressed, open, and selected
+backgrounds. It is a translucent semantic fill so the same control works over the main surface and
+the sidebar. Apply it as `backgroundColor`; setting `opacity` on the control also fades its content.
+
 `destructive` is filled with `destructive`. It only appears inside a confirm. The button on the page is `outline`; the destructive button is the confirm button inside the dialog.
 
-Sizes: `xs` for ultra-tight inline triggers. `sm` for any button sitting in a row. `md` is the page default. `lg` is reserved for large standalone CTAs.
+Controls come in two sizes, defined once in `control-geometry.ts`. The default is the right size almost everywhere — pages, dialogs, forms, settings rows, the setup flow — so don't pass a size. It is 32px tall where a pointer drives it and 44px where controls are touch-sized, so every touch control meets the iOS HIG's 44pt hit region. `sm` is 28px pointer and 32px touch, with `fontSize.sm` labels, and is for tight chrome only: toolbars, nested settings rows, dense inline row actions. A `size="sm"` on an ordinary page or dialog is wrong, and so is choosing a size from `useIsCompactFormFactor()`.
 
-Sizes are a shared contract across control kinds, defined once in `control-geometry.ts`: `xs` = 28px tall with `fontSize.xs` labels, `sm` = 32px with `fontSize.sm`, `md`/`lg` = 44px with `fontSize.sm`. `<SegmentedControl>` (`packages/app/src/components/ui/segmented-control.tsx`) takes the same `xs`/`sm`/`md` sizes — a segmented control next to a `<Button>` of the same size always matches in height, label size, and horizontal padding. Thin chrome such as the file toolbar uses `xs`; settings rows use `sm`. Never shrink a control's font or padding locally to fit a context — if the context needs a smaller control, the size tier is missing or the wrong one is in use.
+Dense toolbar rows, such as the composer's, are the exception to the 44pt control. Touch-sized the row is 44pt tall and each control is a 36pt circle (`TOOLBAR_DISC_SIZE`): send and stop fill it, and every other control's pressed highlight fills it, so every highlight is the same fully rounded shape. Labelled pickers are 36pt pills. A control lays out at its full highlight (`toolbarSlot`, `toolbarContentSlot`) with no gap between controls (`TOOLBAR_CONTROL_GAP`), so neighbouring highlights touch and never overlap. Toolbar glyphs match the header icons: 20pt, the app's 1.5px stroke, resting at `foreground` (`toolbarGlyphsFor`). The context ring is 18pt with a 2px stroke (`TOOLBAR_RINGS`): a circle fills its box where an outline glyph does not, and a thin circle reads lighter than a glyph at the same stroke. A disc's solid glyph, such as the stop square, stays at the `md` size (`TOOLBAR_DISC_GLYPH_SIZES`). Pointer-sized toolbars keep 28px controls, a 4px gap, and a 16pt muted glyph that brightens on hover.
+
+In the composer, the first glyph's ink starts on the text column's edge, and the trailing control is always a disc, so the row does not shift as it changes between voice mode, send and stop. The disc nests into the corner, as far from the right edge as from the bottom, and touch-sized the composer's corner radius is concentric with it (`packages/app/src/composer/input/toolbar-rails.ts`). Touch-sized the disc keeps a 6pt clearance from its neighbour, because it is always painted and a pressed neighbour would merge with it. The attach button sits 2pt closer to the picker than its highlight would put it: the plus is all thin arms, so the full gap reads wide. That offset is set by eye.
+
+One gate, `resolveControlSizing`, picks touch or pointer sizing: touch when the layout is compact or the device has a touch screen. An iPad with the sidebar docked is wide and touch-sized; a desktop is pointer-sized; a phone is both compact and touch. The touch-screen fact is read once at startup (`hasTouchScreen` in `hooks/use-fine-pointer.ts`), so attaching a mouse or keyboard to a tablet never shrinks its controls. Stylesheets take sizes from `bySizing({ touch, pointer })`, which resolves to a breakpoint value, so a caller never sees which sizing it got. Rows, icon buttons and icon slots take theirs from `styles/density.ts`, which uses the same gate. An `{ xs, md }` literal for a hit target or glyph is wrong: on an iPad it yields the pointer size.
+
+Buttons are pills (`borderRadius.full`) with medium-weight labels; an icon-only button is a circle. `<Switch>` follows the same two sizes: a 34×20 track by default and in `sm`, 44×26 where controls are touch-sized, and it reserves its size's control height so a row holding one lines up with a row holding a button. Buttons, text fields, dropdown triggers, and `<SegmentedControl>` (`packages/app/src/components/ui/segmented-control.tsx`) share the size contract — the same size name means the same height and label size on every control kind, so controls in one row line up. Segments run tighter than a button, because the gap between segments already reads as padding. The selected segment is a `surface3` fill with `foreground` text, not an inverted one — inverting it inside thin chrome puts a white slab in the toolbar. A settings row sizes the controls in its trailing slot itself, default in a card and `sm` when nested (`packages/app/src/components/ui/control-size.tsx`), so don't pass a size to a button, dropdown or field placed in a row. Code that computes with a control's height outside a stylesheet uses `controlHeightForLayout`. Never shrink a control's font or padding locally to fit a context — if the context needs a smaller control, the size tier is missing or the wrong one is in use.
 
 A `<Pressable>` wrapping a `<Text>` is a sixth variant. It is wrong. `<Button>` accepts `style`, `textStyle`, `leftIcon`, `disabled`, `size`, and `variant`.
 
@@ -96,9 +108,9 @@ Five primitives. The pick is determined by option count, the need to search, and
 
 `<ContextMenu>` is for right-click and long-press on a target. The row is the trigger; there is no visible affordance. Used for incidental actions on workspace rows in the sidebar (`packages/app/src/components/sidebar-workspace-list.tsx`).
 
-`<AdaptiveModalSheet>` is for a focused task. Multi-field forms (`packages/app/src/components/add-host-modal.tsx`, `packages/app/src/components/pair-link-modal.tsx`, `packages/app/src/components/project-picker-modal.tsx`), confirmations with detail, anything that earns a backdrop. Bottom sheet on compact, centered card on desktop. Raw `Modal` is wrong for any of these.
+`<AdaptiveModalSheet>` is for a focused task. Multi-field forms (`packages/app/src/hosts/add-host/internal/add-host-modal.tsx`, `packages/app/src/hosts/add-host/internal/pair-link-modal.tsx`, `packages/app/src/components/project-picker-modal.tsx`), confirmations with detail, anything that earns a backdrop. Bottom sheet on compact, centered card on desktop. Both sit on `surface0`, the same base as a screen, so settings cards and inputs inside a modal read the way they do on the Settings screen. Raw `Modal` is wrong for any of these.
 
-`<AdaptiveModalSheet>` owns compact bottom safe-area padding inside the sheet so the sheet background still reaches the screen bottom. If a sheet's first snap point is shorter than its header, content, and safe-area clearance, raise that snap point rather than moving the sheet container.
+`<AdaptiveModalSheet>` owns the presentation. Its content inset — the gutter that puts sheet content on the same rails as the sheet header — and compact bottom safe-area padding are the sheet's, not the caller's. A caller declares layout intent through `contentStyle` and never branches on form factor to add its own margins. If a sheet's first snap point is shorter than its header, content, and safe-area clearance, raise that snap point rather than moving the sheet container.
 
 `confirmDialog` is for destructive yes/no and imperative confirmation. Promise-based: `await confirmDialog({ destructive: true, ... })`. Anything where a wrong click loses work.
 
@@ -108,42 +120,66 @@ Three themes is `DropdownMenu`. Thirty hosts is `Combobox`. A label and a value 
 
 ## 7. Density and rhythm
 
-Settings detail pages, the projects detail page, and any list+detail content sit inside a centered, max-width 720 column (`packages/app/src/screens/settings-screen.tsx`, `packages/app/src/screens/projects-screen.tsx`). Lines stay readable, the eye does not have to track wide horizontal distances. Form modals carry their own narrower content frame (`packages/app/src/components/add-host-modal.tsx`).
+Settings detail pages, the projects detail page, and any list+detail content sit inside a centered, max-width 720 column (`packages/app/src/screens/settings-screen.tsx`, `packages/app/src/screens/projects-screen.tsx`). Lines stay readable, the eye does not have to track wide horizontal distances. Form modals carry their own narrower content frame (`packages/app/src/hosts/add-host/internal/add-host-modal.tsx`).
 
 Workspace and chat surfaces use the full width — these are working surfaces, not reading surfaces. The composer carries `MAX_CONTENT_WIDTH` from `packages/app/src/constants/layout.ts` to keep lines readable while letting the workspace pane fill the rest.
 
 Sections sit apart. `<SettingsSection>` owns its own bottom margin; the next thing is wrapped in another `<SettingsSection>`. The agent-list `sectionHeading` carries the same `marginTop`/`marginBottom` rhythm (`packages/app/src/components/agent-list.tsx:511-517`). Adding `marginBottom` to a section is wrong.
 
+A section or group explains itself through the `info` prop on `<SettingsSection>` or `<SettingsGroup>` — an info icon beside the header that opens a tooltip (`packages/app/src/components/settings/headings/settings-info-tip.tsx`). A muted paragraph between the header and the card is wrong: it sits in the section's own gap, so it reads as a second heading rather than as prose belonging to the header. Explanatory copy that describes one row belongs to that row, as `settingsStyles.rowHint` inside the card.
+
 Cards inside a section sit closer than sections. Rows inside a card touch — only the divider separates them. The rhythm is page → spacious; section → spacious; card → tight.
 
 Rows have generous vertical padding: roughly 16px of content plus 16px of vertical padding for settings rows, 8–12px for sidebar list items where many rows must fit. Compressing rows below the established density to fit more on the screen is wrong. Too many rows means more cards or more sections, not smaller rows.
+
+Rows revealed under a `<SettingsCollapsibleRow>` are nested rows, one step smaller than card rows: 8px of vertical padding, `fontSize.sm` text, `sm` controls, and one fixed height so rows with and without a trailing button line up. The collapsible row sets this for everything under it (`packages/app/src/components/settings/row-density.tsx`). Never pass a density to a row, and never pad or resize a nested row by hand.
 
 The whitespace is the design.
 
 ---
 
-## 8. Responsiveness
+## 8. Alignment
+
+Things align to their glyphs, not to their boxes. A row's leading icon, its title, and the label of the button in its trailing slot sit on the same rails — the ink lines up, not the padding, not the touch target, not the hover background.
+
+Pick the rails from the content, then hold them. A settings card establishes a leading rail at the icon's left edge and a trailing rail at the last glyph's right edge; every row in that card uses the same two. A row whose icon is absent still starts its title on the leading rail. Indentation is a new rail, not an arbitrary offset.
+
+The pressable is bigger than the glyph, and that is fine. Hit areas grow outward from the aligned content — they never move it. A button that looks two pixels off because its padding is asymmetric is misaligned even though its box is correct. The composer toolbar is the worked example: its outermost ink, the attach `+` on the left and the trailing glyph or send/stop disc on the right, sits on the text column's edges, and touch-sized the end highlights overhang into the composer padding by each end control's ink inset (`composerToolbarOverhang`).
+
+Optical alignment beats arithmetic when a glyph disagrees with its bounding box. Icons with visual weight on one side, chevrons, and single-character labels usually need a small nudge to look centered. Trust the eye, then leave a comment saying the offset is optical.
+
+One row off the rail makes the whole card look unconsidered.
+
+---
+
+## 9. Responsiveness
 
 Compact-first. The small case is designed; the large case adds chrome around it.
 
-The list+detail pattern is canonical and reused across surfaces. The settings shell (`packages/app/src/screens/settings-screen.tsx`) and the projects screen (`packages/app/src/screens/projects-screen.tsx`) implement it identically:
+Use `md: 600` for the compact/wide layout boundary, in logical points on native and CSS pixels on web. Do not add a separate density breakpoint; touch sizing comes from the control sizing gate in [Buttons](#4-buttons). Measured content constraints remain independent: composer controls use `COMPACT_CONTENT_WIDTH` (500), so a narrow pane can keep compact controls inside a wide window.
+
+The settings shell (`packages/app/src/screens/settings-screen.tsx`) and the projects screen (`packages/app/src/screens/projects-screen.tsx`) share the canonical list+detail navigation pattern:
 
 - On compact: full-screen list with `<BackHeader>` at the top. Tapping a row pushes a full-screen detail with its own `<BackHeader>` that returns to the list.
-- On desktop: a 320px sidebar on the left holds the list with `surfaceSidebar` background. The content pane on the right holds the selected detail with `<ScreenHeader>`, `<HeaderIconBadge>`, and `<ScreenTitle>`.
+- On wide layouts: a sidebar on the left holds the list with `surfaceSidebar` background. The content pane on the right holds the selected detail with `<ScreenHeader>`, `<HeaderIconBadge>`, and `<ScreenTitle>`.
 
 The branching is one `useIsCompactFormFactor()` check at the top of the screen component. The list and the detail are the same components in both layouts; only the framing changes.
 
 The workspace screen (`packages/app/src/screens/workspace/workspace-screen.tsx`) follows a different but parallel rule: tabs collapse on compact, panes split on desktop. The sidebar (`packages/app/src/components/left-sidebar.tsx`) is overlaid on compact and pinned on desktop.
 
-On a narrow desktop route, app navigation yields to the rendered content topology when the remaining width cannot preserve its center target: Settings keeps its 320px list + 400px detail split, and a workspace Explorer keeps its current visible width plus a 400px center pane. That is a topology decision at the app container, not a second compact breakpoint. Temporary width clamps are render-only; widening restores the user's saved sidebar widths.
+On a narrow window using the wide layout, app navigation yields when the remaining width cannot accommodate the content topology. Settings prefers a 720px split (320px list + 400px detail); its list shrinks first to keep forms readable without reducing the detail below 400px. Explorer reserves at least 240px plus a 360px workspace. These are local space budgets, not compact breakpoints. The app sidebar shrinks from its preferred 320px toward a 200px minimum to leave a 400px center target; its preferred width fits at 720px. Temporary width clamps are render-only; widening restores the user's saved sidebar widths.
 
-Electron window controls are top-corner obstructions, not a compact-layout condition. Rendered surfaces declare which top corners they physically occupy; only those corners receive clearance. Full-window overlays redeclare both corners. A focused split pane owns both corners; if focus restoration temporarily exposes the full split tree, the split boundary reserves one top strip instead of assigning a control rectangle to an arbitrarily narrow leaf. The 720px desktop breakpoint preserves the default 320px sidebar and target 400px center width when the Explorer is closed; it is product policy, not an obstruction gate.
+Electron window controls are top-corner obstructions, not a compact-layout condition. Rendered surfaces declare which top corners they physically occupy; only those corners receive clearance. Full-window overlays redeclare both corners. A focused split pane owns both corners; if focus restoration temporarily exposes the full split tree, the split boundary reserves one top strip instead of assigning a control rectangle to an arbitrarily narrow leaf.
+
+Windows and Linux controls are fixed window chrome, outside scrolling header content. A tab rail that reaches them ends at their obstruction and shows the shared overflow fade. On macOS, the Explorer toggle occupies a fixed top-right window slot so opening and closing Explorer does not move the pointer target.
+
+Each window edge has one safe-area owner. `WindowLayoutProvider` publishes the bottom inset that every surface reads through `useSafeAreaInsets()`: on iOS 27.1 and later it is UIKit's bottom-bar clearance, which refines the rectangular home-indicator inset to the screen's corners, and elsewhere the system inset. Surfaces apply that value once and never stack their own spacing under it; `WindowLayoutSurface` owns the horizontal insets the same way.
 
 A new list+detail feature copies the settings shell. A new workspace-shaped feature copies the workspace shell. Inventing a third shape happens in design review, not in a PR.
 
 ---
 
-## 9. Copy and voice
+## 10. Copy and voice
 
 Sentence case. "Pair a device", "Danger zone", "Restart daemon", "Inject Paseo tools", "No sessions yet", "Load more". Proper nouns retain casing — Paseo, Beta, Stable, Local. Title case is wrong.
 
@@ -165,15 +201,15 @@ Terminology:
 
 ---
 
-## 10. States
+## 11. States
 
 Loading is inline by default. `<LoadingSpinner size={14} color={foregroundMuted} />` sits next to the thing it relates to (`packages/app/src/screens/settings/providers-section.tsx:227-231`). Page-level loading is a centered `<LoadingSpinner size="large">` (`packages/app/src/screens/sessions-screen.tsx:69-72`). Card-level loading is a single short line, not a spinner. In-row dropdown items use `<DropdownMenuItem status="pending" pendingLabel="Removing...">`; the menu item handles its own pending state.
 
-Empty states are short noun phrases. Centered, muted, one or two lines. Sessions screen pairs the empty noun with a single ghost button to navigate back (`packages/app/src/screens/sessions-screen.tsx:74-81`); that pairing is the maximum elaboration. Illustrations and CTAs disguised as empty states are wrong.
+Screen-level empty states use a centered, muted noun phrase and at most one ghost button (`packages/app/src/screens/sessions-screen.tsx`). Sidebar list empty states use a quiet bordered card with a left-aligned `sm` title, a muted `sm` description, and `sm` `<Button>` actions. Use `secondary` for the primary action and `outline` for a secondary action (`packages/app/src/components/sidebar/empty-states.tsx`). Keep both forms short and free of illustrations.
 
 Inline errors are a single sentence in `palette.red[300]` `xs`, sitting under the field or inside the card it relates to (`packages/app/src/screens/settings/providers-section.tsx:115-119`).
 
-Page-level alerts — informational notices, success confirmations, warnings, or recoverable errors that need a small visible block on the page — use `<Alert>` (`packages/app/src/components/ui/alert.tsx`). Variants: `default`, `info`, `success`, `warning`, `error`. The chrome is quiet by design: a 1px tinted border, transparent background, a small variant-tinted icon, the title in the variant accent, the description in `foregroundMuted`. Actions go in the `children` slot as `<Button variant="outline" size="sm">` — recovery actions are low-frequency and outline keeps them quiet alongside the alert's accent (`packages/app/src/screens/project-settings-screen.tsx`). One `<Alert>` at a time per region.
+Page-level alerts — informational notices, success confirmations, warnings, or recoverable errors that need a small visible block on the page — use `<Alert>` (`packages/app/src/components/ui/alert.tsx`). Variants: `default`, `info`, `success`, `warning`, `error`. The chrome is quiet by design: a 1px tinted border, transparent background, a small variant-tinted icon, the title in the variant accent, the description in `foregroundMuted`. Actions go in the `children` slot as `<Button variant="outline">` — recovery actions are low-frequency and outline keeps them quiet alongside the alert's accent (`packages/app/src/screens/project-settings-screen.tsx`). One `<Alert>` at a time per region.
 
 Sidebar callouts — cross-cutting alerts that apply across the whole app, like worktree setup, Rosetta install, and desktop update available — register through `useSidebarCallouts()` and render in the left sidebar via `<SidebarCallout>` (`packages/app/src/components/sidebar-callout.tsx`). The chrome (top-border-only, full-width action buttons) is tuned for that ~280px column. Canonical sources: `packages/app/src/components/worktree-setup-callout-source.tsx`, `packages/app/src/desktop/updates/rosetta-callout-source.tsx`, `packages/app/src/desktop/updates/update-callout-source.tsx`. Never import `<SidebarCallout>` into a page — that's what `<Alert>` is for.
 
@@ -185,13 +221,15 @@ Partial failure (a list mostly fine but one source errored) is a bordered banner
 
 State surfaces at the smallest scope it affects. Field error stays under the field; page error is a banner; flow-stopping error is an `Alert`.
 
+Changing state must not move the layout. A row that grows when its badge arrives, a card that reflows when a count resolves, a list that jumps as data streams in — all wrong. Reserve the space the loaded state will need, so the skeleton, the spinner, and the content occupy the same box. A surface that shifts under the user stops feeling calm.
+
 ---
 
-## 11. List rows
+## 12. List rows
 
 The row anatomy is a content column with an optional trailing slot. Inside a card the row is `settingsStyles.row`. Inside a sidebar list the row carries its own padding and `borderRadius.lg` per item (`packages/app/src/components/sidebar-workspace-list.tsx:2614-2625`).
 
-Rows that drill into a detail lead with a chevron in the trailing slot (`ChevronRight`, `iconSize.sm`, `foregroundMuted`). The whole row is the `<Pressable>`. Pair-device row (`packages/app/src/screens/settings/host-page.tsx:644-668`), provider row (`packages/app/src/screens/settings/providers-section.tsx:92-132`), project row in the projects list. Chevron means navigation.
+Rows that drill into a detail lead with a chevron in the trailing slot (`ChevronRight`, `iconSize.sm`, `foregroundMuted`). The whole row is the `<Pressable>`. Pair-device row (`packages/app/src/screens/settings/host-page.tsx:644-668`), provider row (`packages/app/src/screens/settings/providers-section.tsx:92-132`), project row in the projects list. A fixed right chevron means navigation. An expandable row uses a trailing right chevron that rotates down when expanded (`SettingsCollapsibleRow`); pressing the row reveals its child rows in place.
 
 Kebab menus (`<DropdownMenu>` with `<MoreVertical size={14} />` trigger) are for actions on the row, not navigation. Trigger style: `padding: 2`, `borderRadius: 4`, hover background `surface2`. Menu position: `align="end"`. Items use `<DropdownMenuItem leading={<Icon size={14} color={foregroundMuted} />} ...>`. Visibility is `isHovered || isTouchPlatform` — hover-revealed on web, always visible on native (`packages/app/src/components/sidebar-workspace-list.tsx:684-770`).
 
@@ -203,24 +241,32 @@ Selected state on rows in a desktop list+detail uses `surfaceSidebarHover` as th
 
 ---
 
-## 12. Status pills and badges
+## 13. Status pills and badges
 
-Status pills are `palette.<color>[300]` foreground on a 10%-alpha background of the same color. Success uses green, warning uses amber, danger uses red, muted uses zinc. The `<StatusBadge>` primitive (`packages/app/src/components/ui/status-badge.tsx`) is canonical.
+There is exactly one token per status signal — `statusSuccess`, `statusDanger`, `statusWarning`, `statusMerged` — and every status surface uses it: PR state icons, CI check icons and pies, diff stats, file-change icons, status pills, usage bars. A surface does not get a quieter or louder variant because of where it sits. If a dense list feels loud, that is a density or weight problem; fix the density, not the color. The tokens are generated, not hand-picked — see the rule in `packages/app/src/styles/theme.ts` and regenerate rather than nudging one value. The level is set by the densest consumer, the sidebar workspace list.
 
-Status dots — the small filled circles next to a host or agent name — are `borderRadius.full` filled with the status color (`statusSuccess`, `statusWarning`, `statusDanger`, or `foregroundMuted`). They sit in the trailing slot of a sidebar row or as a leading marker on a status pill.
+Status **dots** are the one exception, and they are a family of their own — `statusDotSuccess`, `statusDotDanger`, `statusDotWarning`, `statusDotRunning`, read only by `getStatusDotColor` (`packages/app/src/utils/status-dot-color.ts`). Same hues and the same generation rule, but their own band: 90% of gamut chroma against the status family's 55–60%. A dot is a few points of solid color with no shape to read and no label attached, and the running one pulses, so at the status band's chroma the dots read dimmer than the metadata beside them — backwards, since the dot is the row's state. Lightness is set by hue separation rather than by distance from the surface: at 6pt four dark hues on a light surface all read as one dark blob no matter how much contrast they have. So the light band runs as bright as the contrast floor allows at L=0.62, the last step where all four clear 3:1 against the sidebar's `surface2`; the dark band sits at L=0.72, where danger turns pink above. All four move together; regenerate the set, never one hue.
 
-The bespoke pills in `packages/app/src/screens/settings/host-page.tsx:97-116`, `packages/app/src/components/agent-list.tsx:607-632`, and `packages/app/src/components/sidebar-workspace-list.tsx:2889-2894` are drift to be removed. New code uses `<StatusBadge>`.
+Status pills use the status token for text on the shared `surface3` and `border` shell. The neutral shell keeps the signal legible without manufacturing translucent colors outside the theme. The `<StatusBadge>` primitive (`packages/app/src/components/ui/status-badge.tsx`) is canonical; a pill never reaches into `palette`.
+
+Status dots — the small filled circles next to a host or agent name — are `borderRadius.full` filled with the status token. Which token a given agent state maps to is owned by `getStatusDotColor` (`packages/app/src/utils/status-dot-color.ts`); a row, a group header, and a project icon all call it rather than restating the mapping. They sit in the trailing slot of a sidebar row or as a leading marker on a status pill.
+
+Identity badges — the project icon, the sidebar host badge, and the PR-panel participant avatar — do not use the theme palette. They draw from the fixed ten-color identity table in `packages/app/src/styles/identity-colors.ts`, whose hexes are held to one contrast band so a color identifies rather than ranks. Project icons and PR avatars use it as a fill with a white letter — that is `identityColor`, one theme-independent hex per identity. Host badges use it as a _foreground_ on both the glyph and the label, which is a different contrast problem that the fill table cannot solve: no single hex clears 4.5:1 against both a near-white and a dark sidebar. Foregrounds therefore come from `identityForeground(name, colorScheme)`, one set per scheme, hue unchanged. That set is generated on the **status family's** lightness and chroma fraction, because a meta row puts a host badge beside a CI check and a diff stat, and two families at different lightness make the brighter one shout. Change the status band and this one changes with it. A host with no color assigned falls back to `foregroundMuted`. The table is theme-independent by design; do not fork it per theme, and do not add hexes to it without recomputing the band.
+
+New status pills use `<StatusBadge>`. Identity, shortcut, and interactive link badges remain separate because color does not encode status there.
 
 ---
 
-## 13. Forbidden
+## 14. Forbidden
 
-- `fontWeight.medium` on row titles, body text, button labels, badge text, or `<SidebarCallout>` titles. Medium is reserved for the structural-label tier described in §3 — section labels, modal/sheet titles, dense metadata emphasis, and tight action labels. Anything else is `normal`. `<ScreenTitle>` is responsive `400/300` and is never overridden.
+- `fontWeight.medium` on row titles, body text, badge text, or `<SidebarCallout>` titles. Medium is reserved for the structural-label tier described in §3 — section labels, modal/sheet titles, dense metadata emphasis, and tight action labels. Anything else is `normal`. `<ScreenTitle>` is responsive `400/300` and is never overridden.
 - `<Pressable>` wrapping `<Text>` to make a button. `<Button>` exists.
+- Importing `Pressable` or a `Touchable*` outside `components/ui/`. A raw pressable has no standard press or hover feedback, so every one drifts. `paseo/no-raw-pressable` reports it; the files on its burn-down list in `.oxlintrc.json` may only leave it.
 - Bare `<Text>` for a section header inside settings. `<SettingsSection>` exists.
+- A muted paragraph between a section header and its card. Section-level explanation is the header's `info` tooltip (§7).
 - A "Settings" CTA on a detail page. Detail pages are settings; settings is reached from the sidebar, the host entry, or a row's kebab menu.
 - The word "checkout" in UI strings or identifiers. The term is "workspace".
-- New color tokens or hardcoded hex outside the palette. Status pill rgba backgrounds are the documented pattern (§12), not a license.
+- New color tokens or hardcoded hex outside the palette. The identity color table is the documented exception (§13), not a license.
 - Placeholder text dimmed beyond `foregroundMuted`. No extra opacity, no italics, no ghost-text.
 - `onPointerEnter` and `onPointerLeave`. They do not fire on native iOS. Hover uses Pressable's `onHoverIn`/`onHoverOut` gated with `isHovered || isCompact || isNative`.
 - Raw DOM APIs without an `isWeb` guard.
@@ -233,14 +279,14 @@ The bespoke pills in `packages/app/src/screens/settings/host-page.tsx:97-116`, `
 
 ---
 
-## 14. Canonical surfaces by pattern
+## 15. Canonical surfaces by pattern
 
 | Pattern                                             | Reference                                                                                                                                                                                                                                                                                                |
 | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | List+detail (compact stack, desktop sidebar+pane)   | `packages/app/src/screens/settings-screen.tsx`, `packages/app/src/screens/projects-screen.tsx`                                                                                                                                                                                                           |
 | Detail card+row                                     | `packages/app/src/screens/settings/host-page.tsx`, `packages/app/src/screens/settings/providers-section.tsx`                                                                                                                                                                                             |
 | Section grouping inside a card list                 | `packages/app/src/screens/settings/settings-section.tsx`                                                                                                                                                                                                                                                 |
-| Form modal (label + input fields, primary + cancel) | `packages/app/src/components/add-host-modal.tsx`, `packages/app/src/components/pair-link-modal.tsx`, `packages/app/src/components/project-picker-modal.tsx`                                                                                                                                              |
+| Form modal (label + input fields, primary + cancel) | `packages/app/src/hosts/add-host/internal/add-host-modal.tsx`, `packages/app/src/hosts/add-host/internal/pair-link-modal.tsx`, `packages/app/src/components/project-picker-modal.tsx`                                                                                                                    |
 | Destructive confirmation                            | `confirmDialog` invoked from `packages/app/src/screens/settings/host-page.tsx:541-547`                                                                                                                                                                                                                   |
 | Centered hero / first-run                           | `packages/app/src/components/welcome-screen.tsx`                                                                                                                                                                                                                                                         |
 | Sidebar list (workspaces, hosts)                    | `packages/app/src/components/sidebar-workspace-list.tsx`, `packages/app/src/components/left-sidebar.tsx`                                                                                                                                                                                                 |

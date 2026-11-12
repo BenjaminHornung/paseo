@@ -12,6 +12,7 @@
  */
 import { getForgeDefinition } from "@getpaseo/protocol/forge-manifest";
 import { normalizeHost, parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
+import type { ForgeReferenceSigil } from "@/git/client-forge-module";
 import { getClientForgeLogicModule } from "@/git/forges";
 
 export interface ForgeBlobUrlInput {
@@ -27,8 +28,37 @@ export interface ForgeBranchTreeUrlInput {
   branch: string | null | undefined;
 }
 
+export interface ForgeReferenceUrlInput {
+  remoteUrl: string | null | undefined;
+  /** Repository path of a cross-repository reference; the remote's repository when absent. */
+  repo?: string | null;
+  sigil: ForgeReferenceSigil;
+  number: number;
+}
+
+export function buildForgeChecksUrl(forge: string, changeRequestUrl: string): string | null {
+  const suffix = getClientForgeLogicModule(forge)?.urlGrammar?.changeRequestChecksSuffix;
+  if (!suffix) {
+    return null;
+  }
+  try {
+    const url = new URL(changeRequestUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return null;
+    }
+    url.pathname = `${url.pathname.replace(/\/$/, "")}${suffix}`;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 interface ForgeWebLocation {
+  /** "http" only for a self-hosted http:// remote; every other remote browses over https. */
+  scheme: "http" | "https";
   host: string;
+  /** Non-default port for a self-hosted http(s) origin, or undefined. */
+  port?: string;
   repo: string;
 }
 
@@ -58,16 +88,28 @@ function resolveForgeWebLocation(
   if (!location || !isValidRepoPath(location.path)) {
     return null;
   }
-  const cloudHosts = getForgeDefinition(forge)?.cloudHosts;
-  const webHost =
-    cloudHosts && cloudHosts.length > 0 && cloudHosts.map(normalizeHost).includes(location.host)
-      ? normalizeHost(cloudHosts[0])
-      : location.host;
-  return { host: webHost, repo: location.path };
+  const cloudHosts = (getForgeDefinition(forge)?.cloudHosts ?? []).map(normalizeHost);
+  const isCloudHost = cloudHosts.includes(location.host);
+  const webHost = isCloudHost ? cloudHosts[0] : location.host;
+  // Carry a non-default port only for a self-hosted http(s) origin (e.g.
+  // `:60443`): the web UI shares that origin. An SSH/scp remote's port is not the
+  // web port, and a canonicalized cloud host always serves on the default port.
+  const port =
+    !isCloudHost && (location.transport === "http" || location.transport === "https")
+      ? location.port
+      : undefined;
+  const scheme = !isCloudHost && location.transport === "http" ? "http" : "https";
+  return { scheme, host: webHost, port, repo: location.path };
 }
 
 function encodeBranch(branch: string): string {
   return branch.split("/").map(encodeURIComponent).join("/");
+}
+
+/** Scheme and host, plus `:port` when the remote pins a non-default port. */
+function forgeOrigin(location: ForgeWebLocation): string {
+  const authority = location.port ? `${location.host}:${location.port}` : location.host;
+  return `${location.scheme}://${authority}`;
 }
 
 function normalizeBlobPath(path: string | null | undefined): string | null {
@@ -102,7 +144,7 @@ export function buildForgeBranchTreeUrl(
   if (!grammar || !location || !branch || branch === "HEAD") {
     return null;
   }
-  return `https://${location.host}/${location.repo}${grammar.treeInfix}${encodeBranch(branch)}`;
+  return `${forgeOrigin(location)}/${location.repo}${grammar.treeInfix}${encodeBranch(branch)}`;
 }
 
 export function buildForgeBlobUrl(forge: string, input: ForgeBlobUrlInput): string | null {
@@ -114,11 +156,38 @@ export function buildForgeBlobUrl(forge: string, input: ForgeBlobUrlInput): stri
     return null;
   }
   const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
-  let url = `https://${location.host}/${location.repo}${grammar.blobInfix}${encodeBranch(branch)}/${encodedPath}`;
+  let url = `${forgeOrigin(location)}/${location.repo}${grammar.blobInfix}${encodeBranch(branch)}/${encodedPath}`;
   if (input.lineStart && input.lineStart > 0) {
     url += grammar.lineAnchor(input.lineStart, input.lineEnd);
   }
   return url;
+}
+
+/**
+ * Web URL of a shorthand reference such as `#12` or `group/project!12`. A
+ * cross-repository reference stays on the remote's host. Null when the forge
+ * has no shorthand for the sigil.
+ */
+export function buildForgeReferenceUrl(
+  forge: string,
+  input: ForgeReferenceUrlInput,
+): string | null {
+  const referencePath = getClientForgeLogicModule(forge)?.urlGrammar?.referencePaths?.find(
+    (path) => path.sigil === input.sigil,
+  );
+  const location = resolveForgeWebLocation(forge, input.remoteUrl);
+  const repo = input.repo ?? location?.repo;
+  if (
+    !referencePath ||
+    !location ||
+    !repo ||
+    !isValidRepoPath(repo) ||
+    !Number.isSafeInteger(input.number) ||
+    input.number <= 0
+  ) {
+    return null;
+  }
+  return `${forgeOrigin(location)}/${repo}${referencePath.infix}${input.number}`;
 }
 
 /** Whether the forge has web URL builders (i.e. a known URL grammar). */

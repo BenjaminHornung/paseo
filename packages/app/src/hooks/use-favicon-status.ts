@@ -5,6 +5,7 @@ import { getDesktopHost } from "@/desktop/host";
 import { useWorkspaceStatusesForBadges } from "@/stores/session-store-hooks";
 import { deriveMacDockBadgeCountFromWorkspaceStatuses } from "@/utils/desktop-badge-state";
 import { isNative } from "@/constants/platform";
+import { appDisplayName, isAdvancedDistribution } from "@/constants/app-brand";
 
 type FaviconStatus = "none" | "running" | "attention";
 type ColorScheme = "dark" | "light";
@@ -20,6 +21,18 @@ const FAVICON_IMAGES: Record<ColorScheme, Record<FaviconStatus, { uri: string } 
     none: require("../../assets/images/favicon-light.png"),
     running: require("../../assets/images/favicon-light-running.png"),
     attention: require("../../assets/images/favicon-light-attention.png"),
+  },
+};
+const ADVANCED_FAVICON_IMAGES: typeof FAVICON_IMAGES = {
+  dark: {
+    none: require("../../assets/images/advanced/favicon-dark.png"),
+    running: require("../../assets/images/advanced/favicon-dark-running.png"),
+    attention: require("../../assets/images/advanced/favicon-dark-attention.png"),
+  },
+  light: {
+    none: require("../../assets/images/advanced/favicon-light.png"),
+    running: require("../../assets/images/advanced/favicon-light-running.png"),
+    attention: require("../../assets/images/advanced/favicon-light-attention.png"),
   },
 };
 /* eslint-enable @typescript-eslint/no-require-imports */
@@ -40,12 +53,15 @@ function deriveFaviconStatus(
 }
 
 function getFaviconUri(status: FaviconStatus, colorScheme: ColorScheme): string {
-  const image = FAVICON_IMAGES[colorScheme][status];
+  const image = (isAdvancedDistribution ? ADVANCED_FAVICON_IMAGES : FAVICON_IMAGES)[colorScheme][
+    status
+  ];
   if (typeof image === "object" && "uri" in image) {
     return image.uri;
   }
   const suffix = status === "none" ? "" : `-${status}`;
-  return `/assets/images/favicon-${colorScheme}${suffix}.png`;
+  const directory = isAdvancedDistribution ? "advanced/" : "";
+  return `/assets/images/${directory}favicon-${colorScheme}${suffix}.png`;
 }
 
 function getOrCreateFaviconLink(): HTMLLinkElement | null {
@@ -94,10 +110,21 @@ async function updateMacDockBadge(count?: number) {
 }
 
 export function useFaviconStatus() {
-  const { agents } = useAggregatedAgents();
+  const { agents } = useAggregatedAgents({ demand: !isNative });
   const workspaceStatuses = useWorkspaceStatusesForBadges();
   const [colorScheme, setColorScheme] = useState<ColorScheme>(getSystemColorScheme);
   const lastDockBadgeCountRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    if (isNative || !isAdvancedDistribution || typeof document === "undefined") return;
+    document.querySelector('link[rel="manifest"]')?.setAttribute("href", "/advanced/manifest.json");
+    document
+      .querySelector('link[rel="apple-touch-icon"]')
+      ?.setAttribute("href", "/advanced/apple-touch-icon.png");
+    document
+      .querySelector('meta[name="apple-mobile-web-app-title"]')
+      ?.setAttribute("content", appDisplayName);
+  }, []);
 
   // Listen for system color scheme changes
   useEffect(() => {

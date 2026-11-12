@@ -1,4 +1,12 @@
-import type { AgentAttachment } from "./messages.js";
+import type { AgentMessage } from "./agent-message.js";
+import type {
+  AgentAttachment,
+  AgentOptionChoiceSchema,
+  AgentOptionControlSchema,
+  AgentOptionSelectControlSchema,
+  AgentOptionToggleControlSchema,
+} from "./messages.js";
+import type { z } from "zod";
 
 export type AgentProvider = string;
 
@@ -74,6 +82,8 @@ export type ProviderStatus = "ready" | "loading" | "error" | "unavailable";
 export interface AgentModelDefinition {
   provider: AgentProvider;
   id: string;
+  aliases?: string[];
+  isSelectable?: boolean;
   label: string;
   description?: string;
   isDefault?: boolean;
@@ -100,8 +110,20 @@ export function normalizeAgentModelDefinition(model: AgentModelDefinition): Agen
   return { ...model, defaultThinkingOptionId };
 }
 
+/** A provider addresses models by ID; repeated rows retain the first definition. */
+export function normalizeAgentModelCatalog(models: AgentModelDefinition[]): AgentModelDefinition[] {
+  const ids = new Set<string>();
+  const unique = models.filter((model) => {
+    if (ids.has(model.id)) return false;
+    ids.add(model.id);
+    return true;
+  });
+  return unique.length === models.length ? models : unique;
+}
+
 export interface ProviderSnapshotEntry {
   provider: AgentProvider;
+  capabilities?: AgentCapabilityFlags;
   status: ProviderStatus;
   enabled: boolean;
   source?: "builtin" | "custom";
@@ -111,6 +133,7 @@ export interface ProviderSnapshotEntry {
   fetchedAt?: string;
   label?: string;
   description?: string;
+  iconSvg?: string;
   defaultModeId?: string | null;
 }
 
@@ -131,13 +154,30 @@ export interface AgentFeatureSelect {
   description?: string;
   tooltip?: string;
   icon?: string;
+  /** Desktop toolbar presentation; omitted means labeled. Mobile selectors stay labeled. */
+  desktopTrigger?: "icon" | "label";
   value: string | null;
   options: AgentSelectOption[];
 }
 
 export type AgentFeature = AgentFeatureToggle | AgentFeatureSelect;
 
+export type AgentOptionChoice = z.infer<typeof AgentOptionChoiceSchema>;
+
+/** `key` is the top-level provider option key the control reads and writes. */
+export type AgentOptionToggleControl = z.infer<typeof AgentOptionToggleControlSchema>;
+
+/** `defaultValue` is the choice an unset option stands for. */
+export type AgentOptionSelectControl = z.infer<typeof AgentOptionSelectControlSchema>;
+
+/**
+ * A provider's description of a composer control over one top-level option key.
+ * The control carries no value: it is read from the agent's effective options.
+ */
+export type AgentOptionControl = z.infer<typeof AgentOptionControlSchema>;
+
 export interface AgentCapabilityFlags {
+  supportsTextGeneration?: boolean;
   [capability: string]: boolean | undefined;
   supportsStreaming: boolean;
   supportsSessionPersistence: boolean;
@@ -146,6 +186,7 @@ export interface AgentCapabilityFlags {
   supportsMcpServers: boolean;
   supportsReasoningStream: boolean;
   supportsToolInvocations: boolean;
+  supportsBackgroundWorkRefresh?: boolean;
   supportsRewindConversation?: boolean;
   supportsRewindFiles?: boolean;
   supportsRewindBoth?: boolean;
@@ -271,7 +312,7 @@ export type ToolCallDetail =
       subAgentType?: string;
       description?: string;
       childSessionId?: string;
-      log: string;
+      log?: string;
       actions?: Array<{
         index: number;
         toolName: string;
@@ -295,6 +336,7 @@ export type ToolCallDetail =
     };
 
 interface ToolCallBase {
+  agentMessage?: AgentMessage;
   [key: string]: unknown;
   type: "tool_call";
   callId: string;
@@ -337,14 +379,37 @@ export interface CompactionTimelineItem {
   preTokens?: number;
 }
 
+export interface PluginTimelineItem {
+  type: "plugin";
+  id: string;
+  pluginId: string;
+  kind: string;
+  version: number;
+  data: JsonValue;
+}
+
+export interface AgentTaskItem {
+  text: string;
+  completed: boolean;
+  id?: string;
+  status?: "pending" | "in_progress" | "completed";
+  activeForm?: string;
+}
+
 export type AgentTimelineItem =
   | { type: "user_message"; text: string; messageId?: string; clientMessageId?: string }
   | { type: "assistant_message"; text: string; messageId?: string }
   | { type: "reasoning"; text: string }
   | ToolCallTimelineItem
-  | { type: "todo"; items: { text: string; completed: boolean }[] }
+  | { type: "todo"; items: AgentTaskItem[] }
   | { type: "error"; message: string }
-  | CompactionTimelineItem;
+  | {
+      type: "notification";
+      level: "info" | "warning" | "error";
+      message: string;
+    }
+  | CompactionTimelineItem
+  | PluginTimelineItem;
 
 export type AgentStreamEvent =
   | { type: "thread_started"; sessionId: string; provider: AgentProvider }
@@ -451,6 +516,26 @@ export interface AgentRunResult {
   canceled?: boolean;
 }
 
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+export type ProviderOptions = Record<string, unknown>;
+
+export interface McpToolRef {
+  kind: "mcp";
+  server: string;
+  tool: string;
+}
+
+export interface ToolPolicy {
+  preapproved: McpToolRef[];
+}
+
 export interface AgentSessionConfig {
   provider: AgentProvider;
   cwd: string;
@@ -462,16 +547,14 @@ export interface AgentSessionConfig {
   modeId?: string;
   model?: string;
   thinkingOptionId?: string;
+  /**
+   * @deprecated COMPAT(featureValues): added in v0.15.0, remove after 2027-05-01.
+   * Folded into `providerOptions` at the daemon's edge; the daemon never reads it internally.
+   */
   featureValues?: Record<string, unknown>;
   title?: string | null;
-  approvalPolicy?: string;
-  sandboxMode?: string;
-  networkAccess?: boolean;
-  webSearch?: boolean;
-  extra?: {
-    codex?: AgentMetadata;
-    claude?: AgentMetadata;
-  };
+  providerOptions?: ProviderOptions;
+  toolPolicy?: ToolPolicy;
   mcpServers?: Record<string, McpServerConfig>;
   /**
    * Internal agents are hidden from listings and don't trigger notifications.

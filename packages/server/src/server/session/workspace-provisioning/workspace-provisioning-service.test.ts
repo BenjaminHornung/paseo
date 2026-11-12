@@ -1,18 +1,29 @@
 import os from "node:os";
 import path from "node:path";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync } from "node:fs";
 
 import { afterEach, beforeEach, expect, test } from "vitest";
 
+import { getCheckoutStatus } from "../../../utils/checkout-git.js";
+import {
+  setPaseoWorktreeBaseRef,
+  writePaseoWorktreeMetadata,
+} from "../../../utils/worktree-metadata.js";
+import { createWorkspaceBaseBranchService } from "../workspace-base-branch/service.js";
 import { createTestLogger } from "../../../test-utils/test-logger.js";
-import { createNoopWorkspaceGitService } from "../../test-utils/workspace-git-service-stub.js";
+import {
+  createNoGitWorkspaceRuntimeSnapshot,
+  createNoopWorkspaceGitService,
+} from "../../test-utils/workspace-git-service-stub.js";
 import {
   FileBackedProjectRegistry,
   FileBackedWorkspaceRegistry,
   type PersistedProjectRecord,
+  type PersistedWorkspaceRecord,
   createPersistedWorkspaceRecord,
   type WorkspaceRegistry,
 } from "../../workspace-registry.js";
+import { checkoutLiteFromGitSnapshot } from "../../workspace-registry-model.js";
 import type { CreatePaseoWorktreeWorkflowResult } from "../../worktree-session.js";
 import {
   createWorkspaceProvisioningService,
@@ -28,17 +39,45 @@ const logger = createTestLogger();
 const ARCHIVED_AT = "2026-01-01T00:00:00.000Z";
 const directorySymlinkType = process.platform === "win32" ? "junction" : "dir";
 
+// The real filesystem, so "this directory is gone" is observed rather than modelled.
+async function isDirectory(target: string): Promise<boolean> {
+  try {
+    return statSync(target).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 let tmpDir: string;
 let gitRoots: Set<string>;
 let gitBranches: Map<string, string | null>;
 let checkoutFailure: Error | null;
+let restoredMergedChangeRequestUrl: string | null;
 let workspaceRegistry: FileBackedWorkspaceRegistry;
 let projectRegistry: FileBackedProjectRegistry;
 let provisioning: WorkspaceProvisioningService;
 
 function gitService() {
   return createNoopWorkspaceGitService({
-    peekSnapshot: () => null,
+    getSnapshot: async (cwd: string) => {
+      const snapshot = createNoGitWorkspaceRuntimeSnapshot(cwd);
+      if (!restoredMergedChangeRequestUrl) return snapshot;
+      return {
+        ...snapshot,
+        forge: {
+          ...snapshot.forge,
+          featuresEnabled: true,
+          pullRequest: {
+            url: restoredMergedChangeRequestUrl,
+            title: "Merged change request",
+            state: "merged",
+            baseRefName: "main",
+            headRefName: "workspace-archive-latch",
+            isMerged: true,
+          },
+        },
+      };
+    },
     getCheckout: async (cwd: string) => {
       if (checkoutFailure) throw checkoutFailure;
       let worktreeRoot: string | null = null;
@@ -68,6 +107,7 @@ beforeEach(async () => {
   gitRoots = new Set();
   gitBranches = new Map();
   checkoutFailure = null;
+  restoredMergedChangeRequestUrl = null;
   workspaceRegistry = new FileBackedWorkspaceRegistry(
     path.join(tmpDir, "projects", "workspaces.json"),
     logger,
@@ -79,15 +119,74 @@ beforeEach(async () => {
   await workspaceRegistry.initialize();
   await projectRegistry.initialize();
   provisioning = createWorkspaceProvisioningService({
+    unarchiveWorkspaceAgents: async () => {},
     workspaceRegistry,
     projectRegistry,
     workspaceGitService: gitService(),
+    isDirectory,
     logger,
   });
 });
 
 afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("a workspace created during a base change records the new base", async () => {
+  const cwd = path.join(tmpDir, "worktree");
+  mkdirSync(path.join(cwd, ".git"), { recursive: true });
+  await writePaseoWorktreeMetadata(cwd, { baseRefName: "main", baseRef: "refs/heads/main" });
+  const git = createNoopWorkspaceGitService({
+    getCheckout: async () => ({
+      cwd,
+      isGit: true,
+      currentBranch: "feature",
+      remoteUrl: null,
+      worktreeRoot: cwd,
+      isPaseoOwnedWorktree: true,
+      mainRepoRoot: cwd,
+    }),
+  });
+  const bases = createWorkspaceBaseBranchService({
+    paseoHome: tmpDir,
+    workspaceRegistry,
+    workspaceGitService: git,
+  });
+  let release!: () => void;
+  let entered!: () => void;
+  let attempted!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const locked = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const waiting = new Promise<void>((resolve) => {
+    attempted = resolve;
+  });
+  const change = bases.withCheckoutLock(cwd, async () => {
+    entered();
+    await gate;
+    await setPaseoWorktreeBaseRef({ worktreeRoot: cwd, baseRef: "refs/heads/release" });
+  });
+  await locked;
+  const creator = createWorkspaceProvisioningService({
+    unarchiveWorkspaceAgents: async () => {},
+    workspaceRegistry,
+    projectRegistry,
+    workspaceGitService: git,
+    isDirectory,
+    logger,
+    withCheckoutLock: (root, operation) => {
+      attempted();
+      return bases.withCheckoutLock(root, operation);
+    },
+  });
+  const created = creator.createWorkspaceForDirectory(cwd);
+  await waiting;
+  release();
+  await change;
+  expect((await created).baseBranch).toBe("refs/heads/release");
 });
 
 test("fresh git repo creates a workspace at the canonical worktree root", async () => {
@@ -97,7 +196,7 @@ test("fresh git repo creates a workspace at the canonical worktree root", async 
   const workspace = await provisioning.findOrCreateWorkspaceForDirectory(repo);
 
   expect(workspace.cwd).toBe(repo);
-  expect(await workspaceRegistry.list()).toHaveLength(1);
+  expect(await workspaceRegistry.listAll()).toHaveLength(1);
   expect(await projectRegistry.list()).toHaveLength(1);
 });
 
@@ -109,6 +208,123 @@ test("fresh non-git directory creates a directory workspace at the exact path", 
   expect(workspace.cwd).toBe(dir);
 });
 
+test("workspace parentage survives reload and parent archive without changing placement", async () => {
+  const cwd = path.join(tmpDir, "plain");
+  const parent = await provisioning.createWorkspaceForDirectory(cwd);
+  const child = await provisioning.createWorkspaceForDirectory(cwd, null, undefined, {
+    callerWorkspaceId: parent.workspaceId,
+    background: false,
+  });
+  const grandchild = await provisioning.createWorkspaceForDirectory(
+    path.join(tmpDir, "other"),
+    null,
+    undefined,
+    {
+      callerWorkspaceId: child.workspaceId,
+    },
+  );
+  expect(parent.parentWorkspaceId).toBeUndefined();
+  expect(child).toMatchObject({ parentWorkspaceId: parent.workspaceId, cwd });
+  expect(grandchild).toMatchObject({ parentWorkspaceId: child.workspaceId });
+  await workspaceRegistry.archive(parent.workspaceId, ARCHIVED_AT);
+  const reloaded = new FileBackedWorkspaceRegistry(
+    path.join(tmpDir, "projects", "workspaces.json"),
+    logger,
+  );
+  await reloaded.initialize();
+  expect(await reloaded.get(child.workspaceId)).toMatchObject({
+    parentWorkspaceId: parent.workspaceId,
+    archivedAt: null,
+  });
+  expect(await reloaded.get(grandchild.workspaceId)).toMatchObject({
+    parentWorkspaceId: child.workspaceId,
+    archivedAt: null,
+  });
+});
+
+test("worktree workspace creation records its caller independently of its source project", async () => {
+  const sourceCwd = path.join(tmpDir, "repo");
+  gitRoots.add(sourceCwd);
+  const parent = await provisioning.createWorkspaceForDirectory(path.join(tmpDir, "other"));
+  const child = await provisioning.createWorkspaceForWorktree({
+    sourceCwd,
+    repoRoot: sourceCwd,
+    cwd: path.join(tmpDir, "worktree"),
+    worktreeRoot: path.join(tmpDir, "worktree"),
+    branch: "child",
+    baseBranch: "main",
+    title: null,
+    callerWorkspaceId: parent.workspaceId,
+  });
+  expect(child.parentWorkspaceId).toBe(parent.workspaceId);
+  expect(child.projectId).not.toBe(parent.projectId);
+  expect(await workspaceRegistry.get(child.workspaceId)).toMatchObject({
+    parentWorkspaceId: parent.workspaceId,
+  });
+});
+
+test("workspace creation rejects an unknown caller even with explicit visibility", async () => {
+  await expect(
+    provisioning.createWorkspaceForDirectory(path.join(tmpDir, "plain"), null, undefined, {
+      callerWorkspaceId: "missing",
+      background: false,
+    }),
+  ).rejects.toThrow("Caller workspace missing not found");
+});
+
+test("workspace creation cannot overwrite its caller with a self relationship", async () => {
+  const cwd = path.join(tmpDir, "plain");
+  const parent = await provisioning.createWorkspaceForDirectory(cwd);
+  await expect(
+    provisioning.createWorkspaceForDirectory(cwd, null, undefined, {
+      callerWorkspaceId: parent.workspaceId,
+      workspaceId: parent.workspaceId,
+    }),
+  ).rejects.toThrow("A workspace cannot be its own parent");
+  expect(await workspaceRegistry.get(parent.workspaceId)).toEqual(parent);
+});
+
+test("background workspace creation preserves hooks, inheritance and durable visibility", async () => {
+  const dir = path.join(tmpDir, "plain");
+  const events: string[] = [];
+  provisioning = createWorkspaceProvisioningService({
+    unarchiveWorkspaceAgents: async () => {},
+    workspaceRegistry,
+    projectRegistry,
+    workspaceGitService: gitService(),
+    isDirectory,
+    logger,
+    lifecycle: {
+      emit: (name) => {
+        events.push(name);
+      },
+      before: async (_name, request) => request,
+    },
+  });
+  const parent = await provisioning.createWorkspaceForDirectory(dir, null, undefined, {
+    background: true,
+  });
+  const child = await provisioning.createWorkspaceForDirectory(dir, null, undefined, {
+    callerWorkspaceId: parent.workspaceId,
+  });
+  const visible = await provisioning.createWorkspaceForDirectory(dir, null, undefined, {
+    callerWorkspaceId: parent.workspaceId,
+    background: false,
+  });
+  const human = await provisioning.createWorkspaceForDirectory(dir);
+  expect(parent.background).toBe(true);
+  expect(child.background).toBe(true);
+  expect(visible.background).toBe(false);
+  expect(human.background).toBe(false);
+  expect(events).toEqual(Array(4).fill("workspace.create.after"));
+  const reloaded = new FileBackedWorkspaceRegistry(
+    path.join(tmpDir, "projects", "workspaces.json"),
+    logger,
+  );
+  await reloaded.initialize();
+  expect((await reloaded.get(child.workspaceId))?.background).toBe(true);
+});
+
 test("re-opening an active workspace by exact path returns the same record without duplicating", async () => {
   const repo = path.join(tmpDir, "repo");
   gitRoots.add(repo);
@@ -117,7 +333,7 @@ test("re-opening an active workspace by exact path returns the same record witho
   const second = await provisioning.findOrCreateWorkspaceForDirectory(repo);
 
   expect(second.workspaceId).toBe(first.workspaceId);
-  expect(await workspaceRegistry.list()).toHaveLength(1);
+  expect(await workspaceRegistry.listAll()).toHaveLength(1);
 });
 
 test("re-opening Windows-equivalent workspace cwd spellings reuses the active and archived record", async () => {
@@ -127,16 +343,17 @@ test("re-opening Windows-equivalent workspace cwd spellings reuses the active an
 
   const active = await provisioning.findOrCreateWorkspaceForDirectory(cwd);
   expect(active.workspaceId).toBe(created.workspaceId);
-  expect(await workspaceRegistry.list()).toHaveLength(1);
+  expect(await workspaceRegistry.listAll()).toHaveLength(1);
 
   await workspaceRegistry.archive(created.workspaceId, ARCHIVED_AT);
   const reopened = await provisioning.findOrCreateWorkspaceForDirectory(cwd);
   expect(reopened).toMatchObject({ workspaceId: created.workspaceId, archivedAt: null });
-  expect(await workspaceRegistry.list()).toHaveLength(1);
+  expect(await workspaceRegistry.listAll()).toHaveLength(1);
 });
 
 test("re-opening refreshes mutable checkout metadata without renaming the workspace", async () => {
   const repo = path.join(tmpDir, "repo");
+  mkdirSync(repo, { recursive: true });
   const first = await provisioning.findOrCreateWorkspaceForDirectory(repo);
   await workspaceRegistry.upsert({ ...first, title: "Pinned work" });
   gitRoots.add(repo);
@@ -161,10 +378,11 @@ test("persists manual worktree ownership separately from its workspace kind", as
   const cwd = path.join(tmpDir, "manual-worktree");
   const mainRepoRoot = path.join(tmpDir, "main-repo");
   const manualWorktreeProvisioning = createWorkspaceProvisioningService({
+    unarchiveWorkspaceAgents: async () => {},
     workspaceRegistry,
     projectRegistry,
+    isDirectory,
     workspaceGitService: createNoopWorkspaceGitService({
-      peekSnapshot: () => null,
       getCheckout: async () => ({
         cwd,
         isGit: true,
@@ -198,13 +416,42 @@ test("re-opening an archived workspace by its exact path unarchives it and keeps
   expect(reopened.archivedAt).toBeNull();
 });
 
+test("default directory open skips archived background workspaces while explicit recovery preserves their visibility", async () => {
+  const cwd = path.join(tmpDir, "repo");
+  mkdirSync(cwd, { recursive: true });
+  const background = await provisioning.createWorkspaceForDirectory(cwd, undefined, undefined, {
+    background: true,
+  });
+  await workspaceRegistry.archive(background.workspaceId, ARCHIVED_AT);
+
+  const opened = await provisioning.findOrCreateWorkspaceForDirectory(cwd);
+  expect(opened).toMatchObject({ background: false, archivedAt: null });
+  expect(opened.workspaceId).not.toBe(background.workspaceId);
+  const archived = await workspaceRegistry.get(background.workspaceId);
+  expect(archived).toMatchObject({ background: true, archivedAt: ARCHIVED_AT });
+  const recovered = await provisioning.ensureWorkspaceRecordUnarchived(archived!);
+  expect(recovered).toMatchObject({
+    workspaceId: background.workspaceId,
+    background: true,
+    archivedAt: null,
+  });
+  expect((await provisioning.findOrCreateWorkspaceForDirectory(cwd)).workspaceId).toBe(
+    opened.workspaceId,
+  );
+});
+
 test("reopening archived exact-root records restores the fresh Git project", async () => {
   const cwd = path.join(tmpDir, "repo");
+  mkdirSync(cwd, { recursive: true });
   const project = await projectRegistry.getOrCreateActiveByRoot({
     rootPath: cwd,
     kind: "non_git",
     displayName: "repo",
     timestamp: ARCHIVED_AT,
+  });
+  await projectRegistry.upsert({
+    ...project,
+    projectKey: "remote:github.com/acme/old-repo",
   });
   const workspace = createPersistedWorkspaceRecord({
     workspaceId: "ws-archived-root",
@@ -219,15 +466,16 @@ test("reopening archived exact-root records restores the fresh Git project", asy
   await workspaceRegistry.upsert(workspace);
   await projectRegistry.archive(project.projectId, ARCHIVED_AT);
   const archivedProvisioning = createWorkspaceProvisioningService({
+    unarchiveWorkspaceAgents: async () => {},
     workspaceRegistry,
     projectRegistry,
+    isDirectory,
     workspaceGitService: createNoopWorkspaceGitService({
-      peekSnapshot: () => null,
       getCheckout: async () => ({
         cwd,
         isGit: true,
         currentBranch: "main",
-        remoteUrl: null,
+        remoteUrl: "https://github.com/acme/new-repo.git",
         worktreeRoot: cwd,
         isPaseoOwnedWorktree: false,
         mainRepoRoot: null,
@@ -244,43 +492,49 @@ test("reopening archived exact-root records restores the fresh Git project", asy
   });
   expect(await projectRegistry.get(project.projectId)).toMatchObject({
     kind: "git",
+    projectKey: "remote:github.com/acme/new-repo",
     archivedAt: null,
   });
 });
 
 test("uses one workspace snapshot when reopening an archived workspace", async () => {
   const repo = path.join(tmpDir, "repo");
+  mkdirSync(repo, { recursive: true });
   gitRoots.add(repo);
   const created = await provisioning.findOrCreateWorkspaceForDirectory(repo);
   await workspaceRegistry.archive(created.workspaceId, ARCHIVED_AT);
 
-  const archived = (await workspaceRegistry.list()).filter(
+  const archived = (await workspaceRegistry.listAll()).filter(
     (workspace) => workspace.workspaceId === created.workspaceId,
   );
   let reads = 0;
   const snapshotRegistry: WorkspaceRegistry = {
     initialize: () => workspaceRegistry.initialize(),
     existsOnDisk: () => workspaceRegistry.existsOnDisk(),
-    list: async () => (reads++ === 0 ? archived : []),
+    listAll: async () => (reads++ === 0 ? archived : []),
+    listActive: () => workspaceRegistry.listActive(),
     get: (workspaceId) => workspaceRegistry.get(workspaceId),
     upsert: (workspace) => workspaceRegistry.upsert(workspace),
     archive: (workspaceId, archivedAt) => workspaceRegistry.archive(workspaceId, archivedAt),
     remove: (workspaceId) => workspaceRegistry.remove(workspaceId),
   };
   const snapshotProvisioning = createWorkspaceProvisioningService({
+    unarchiveWorkspaceAgents: async () => {},
     workspaceRegistry: snapshotRegistry,
     projectRegistry,
     workspaceGitService: gitService(),
+    isDirectory,
   });
 
   const reopened = await snapshotProvisioning.findOrCreateWorkspaceForDirectory(repo);
 
   expect(reopened).toMatchObject({ workspaceId: created.workspaceId, archivedAt: null });
-  expect(await workspaceRegistry.list()).toHaveLength(1);
+  expect(await workspaceRegistry.listAll()).toHaveLength(1);
 });
 
 test("reopening an archived workspace refreshes placement without renaming it", async () => {
   const repo = path.join(tmpDir, "repo");
+  mkdirSync(repo, { recursive: true });
   gitRoots.add(repo);
   const created = await provisioning.findOrCreateWorkspaceForDirectory(repo);
   await workspaceRegistry.upsert({ ...created, title: "Pinned archived work" });
@@ -332,8 +586,76 @@ test("ensureWorkspaceRecordUnarchived restores the owning archived project with 
   expect((await projectRegistry.get(created.projectId))?.archivedAt).toBeNull();
 });
 
+test("ensureWorkspaceRecordUnarchived preserves the consumed auto-archive change request", async () => {
+  const repo = path.join(tmpDir, "repo");
+  const changeRequestUrl = "https://github.com/getpaseo/paseo/pull/2714";
+  gitRoots.add(repo);
+  const created = await provisioning.findOrCreateWorkspaceForDirectory(repo);
+  await workspaceRegistry.archive(created.workspaceId, ARCHIVED_AT, {
+    autoArchivedChangeRequestUrl: changeRequestUrl,
+  });
+  const archivedWorkspace = await workspaceRegistry.get(created.workspaceId);
+
+  const unarchived = await provisioning.ensureWorkspaceRecordUnarchived(archivedWorkspace!);
+
+  expect(unarchived).toMatchObject({
+    archivedAt: null,
+    autoArchivedChangeRequestUrl: changeRequestUrl,
+  });
+  expect(await workspaceRegistry.get(created.workspaceId)).toMatchObject({
+    archivedAt: null,
+    autoArchivedChangeRequestUrl: changeRequestUrl,
+  });
+});
+
+test("ensureWorkspaceRecordUnarchived acknowledges a merged change request for a legacy archive", async () => {
+  const repo = path.join(tmpDir, "repo");
+  const changeRequestUrl = "https://github.com/getpaseo/paseo/pull/2714";
+  gitRoots.add(repo);
+  const created = await provisioning.findOrCreateWorkspaceForDirectory(repo);
+  await workspaceRegistry.archive(created.workspaceId, ARCHIVED_AT);
+  const archivedWorkspace = await workspaceRegistry.get(created.workspaceId);
+  restoredMergedChangeRequestUrl = changeRequestUrl;
+
+  const unarchived = await provisioning.ensureWorkspaceRecordUnarchived(archivedWorkspace!);
+
+  expect(unarchived).toMatchObject({
+    archivedAt: null,
+    autoArchivedChangeRequestUrl: changeRequestUrl,
+  });
+  expect(await workspaceRegistry.get(created.workspaceId)).toMatchObject({
+    archivedAt: null,
+    autoArchivedChangeRequestUrl: changeRequestUrl,
+  });
+});
+
+test("ensureWorkspaceRecordUnarchived refreshes the latch for a different merged change request", async () => {
+  const repo = path.join(tmpDir, "repo");
+  const previousChangeRequestUrl = "https://github.com/getpaseo/paseo/pull/2713";
+  const currentChangeRequestUrl = "https://github.com/getpaseo/paseo/pull/2714";
+  gitRoots.add(repo);
+  const created = await provisioning.findOrCreateWorkspaceForDirectory(repo);
+  await workspaceRegistry.archive(created.workspaceId, ARCHIVED_AT, {
+    autoArchivedChangeRequestUrl: previousChangeRequestUrl,
+  });
+  const archivedWorkspace = await workspaceRegistry.get(created.workspaceId);
+  restoredMergedChangeRequestUrl = currentChangeRequestUrl;
+
+  const unarchived = await provisioning.ensureWorkspaceRecordUnarchived(archivedWorkspace!);
+
+  expect(unarchived).toMatchObject({
+    archivedAt: null,
+    autoArchivedChangeRequestUrl: currentChangeRequestUrl,
+  });
+  expect(await workspaceRegistry.get(created.workspaceId)).toMatchObject({
+    archivedAt: null,
+    autoArchivedChangeRequestUrl: currentChangeRequestUrl,
+  });
+});
+
 test("does not unarchive either record when checkout refresh fails", async () => {
   const repo = path.join(tmpDir, "repo");
+  mkdirSync(repo, { recursive: true });
   gitRoots.add(repo);
   const created = await provisioning.findOrCreateWorkspaceForDirectory(repo);
   await projectRegistry.archive(created.projectId, ARCHIVED_AT);
@@ -363,7 +685,7 @@ test("resolveOrCreateWorkspaceIdForCreateAgent returns a created worktree's id w
   });
 
   expect(id).toBe("ws-from-worktree");
-  expect(await workspaceRegistry.list()).toHaveLength(0);
+  expect(await workspaceRegistry.listAll()).toHaveLength(0);
 });
 
 test("resolveOrCreateWorkspaceIdForCreateAgent honors an explicitly requested workspace id", async () => {
@@ -375,7 +697,7 @@ test("resolveOrCreateWorkspaceIdForCreateAgent honors an explicitly requested wo
   });
 
   expect(id).toBe("ws-requested");
-  expect(await workspaceRegistry.list()).toHaveLength(0);
+  expect(await workspaceRegistry.listAll()).toHaveLength(0);
 });
 
 test("resolveOrCreateWorkspaceIdForCreateAgent creates a titled workspace when nothing is provided", async () => {
@@ -400,7 +722,7 @@ test("createWorkspaceForDirectory always mints a fresh workspace even when one a
   const second = await provisioning.createWorkspaceForDirectory(repo);
 
   expect(second.workspaceId).not.toBe(first.workspaceId);
-  expect(await workspaceRegistry.list()).toHaveLength(2);
+  expect(await workspaceRegistry.listAll()).toHaveLength(2);
 });
 
 test("directory creation persists the live branch and a trimmed title", async () => {
@@ -500,7 +822,56 @@ test("runInImportWorkspace uses an active requested workspace without creating a
   );
 
   expect(result).toEqual({ value: workspace.workspaceId, createdWorkspace: null });
-  expect(await workspaceRegistry.list()).toEqual([workspace]);
+  expect(await workspaceRegistry.listAll()).toEqual([workspace]);
+});
+
+test("runInImportWorkspace reuses an active workspace for an untargeted import", async () => {
+  const cwd = path.join(tmpDir, "active-import");
+  mkdirSync(cwd);
+  const workspace = await provisioning.createWorkspaceForDirectory(cwd);
+
+  const result = await provisioning.runInImportWorkspace(
+    { cwd },
+    async (target) => target.workspaceId,
+  );
+
+  expect(result).toEqual({ value: workspace.workspaceId, createdWorkspace: null });
+  expect(await workspaceRegistry.listAll()).toEqual([workspace]);
+});
+
+test("runInImportWorkspace unarchives a workspace for an untargeted import", async () => {
+  const cwd = path.join(tmpDir, "archived-import");
+  mkdirSync(cwd);
+  const workspace = await provisioning.createWorkspaceForDirectory(cwd);
+  await workspaceRegistry.archive(workspace.workspaceId, ARCHIVED_AT);
+
+  const result = await provisioning.runInImportWorkspace(
+    { cwd },
+    async (target) => target.workspaceId,
+  );
+
+  expect(result).toEqual({ value: workspace.workspaceId, createdWorkspace: null });
+  expect(await workspaceRegistry.get(workspace.workspaceId)).toMatchObject({
+    workspaceId: workspace.workspaceId,
+    archivedAt: null,
+  });
+  expect(await workspaceRegistry.listAll()).toHaveLength(1);
+});
+
+test("runInImportWorkspace leaves a reused workspace intact when import fails", async () => {
+  const cwd = path.join(tmpDir, "failed-active-import");
+  mkdirSync(cwd);
+  const workspace = await provisioning.createWorkspaceForDirectory(cwd);
+  const project = await projectRegistry.get(workspace.projectId);
+
+  await expect(
+    provisioning.runInImportWorkspace({ cwd }, async () => {
+      throw new Error("provider session is unavailable");
+    }),
+  ).rejects.toThrow("provider session is unavailable");
+
+  expect(await workspaceRegistry.listAll()).toEqual([workspace]);
+  expect(await projectRegistry.get(workspace.projectId)).toEqual(project);
 });
 
 test.each(["missing", "archived"] as const)(
@@ -597,7 +968,7 @@ test("runInImportWorkspace creates one fresh workspace for an untargeted import"
   );
 
   expect(result.value).toBe(result.createdWorkspace?.workspaceId);
-  expect(await workspaceRegistry.list()).toEqual([result.createdWorkspace]);
+  expect(await workspaceRegistry.listAll()).toEqual([result.createdWorkspace]);
 });
 
 test.each(["missing", "archived"] as const)(
@@ -618,7 +989,182 @@ test.each(["missing", "archived"] as const)(
       }),
     ).rejects.toThrow("provider session is unavailable");
 
-    expect(await workspaceRegistry.list()).toEqual([]);
+    expect(await workspaceRegistry.listAll()).toEqual([]);
     expect(await projectRegistry.list()).toEqual(previousProject ? [previousProject] : []);
   },
 );
+
+test("a failed import keeps an archived worktree's placement when its directory is gone", async () => {
+  // The git port here is the production read: getCheckoutStatus against the real
+  // filesystem, so "the worktree directory is gone" is observed, not modelled.
+  const mainRepoRoot = path.join(tmpDir, "main-repo");
+  mkdirSync(mainRepoRoot, { recursive: true });
+  const worktreeCwd = path.join(tmpDir, "worktrees", "feature-example");
+  const project = await projectRegistry.getOrCreateActiveByRoot({
+    rootPath: mainRepoRoot,
+    kind: "git",
+    displayName: "main-repo",
+    timestamp: ARCHIVED_AT,
+  });
+  const archived = createPersistedWorkspaceRecord({
+    workspaceId: "ws-archived-worktree",
+    projectId: project.projectId,
+    cwd: worktreeCwd,
+    kind: "worktree",
+    displayName: "feature/example",
+    branch: "feature/example",
+    worktreeRoot: worktreeCwd,
+    baseBranch: "main",
+    isPaseoOwnedWorktree: true,
+    mainRepoRoot,
+    createdAt: ARCHIVED_AT,
+    updatedAt: ARCHIVED_AT,
+    archivedAt: ARCHIVED_AT,
+  });
+  await workspaceRegistry.upsert(archived);
+  const realCheckoutProvisioning = createWorkspaceProvisioningService({
+    unarchiveWorkspaceAgents: async () => {},
+    workspaceRegistry,
+    projectRegistry,
+    logger,
+    isDirectory,
+    workspaceGitService: createNoopWorkspaceGitService({
+      getCheckout: async (cwd: string) => {
+        const status = await getCheckoutStatus(cwd, { logger });
+        return checkoutLiteFromGitSnapshot(
+          cwd,
+          status.isGit
+            ? {
+                isGit: true,
+                currentBranch: status.currentBranch,
+                remoteUrl: status.remoteUrl,
+                repoRoot: status.repoRoot,
+                isPaseoOwnedWorktree: status.isPaseoOwnedWorktree,
+                mainRepoRoot: status.mainRepoRoot,
+              }
+            : {
+                isGit: false,
+                currentBranch: null,
+                remoteUrl: null,
+                repoRoot: null,
+                isPaseoOwnedWorktree: false,
+                mainRepoRoot: null,
+              },
+        );
+      },
+    }),
+  });
+
+  await expect(
+    realCheckoutProvisioning.runInImportWorkspace({ cwd: worktreeCwd }, async () => {
+      throw new Error("provider resume failed");
+    }),
+  ).rejects.toThrow("provider resume failed");
+
+  expect(await workspaceRegistry.get(archived.workspaceId)).toMatchObject({
+    kind: "worktree",
+    branch: "feature/example",
+    worktreeRoot: worktreeCwd,
+    mainRepoRoot,
+    isPaseoOwnedWorktree: true,
+  });
+});
+
+test("re-opening an active worktree workspace keeps its placement while the directory is away", async () => {
+  const repo = path.join(tmpDir, "repo");
+  mkdirSync(repo, { recursive: true });
+  gitRoots.add(repo);
+  gitBranches.set(repo, "feature/away");
+  const created = await provisioning.findOrCreateWorkspaceForDirectory(repo);
+  expect(created).toMatchObject({ kind: "local_checkout", branch: "feature/away" });
+  rmSync(repo, { recursive: true, force: true });
+  gitRoots.delete(repo);
+
+  const reopened = await provisioning.findOrCreateWorkspaceForDirectory(repo);
+
+  expect(reopened).toMatchObject({
+    workspaceId: created.workspaceId,
+    kind: "local_checkout",
+    branch: "feature/away",
+  });
+});
+
+test("a directory that goes away while the git read is in flight keeps its placement", async () => {
+  const repo = path.join(tmpDir, "repo");
+  mkdirSync(repo, { recursive: true });
+  gitRoots.add(repo);
+  gitBranches.set(repo, "feature/vanishing");
+  const created = await provisioning.findOrCreateWorkspaceForDirectory(repo);
+  expect(created).toMatchObject({ kind: "local_checkout", branch: "feature/vanishing" });
+  const vanishingProvisioning = createWorkspaceProvisioningService({
+    unarchiveWorkspaceAgents: async () => {},
+    workspaceRegistry,
+    projectRegistry,
+    isDirectory,
+    logger,
+    workspaceGitService: createNoopWorkspaceGitService({
+      getCheckout: async (cwd: string) => {
+        rmSync(repo, { recursive: true, force: true });
+        return {
+          cwd,
+          isGit: false,
+          currentBranch: null,
+          remoteUrl: null,
+          worktreeRoot: null,
+          isPaseoOwnedWorktree: false,
+          mainRepoRoot: null,
+        };
+      },
+    }),
+  });
+
+  const reopened = await vanishingProvisioning.findOrCreateWorkspaceForDirectory(repo);
+
+  expect(reopened).toMatchObject({
+    workspaceId: created.workspaceId,
+    kind: "local_checkout",
+    branch: "feature/vanishing",
+  });
+});
+
+test("a failed workspace unarchive write keeps agents archived and permits retry", async () => {
+  const repo = path.join(tmpDir, "restore-write-failure");
+  mkdirSync(repo, { recursive: true });
+  const workspace = await provisioning.findOrCreateWorkspaceForDirectory(repo);
+  await workspaceRegistry.archive(workspace.workspaceId, ARCHIVED_AT);
+  const archived = (await workspaceRegistry.get(workspace.workspaceId))!;
+
+  class FailingWorkspaceRegistry extends FileBackedWorkspaceRegistry {
+    failWrites = true;
+    override async upsert(record: PersistedWorkspaceRecord): Promise<void> {
+      if (this.failWrites && !record.archivedAt) throw new Error("Workspace write failed");
+      await super.upsert(record);
+    }
+  }
+  const registry = new FailingWorkspaceRegistry(
+    path.join(tmpDir, "projects", "workspaces.json"),
+    logger,
+  );
+  await registry.initialize();
+  let agentArchived = true;
+  const recovery = createWorkspaceProvisioningService({
+    workspaceRegistry: registry,
+    projectRegistry,
+    workspaceGitService: gitService(),
+    isDirectory,
+    logger,
+    unarchiveWorkspaceAgents: async () => {
+      agentArchived = false;
+    },
+  });
+  await expect(recovery.ensureWorkspaceRecordUnarchived(archived)).rejects.toThrow(
+    "Workspace write failed",
+  );
+  expect((await registry.get(workspace.workspaceId))?.archivedAt).toBe(ARCHIVED_AT);
+  expect(agentArchived).toBe(true);
+
+  registry.failWrites = false;
+  await recovery.ensureWorkspaceRecordUnarchived(archived);
+  expect((await registry.get(workspace.workspaceId))?.archivedAt).toBeNull();
+  expect(agentArchived).toBe(false);
+});

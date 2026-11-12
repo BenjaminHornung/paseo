@@ -27,7 +27,28 @@ export interface ForgeUrlGrammar {
   blobInfix: string;
   /** Line/range anchor, e.g. github "#L1-L5" vs gitlab "#L1-5". */
   lineAnchor: (start: number, end?: number) => string;
+  /** Suffix for the change request's checks/pipelines overview. */
+  changeRequestChecksSuffix?: string;
+  /**
+   * Web-path infixes used when recognizing pasted links for this forge. The
+   * parser anchors each infix after the current remote's full repository path,
+   * so links for another repository are never auto-attached.
+   */
+  referencePaths?: readonly ForgeReferencePath[];
 }
+
+export interface ForgeReferencePath {
+  kind: "change_request" | "issue";
+  /** Path between the repository path and the numeric local id. */
+  infix: string;
+  /**
+   * Shorthand marker the forge links in prose, e.g. GitHub `#12`, GitLab `!12`.
+   * Absent when the forge has no shorthand for this kind.
+   */
+  sigil?: ForgeReferenceSigil;
+}
+
+export type ForgeReferenceSigil = "#" | "!";
 
 /** Line/range anchor shared by every GitHub-family forge (github, gitea, forgejo, codeberg). */
 export function GITHUB_LINE_ANCHOR(start: number, end?: number): string {
@@ -39,6 +60,10 @@ export const GITEA_FAMILY_URL_GRAMMAR: ForgeUrlGrammar = {
   treeInfix: "/src/branch/",
   blobInfix: "/src/branch/",
   lineAnchor: GITHUB_LINE_ANCHOR,
+  referencePaths: [
+    { kind: "change_request", infix: "/pulls/", sigil: "!" },
+    { kind: "issue", infix: "/issues/", sigil: "#" },
+  ],
 };
 
 export type ForgeSpecificEnvelope = { forge: string } & Record<string, unknown>;

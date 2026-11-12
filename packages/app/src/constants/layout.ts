@@ -1,22 +1,26 @@
 import { useUnistyles } from "react-native-unistyles";
+import { bySizing, TOUCH_TARGET } from "@/components/ui/control-sizing";
 import { isWeb } from "@/constants/platform";
 
 export const FOOTER_HEIGHT = 75;
 
-// Shared header inner height (excluding safe area insets and border)
+// A bar of icon buttons: touch-sized it is one touch target tall, like an iOS navigation bar.
+const BAR_HEIGHT = { touch: TOUCH_TARGET, pointer: 36 };
+
+// Shared header inner height from `md` up (excluding safe area insets and border).
 // Used by both agent header (ScreenHeader) and explorer sidebar header
 // This ensures both headers have the same visual height
-export const HEADER_INNER_HEIGHT = 48;
+export const HEADER_INNER_HEIGHT = bySizing(BAR_HEIGHT).md;
 export const HEADER_INNER_HEIGHT_MOBILE = 56;
-export const WORKSPACE_SECONDARY_HEADER_HEIGHT = 36;
+/** The tab rail and pane toolbars under the header. A breakpoint value for stylesheets. */
+export const WORKSPACE_SECONDARY_HEADER_HEIGHT = bySizing(BAR_HEIGHT);
 export const HEADER_TOP_PADDING_MOBILE = 8;
 
-// Max width for chat content (stream view, input area, new agent form)
-export const MAX_CONTENT_WIDTH = 820;
-export const COMPACT_FORM_FACTOR_WIDTH = 500;
+// Measured composer width; independent of the window's compact/wide breakpoint.
+export const COMPACT_CONTENT_WIDTH = 500;
 
-// Settings uses the canonical desktop list + detail layout. Its sidebar and
-// detail target must fit together before it can share width with app navigation.
+// Settings navigation can shrink below its preferred width to preserve the detail
+// minimum. Both targets must fit before Settings shares width with app navigation.
 export const SETTINGS_DESKTOP_SIDEBAR_WIDTH = 320;
 export const SETTINGS_DESKTOP_DETAIL_MIN_WIDTH = 400;
 export const SETTINGS_DESKTOP_SPLIT_MIN_WIDTH =
@@ -27,14 +31,18 @@ export const SETTINGS_DESKTOP_SPLIT_MIN_WIDTH =
 export const DESKTOP_TRAFFIC_LIGHT_WIDTH = 78;
 export const DESKTOP_TRAFFIC_LIGHT_HEIGHT = 45;
 
-// Windows/Linux window controls (minimize/maximize/close) — top-right
-export const DESKTOP_WINDOW_CONTROLS_WIDTH = 140;
-export const DESKTOP_WINDOW_CONTROLS_HEIGHT = 48;
+// Custom desktop window controls (minimize/maximize/close) — top-right
+export const DESKTOP_WINDOW_CONTROLS_HEIGHT = HEADER_INNER_HEIGHT;
 
 export {
   getIsElectron as getIsElectronRuntime,
   getIsElectronMac as getIsElectronRuntimeMac,
 } from "./platform";
+
+/** Below md (600 points), sidebars overlay the workspace; wider layouts can dock them. */
+export function isCompactBreakpoint(breakpoint: string | undefined): boolean {
+  return breakpoint === "xs" || breakpoint === "sm";
+}
 
 /**
  * Reactive hook — re-renders the component when the breakpoint changes.
@@ -42,7 +50,7 @@ export {
  */
 export function useIsCompactFormFactor(): boolean {
   const { rt } = useUnistyles();
-  return rt.breakpoint === "xs" || rt.breakpoint === "sm";
+  return isCompactBreakpoint(rt.breakpoint);
 }
 
 // SplitContainer relies on dnd-kit and DOM-backed accessibility helpers.

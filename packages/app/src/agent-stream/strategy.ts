@@ -1,6 +1,8 @@
 import type { ComponentType, ReactElement, ReactNode, RefObject } from "react";
 import type { StyleProp, ViewStyle } from "react-native";
 import type { StreamItem } from "@/types/stream";
+import type { ReadingRowReplacements } from "./reading-anchor";
+import { continuesResponse } from "./turn-membership";
 import type { StreamHistoryBoundary, StreamRenderSegments } from "./model";
 import type {
   BottomAnchorLocalRequest,
@@ -11,11 +13,6 @@ type EdgeSlot = "header" | "footer";
 type NeighborRelation = "above" | "below";
 type AssistantTurnTraversalStep = -1 | 1;
 export type StreamFrameChildOrder = "content-then-footer" | "footer-then-content";
-
-export type MaintainVisibleContentPositionConfig = Readonly<{
-  minIndexForVisible: number;
-  autoscrollToTopThreshold: number;
-}>;
 
 export type BottomAnchorTransportBehavior = Readonly<{
   verificationDelayFrames: number;
@@ -39,9 +36,34 @@ export interface StreamEdgeSlotProps {
   ListFooterComponentStyle?: StyleProp<ViewStyle>;
 }
 
+/**
+ * A caller that landed on one occurrence inside the message owns where the viewport
+ * settles. It resolved the occurrence against a specific row already, so it takes no
+ * row here and returns null once that row is gone.
+ */
+export interface ScrollToMessageOccurrence {
+  signal: AbortSignal;
+  targetTop(): number | null;
+}
+
+/**
+ * The edge of its row a disclosure's trigger sits on. A header trigger sits on the top: the content
+ * it opens grows below it. A trigger under the content it opens, such as a long message's show
+ * more, sits on the bottom.
+ */
+export type DisclosureTriggerEdge = "top" | "bottom";
+
 export interface StreamViewportHandle {
+  /** Give keyboard navigation back to the scrolling surface on web. */
+  focus?: () => void;
   scrollToBottom: (reason?: BottomAnchorLocalRequest["reason"]) => void;
   prepareForViewportChange: () => void;
+  /**
+   * Run a disclosure's state change so the row that owns its trigger keeps the edge the trigger
+   * sits on in place. Following output stops; it resumes if the change leaves the list at its end.
+   */
+  holdRow: (rowId: string, apply: () => void, triggerEdge: DisclosureTriggerEdge) => void;
+  scrollToMessage?: (messageId: string, occurrence?: ScrollToMessageOccurrence) => void;
 }
 
 export interface StreamSegmentRenderers {
@@ -62,20 +84,30 @@ export interface StreamRenderInput {
   segments: StreamRenderSegments;
   historyRowRevision?: StreamHistoryRowRevision;
   liveHeadRowRevision?: unknown;
+  /** Presentation rows replaced by another row after history is folded. */
+  readingRowReplacements?: ReadingRowReplacements;
   boundary: StreamHistoryBoundary;
   renderers: StreamSegmentRenderers;
   listEmptyComponent: ReactNode;
   viewportRef: RefObject<StreamViewportHandle | null>;
   routeBottomAnchorRequest: BottomAnchorRouteRequest | null;
   isAuthoritativeHistoryReady: boolean;
+  isInitialHistoryLoading?: boolean;
+  revealInitialHistory?: boolean;
   onNearBottomChange: (value: boolean) => void;
-  onNearHistoryStart: () => void;
+  // The history row under the top of the viewport, for surfaces that mark where the reader
+  // is in the transcript. Only the web viewport measures it today.
+  onReadingPositionChange?: (rowId: string | null) => void;
+  onNearHistoryStart: () => Promise<boolean>;
   isLoadingOlderHistory: boolean;
   hasOlderHistory: boolean;
+  olderHistoryProgressKey: string | null;
   scrollEnabled: boolean;
   listStyle: StyleProp<ViewStyle>;
   baseListContentContainerStyle: StyleProp<ViewStyle>;
   forwardListContentContainerStyle: StyleProp<ViewStyle>;
+  // The chat column's max width. The web viewport estimates unmeasured row heights with it.
+  contentMaxWidth: number;
 }
 
 export interface ResolveStreamRenderStrategyInput {
@@ -93,21 +125,18 @@ export interface StreamStrategy {
     index: number,
     relation: NeighborRelation,
   ) => StreamItem | undefined;
-  collectAssistantTurnContent: (items: StreamItem[], startIndex: number) => string;
+  collectAssistantResponseContent: (items: StreamItem[], startIndex: number) => string;
   isNearBottom: (input: StreamNearBottomInput) => boolean;
   getBottomOffset: (metrics: StreamViewportMetrics) => number;
   getEdgeSlotProps: (
     component: ReactElement | ComponentType<unknown> | null,
     gapSize: number,
   ) => StreamEdgeSlotProps;
-  getMaintainVisibleContentPosition: () => MaintainVisibleContentPositionConfig | undefined;
   getBottomAnchorTransportBehavior: () => BottomAnchorTransportBehavior;
   getHistoryLiveBoundaryIndex: (history: StreamItem[]) => number | null;
   getLiveHeadHistoryBoundaryIndex: (liveHead: StreamItem[]) => number | null;
   getLatestItemIndex: (items: StreamItem[]) => number | null;
   getFrameChildOrder: () => StreamFrameChildOrder;
-  getFlatListInverted: () => boolean;
-  getOverlayScrollbarInverted: () => boolean;
   shouldDisableParentScrollOnInlineDetailsExpansion: () => boolean;
   shouldAnchorBottomOnContentSizeChange: () => boolean;
   shouldAnimateManualScrollToBottom: () => boolean;
@@ -123,9 +152,6 @@ interface StreamStrategyConfig {
   historyLiveBoundaryEdge: "first" | "last";
   liveHeadHistoryBoundaryEdge: "first" | "last";
   frameChildOrder: StreamFrameChildOrder;
-  flatListInverted: boolean;
-  overlayScrollbarInverted: boolean;
-  maintainVisibleContentPosition?: MaintainVisibleContentPositionConfig;
   bottomAnchorTransportBehavior: BottomAnchorTransportBehavior;
   disableParentScrollOnInlineDetailsExpansion: boolean;
   anchorBottomOnContentSizeChange: boolean;
@@ -134,8 +160,6 @@ interface StreamStrategyConfig {
   isNearBottom: (input: StreamNearBottomInput) => boolean;
   getBottomOffset: (metrics: StreamViewportMetrics) => number;
 }
-
-const NATIVE_SETTLING_VERIFICATION_DELAY_FRAMES = 4;
 
 export function createStreamStrategy(config: StreamStrategyConfig): StreamStrategy {
   return {
@@ -158,20 +182,22 @@ export function createStreamStrategy(config: StreamStrategyConfig): StreamStrate
       }
       return items[neighborIndex];
     },
-    collectAssistantTurnContent: (items, startIndex) => {
+    collectAssistantResponseContent: (items, startIndex) => {
       const messages: string[] = [];
+      let laterItem: StreamItem | null = null;
       for (
         let index = startIndex;
         index >= 0 && index < items.length;
         index += config.assistantTurnTraversalStep
       ) {
         const currentItem = items[index];
-        if (currentItem.kind === "user_message") {
+        if (!currentItem || (laterItem && !continuesResponse(currentItem, laterItem))) {
           break;
         }
         if (currentItem.kind === "assistant_message") {
           messages.push(currentItem.text);
         }
+        laterItem = currentItem;
       }
       return messages.toReversed().join("\n\n");
     },
@@ -189,7 +215,6 @@ export function createStreamStrategy(config: StreamStrategyConfig): StreamStrate
         ListFooterComponentStyle: { marginTop: gapSize },
       };
     },
-    getMaintainVisibleContentPosition: () => config.maintainVisibleContentPosition,
     getBottomAnchorTransportBehavior: () => config.bottomAnchorTransportBehavior,
     getHistoryLiveBoundaryIndex: (history) => {
       if (history.length === 0) {
@@ -210,30 +235,11 @@ export function createStreamStrategy(config: StreamStrategyConfig): StreamStrate
       return config.historyLiveBoundaryEdge === "first" ? 0 : items.length - 1;
     },
     getFrameChildOrder: () => config.frameChildOrder,
-    getFlatListInverted: () => config.flatListInverted,
-    getOverlayScrollbarInverted: () => config.overlayScrollbarInverted,
     shouldDisableParentScrollOnInlineDetailsExpansion: () =>
       config.disableParentScrollOnInlineDetailsExpansion,
     shouldAnchorBottomOnContentSizeChange: () => config.anchorBottomOnContentSizeChange,
     shouldAnimateManualScrollToBottom: () => config.animateManualScrollToBottom,
     shouldUseVirtualizedList: () => config.useVirtualizedList,
-  };
-}
-
-export function resolveBottomAnchorTransportBehavior(input: {
-  strategy: StreamStrategy;
-  isViewportSettling: boolean;
-}): BottomAnchorTransportBehavior {
-  const baseBehavior = input.strategy.getBottomAnchorTransportBehavior();
-  if (!input.isViewportSettling || !input.strategy.getFlatListInverted()) {
-    return baseBehavior;
-  }
-  return {
-    verificationDelayFrames: Math.max(
-      baseBehavior.verificationDelayFrames,
-      NATIVE_SETTLING_VERIFICATION_DELAY_FRAMES,
-    ),
-    verificationRetryMode: "recheck",
   };
 }
 
@@ -268,12 +274,12 @@ export function getStreamNeighborItem(params: {
   return params.strategy.getNeighborItem(params.items, params.index, params.relation);
 }
 
-export function collectAssistantTurnContentForStreamRenderStrategy(params: {
+export function collectAssistantResponseContentForStreamRenderStrategy(params: {
   strategy: StreamStrategy;
   items: StreamItem[];
   startIndex: number;
 }): string {
-  return params.strategy.collectAssistantTurnContent(params.items, params.startIndex);
+  return params.strategy.collectAssistantResponseContent(params.items, params.startIndex);
 }
 
 export function isNearBottomForStreamRenderStrategy(
