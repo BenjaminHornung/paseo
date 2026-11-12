@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { mainInputInterpretationSchema } from "./main-interpretation.ts";
 
 export const taskStatusSchema = z.object({
   key: z.string(),
@@ -65,9 +66,21 @@ export const statusSchema = z.object({
   mainAgents: z.array(z.object({ agentId: z.string(), state: z.string() })).optional(),
   orchestrationVersion: z.number().optional(),
   writeAuthorization: z.object({ allowed: z.boolean(), reason: z.string() }).optional(),
+  mainInput: z
+    .object({
+      intakeId: z.string(),
+      factsHash: z.string(),
+      messageId: z.string(),
+      origin: z.string(),
+      previousWorkIntakeId: z.string().nullable(),
+      adviceState: z.string(),
+      interpretation: mainInputInterpretationSchema.optional(),
+    })
+    .optional(),
   intake: z
     .object({
       intent: z.string(),
+      preserveExistingWork: z.boolean().optional(),
       origin: z.string(),
       source: z.string(),
       reason: z.string(),
@@ -167,7 +180,7 @@ export const reasonLabel: Record<string, string> = {
   "task-budget": "Lokales Taskbudget erreicht. Keine automatische Budgeterhöhung.",
   DECISIONS_QUALIFIED_CHOICE: "Historischer v2-Routingbefund; v3 verwendet feste Prioritäten.",
   DECISIONS_KEEP_DEFAULT: "Historischer v2-Routingbefund; v3 verwendet feste Prioritäten.",
-  DECISIONS_SCOPE_BLOCKED: "Decisions ist für diesen Datenscope nicht freigegeben.",
+  DECISIONS_SCOPE_BLOCKED: "Alte lokale Datenschutz-Ablehnung; noch kein Modellaufruf.",
   DECISIONS_NOT_ASSIGNED: "Für diese Rolle ist kein Decisions-Aufruf vorgesehen.",
   SINGLE_QUALIFIED_ROUTE: "Nur eine Route erfüllt die Freigaben.",
   DECISIONS_MONTHLY_CAP: "Decisions-Budget erreicht; neue Schreibfreigabe ausstehend.",
@@ -176,13 +189,24 @@ export const reasonLabel: Record<string, string> = {
     "Auftrag sicher erkannt; unklare Zusatzempfehlungen konservativ behandelt.",
   DECISIONS_PACKAGE_OPTIONAL_FALLBACK:
     "Aufgabenklasse sicher erkannt; zusätzliche Planung nach Paketvollständigkeit geprüft.",
-  "data-scope-not-approved": "Datenschutzklasse nicht freigegeben",
   "repository-not-approved": "Repository nicht freigegeben",
   "quality-tier-insufficient": "Qualitätsstufe reicht nicht aus",
   "confirmed-provider-or-route-circuit": "Bestätigte Provider-/Routensperre",
   "api-budget-unavailable": "Keine freigegebene API-Reservierung verfügbar",
   "read-only-not-enforced": "Lesender Zugriff technisch nicht nachgewiesen",
   INTAKE_PENDING: "Eine neue Nachricht oder deren Übermittlung ist noch ungeklärt.",
+  MAIN_INPUT_INTERPRETATION_REQUIRED:
+    "Der Hauptchat ordnet die neue Nachricht noch ein; keine Benutzerbestätigung erforderlich.",
+  MAIN_PACKAGE_INTERPRETATION_REQUIRED:
+    "Der Hauptchat muss das Paket noch einordnen; Decisions berät nur.",
+  MAIN_PACKAGE_INTERPRETATION_CONFLICT:
+    "Paket bereits verbindlich eingeordnet. Materielle Änderungen über den regulären Änderungsweg einreichen.",
+  PACKAGE_ROUTING_CONFIG_CHANGED_USE_NEW_TASK:
+    "Modellzuordnung seit der Paketbewertung geändert. Das noch nicht registrierte Paket neu vorbereiten; die alte Bewertung bleibt erhalten.",
+  "category-no-safe-and-funded-candidate":
+    "Für diese Arbeitskategorie ist derzeit keine geeignete freigegebene Route verfügbar.",
+  "work-category-unavailable":
+    "Die gespeicherte Arbeitskategorie fehlt in dieser Aufgabenkonfiguration.",
   INTAKE_IMPLEMENTATION_NOT_AUTHORIZED: "Kein bestätigter Implementierungsauftrag freigegeben.",
   INTAKE_HUMAN_ORIGIN_UNCONFIRMED_USE_PLUGIN_INPUT:
     "Benutzerherkunft unbestätigt. Auftrag über den Plugin-Eingang absenden.",

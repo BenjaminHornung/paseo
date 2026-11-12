@@ -29,13 +29,14 @@ import {
 } from "../shared/status";
 import {
   currentTask,
+  decisionRows,
   decisionView,
   needsAttention,
   taskLabel,
   workerNeedsReconciliation,
 } from "../shared/status-view";
 import { decisionsHistory } from "../shared/decisions-history";
-import { DecisionsHistory } from "./decisions-history";
+import { DecisionRows, DecisionsHistory } from "./decisions-history";
 import { CompactAction } from "./compact-action";
 
 const automationLabel = {
@@ -105,12 +106,14 @@ function StatusBody(
     refetchInterval: 5000,
     retry: false,
   });
-  const view = decisionView({
+  const decisionInput = {
     latestId: latest?.id,
     detail: decision.data?.detail,
     loading: history.isPending || (!!latest && decision.isPending),
     error: history.isError || decision.isError,
-  });
+  };
+  const view = decisionView(decisionInput);
+  const rows = decisionRows(decisionInput);
   const { status: decisionStatus, summary } = view;
   const task = currentTask(state?.tasks ?? []);
   const workerId =
@@ -261,11 +264,7 @@ function StatusBody(
                 />
               </View>
               <Text style={{ color: colors.foregroundMuted, fontSize: 13 }}>{decisionStatus}</Text>
-              {!!summary && !history.isError && !decision.isError && (
-                <Text style={{ color: colors.foreground, fontSize: 13, lineHeight: 18 }}>
-                  {summary}
-                </Text>
-              )}
+              <DecisionRows rows={rows} summary={summary} theme={props.theme} />
             </View>
             <Modal title="Decision-Details" open={detailsOpen} onOpenChange={setDetailsOpen}>
               <Modal.Content>

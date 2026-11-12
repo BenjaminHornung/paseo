@@ -7,12 +7,27 @@ import {
   effectiveImplementation,
   intakeFactsSchema,
   intakeResultSchema,
+  preservesExistingWork,
   type Assessment,
   type Classifier,
   type IntakeFacts,
   type IntakeResult,
-  type PackageResult,
+  intakeIdentity,
 } from "./assessments.ts";
+import {
+  mainInputInterpretationSchema,
+  type MainInputInterpretation,
+} from "../paseo-plugin/shared/main-interpretation.ts";
+import {
+  awaitsMainInterpretation,
+  mainInputInterpretation,
+  mainInputResult,
+  mainIntakeAuthority,
+  persistMainInputInterpretation,
+  readIntakeAssessment,
+  readPackageAssessment,
+} from "./main-interpretation.ts";
+import { Git } from "./git.ts";
 import { Store } from "./store.ts";
 import { observedTimeline } from "./timeline.ts";
 import { verifiedProviderSessionId } from "./completion.ts";
@@ -190,8 +205,8 @@ export async function captureHumanIntake(
   for (const row of abandoned)
     await classifier.classifyIntake(intakeFactsSchema.parse(JSON.parse(row.facts_json)), config);
   const checkpoint = store.db
-    .prepare("SELECT message_id FROM main_checkpoints WHERE agent_id=?")
-    .get(main.agentId) as { message_id: string | null } | undefined;
+    .prepare("SELECT message_id,work_intake_id FROM main_checkpoints WHERE agent_id=?")
+    .get(main.agentId) as { message_id: string | null; work_intake_id: string | null } | undefined;
   const sessionId = await verifiedProviderSessionId(handle);
   const emptyBaseline = checkpoint?.message_id?.startsWith("empty:");
   if (emptyBaseline && checkpoint?.message_id !== `empty:${sessionId}`)
@@ -279,13 +294,11 @@ export async function captureHumanIntake(
   }
   if (anchor && timeline.endCursor && timeline.endCursor.epoch !== anchor[1])
     throw Error("INTAKE_HISTORY_EPOCH_CHANGED");
-  const requestedScope = snapshot.labels?.orchestratorScope;
-  const dataScope = ["public", "personal", "company", "restricted"].includes(requestedScope ?? "")
-    ? requestedScope!
-    : "company";
+  let checkpointEntry: (typeof entries)[number] | undefined;
   if (checkpoint?.message_id && !emptyBaseline) {
     const index = timelineCheckpointIndex(entries, checkpoint.message_id);
     if (index < 0) throw Error("INTAKE_HISTORY_GAP");
+    checkpointEntry = entries[index];
     entries = entries.slice(index + 1);
   }
   const humanEntries = entries.filter((entry) => {
@@ -299,6 +312,48 @@ export async function captureHumanIntake(
         .get(main.agentId, item.clientMessageId ?? item.messageId ?? "")
     );
   });
+  if (!humanEntries.length && checkpointEntry?.item.type === "user_message") {
+    const prior = store.db
+      .prepare(
+        "SELECT facts_json,result_json FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY rowid DESC LIMIT 1",
+      )
+      .get(main.agentId) as { facts_json: string; result_json: string | null } | undefined;
+    if (prior?.result_json) {
+      const cached = JSON.parse(prior.result_json) as Assessment<IntakeResult>;
+      const frozenFacts = intakeFactsSchema.parse(JSON.parse(prior.facts_json));
+      const localDenial =
+        cached.source === "fallback" && cached.reason === "DECISIONS_SCOPE_BLOCKED";
+      let unboundRecovery = false;
+      if (
+        cached.source === "decisions" &&
+        cached.result.needImplementation &&
+        ["new-task", "change-request"].includes(cached.result.intent) &&
+        checkpoint?.work_intake_id !== cached.id
+      ) {
+        const audits = store.db
+          .prepare(
+            "SELECT kind FROM events WHERE kind LIKE 'DECISIONS_LOCAL_SCOPE_DENIAL_REOPENED:%'",
+          )
+          .all() as { kind: string }[];
+        unboundRecovery = audits.some(({ kind }) => {
+          const previous = JSON.parse(kind.slice(kind.indexOf(":") + 1)).previous;
+          return (
+            previous.id === cached.id &&
+            previous.owner_id === main.agentId &&
+            previous.facts_hash === cached.factsHash
+          );
+        });
+      }
+      if (
+        (localDenial || unboundRecovery) &&
+        frozenFacts.messageId === checkpoint?.message_id &&
+        frozenFacts.text === checkpointEntry.item.text
+      ) {
+        assertIntakeSettled(store, main.agentId);
+        humanEntries.push(checkpointEntry);
+      }
+    }
+  }
   let start = checkpoint ? 0 : Math.max(0, humanEntries.length - 1);
   let latest: Assessment<IntakeResult> | undefined;
   for (const entry of humanEntries.slice(start)) {
@@ -340,18 +395,18 @@ export async function captureHumanIntake(
       }
       const approved = store.db
         .prepare(
-          "SELECT facts_json FROM assessments WHERE owner_id=? AND kind='intake' AND json_extract(result_json,'$.source')='decisions' AND json_extract(result_json,'$.result.needImplementation')=1 ORDER BY rowid DESC LIMIT 1",
+          "SELECT id,facts_json FROM assessments WHERE owner_id=? AND kind='intake' AND id=(SELECT work_intake_id FROM main_checkpoints WHERE agent_id=?)",
         )
-        .get(main.agentId) as { facts_json: string } | undefined;
+        .get(main.agentId, main.agentId) as { id: string; facts_json: string } | undefined;
       const safeContext = (text: string) =>
         !/sk-[a-zA-Z0-9_-]{16,}|(?:password|pwd|secret|token|api[_-]?key|connectionstring)["']?\s*[:=]|PRIVATE KEY/i.test(
           text,
         );
       if (approved) {
         const original = intakeFactsSchema.parse(JSON.parse(approved.facts_json));
-        if (original.dataScope === dataScope && safeContext(original.text))
+        if (safeContext(original.text))
           knownFacts.push(
-            `Earlier implementation request, historical context only; current gates still apply: ${original.text.slice(0, 700)}`,
+            `Existing work intake ${approved.id}, historical context only; current gates still apply: ${original.text.slice(0, 700)}`,
           );
       }
       for (const permission of snapshot.pendingPermissions ?? []) {
@@ -374,14 +429,15 @@ export async function captureHumanIntake(
           text: validText
             ? item.text
             : `[Unverified input omitted; ${item.text.length} characters; hash ${hash(item.text)}]`,
-          dataScope,
           knownFacts: knownFacts.slice(0, 12),
           messageRevision: 1,
           factsRevision: 1,
         });
+    if (!existing) store.event(`MAIN_INPUT_AWAITING_INTERPRETATION:${intakeIdentity(facts)}`);
     latest = await classifier.classifyIntake(facts, config);
     // Another caller owns the in-flight request. It alone advances the cursor.
-    if (latest.reason === "DECISIONS_OUTCOME_PENDING") throw Error("INTAKE_PENDING");
+    if (latest.reason === "DECISIONS_OUTCOME_PENDING" && !mainInputInterpretation(store, latest.id))
+      throw Error("INTAKE_PENDING");
     store.transaction(() => {
       store.db
         .prepare(
@@ -406,6 +462,10 @@ export async function captureHumanIntake(
         .prepare("UPDATE main_checkpoints SET message_id=? WHERE agent_id=?")
         .run(messageId, main.agentId);
       settleIntakeClassification(store, main.agentId, messageId);
+      // Advice may settle after an authoritative start or stop. It can advance
+      // its transport cursor, never rewrite the main's work binding.
+      if (awaitsMainInterpretation(store, latest!.id) || mainInputInterpretation(store, latest!.id))
+        return;
       const result = latest!.result;
       const currentReceipt = store.db
         .prepare("SELECT kind FROM internal_messages WHERE agent_id=? AND message_id=?")
@@ -415,6 +475,7 @@ export async function captureHumanIntake(
         latest!.source === "fallback" && latest!.reason === "DECISIONS_LOW_CONFIDENCE";
       if (
         (!awaitingOperatorClassification &&
+          !preservesExistingWork(latest!) &&
           ["cancel", "other", "new-task", "change-request", "review-request"].includes(
             result.intent,
           )) ||
@@ -436,10 +497,10 @@ export async function captureHumanIntake(
   if (!latest) {
     const prior = store.db
       .prepare(
-        "SELECT result_json FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY created_ms DESC,rowid DESC LIMIT 1",
+        "SELECT id FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY created_ms DESC,rowid DESC LIMIT 1",
       )
-      .get(main.agentId) as { result_json: string | null } | undefined;
-    if (prior?.result_json) latest = JSON.parse(prior.result_json) as Assessment<IntakeResult>;
+      .get(main.agentId) as { id: string } | undefined;
+    if (prior) latest = readIntakeAssessment(store, prior.id);
   }
   return effectiveIntakeAssessment(store, latest);
 }
@@ -455,46 +516,46 @@ export function currentIntake(
   const row =
     forMutation && checkpoint?.work_intake_id
       ? store.db
-          .prepare("SELECT result_json FROM assessments WHERE id=? AND owner_id=?")
+          .prepare("SELECT id FROM assessments WHERE id=? AND owner_id=?")
           .get(checkpoint.work_intake_id, agentId)
       : store.db
           .prepare(
-            "SELECT result_json FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY created_ms DESC,rowid DESC LIMIT 1",
+            "SELECT id FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY created_ms DESC,rowid DESC LIMIT 1",
           )
           .get(agentId);
-  const value = row as { result_json: string | null } | undefined;
-  if (!value?.result_json) throw Error("INTAKE_CLASSIFICATION_REQUIRED");
-  const assessment = effectiveIntakeAssessment(
-    store,
-    JSON.parse(value.result_json) as Assessment<IntakeResult>,
-  );
+  const value = row as { id: string } | undefined;
+  if (!value) throw Error("INTAKE_CLASSIFICATION_REQUIRED");
+  const assessment = effectiveIntakeAssessment(store, readIntakeAssessment(store, value.id));
   const origin = store.db
     .prepare("SELECT facts_json FROM assessments WHERE id=?")
     .get(assessment.id) as { facts_json: string };
   const facts = intakeFactsSchema.parse(JSON.parse(origin.facts_json));
   assertHumanReceipt(store, facts, !forMutation);
   if (forMutation && checkpoint?.work_intake_id) {
-    const latestRow = store.db
+    const following = store.db
       .prepare(
-        "SELECT id,facts_json,result_json FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY rowid DESC LIMIT 1",
+        "SELECT id FROM assessments WHERE owner_id=? AND kind='intake' AND rowid>(SELECT rowid FROM assessments WHERE id=?) ORDER BY rowid",
       )
-      .get(agentId) as { id: string; facts_json: string; result_json: string | null } | undefined;
-    if (latestRow?.id !== assessment.id) {
-      if (!latestRow?.result_json) throw Error("INTAKE_PENDING");
-      const latest = effectiveIntakeAssessment(
-        store,
-        JSON.parse(latestRow.result_json) as Assessment<IntakeResult>,
-      );
+      .all(agentId, assessment.id) as { id: string }[];
+    for (const followingRow of following) {
+      const latest = effectiveIntakeAssessment(store, readIntakeAssessment(store, followingRow.id));
+      if (latest.id === assessment.id) continue;
       const latestFactsRow = store.db
         .prepare("SELECT facts_json FROM assessments WHERE id=?")
         .get(latest.id) as { facts_json: string };
-      assertHumanReceipt(store, intakeFactsSchema.parse(JSON.parse(latestFactsRow.facts_json)));
-      const isInformational = ["question", "status"].includes(latest.result.intent);
-      const isApprovedContinuation =
+      const latestFacts = intakeFactsSchema.parse(JSON.parse(latestFactsRow.facts_json));
+      assertHumanReceipt(store, latestFacts);
+      if (canonicalPath(latestFacts.directory) !== canonicalPath(facts.directory))
+        throw Error("INTAKE_DIRECTORY_MISMATCH");
+      const isInformational = preservesExistingWork(latest);
+      // An accepted task approval does not replace or revoke the original
+      // objective. Dispatch, continuation and verification check task-specific
+      // owner approval separately.
+      const isTaskApproval =
         latest.result.intent === "approval" &&
         latest.result.needImplementation &&
-        hasTaskApprovalLink(store, agentId, checkpoint.work_intake_id, latest);
-      if (latest.id !== assessment.id && !isInformational && !isApprovedContinuation) {
+        ["decisions", "operator-confirmed", "main"].includes(latest.source);
+      if (latest.id !== assessment.id && !isInformational && !isTaskApproval) {
         if (latest.result.intent === "approval" && latest.result.needImplementation)
           throw Error("APPROVAL_TARGET_REQUIRED");
         throw Error("INTAKE_SUPERSEDED");
@@ -505,10 +566,179 @@ export function currentIntake(
     forMutation &&
     (!checkpoint?.work_intake_id ||
       !assessment.result.needImplementation ||
-      !["decisions", "operator-confirmed"].includes(assessment.source))
+      !["decisions", "operator-confirmed", "main"].includes(assessment.source))
   )
     throw Error("INTAKE_IMPLEMENTATION_NOT_AUTHORIZED");
   return assessment;
+}
+
+export function currentMainInput(store: Store, agentId: string) {
+  const row = store.db
+    .prepare(
+      "SELECT id,facts_hash,facts_json,state FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY created_ms DESC,rowid DESC LIMIT 1",
+    )
+    .get(agentId) as
+    | { id: string; facts_hash: string; facts_json: string; state: string }
+    | undefined;
+  if (!row) return undefined;
+  const facts = intakeFactsSchema.parse(JSON.parse(row.facts_json));
+  const checkpoint = store.db
+    .prepare("SELECT work_intake_id FROM main_checkpoints WHERE agent_id=?")
+    .get(agentId) as { work_intake_id: string | null } | undefined;
+  return {
+    intakeId: row.id,
+    factsHash: row.facts_hash,
+    messageId: facts.messageId,
+    origin: facts.origin,
+    previousWorkIntakeId: checkpoint?.work_intake_id ?? null,
+    adviceState: row.state,
+    interpretation: mainInputInterpretation(store, row.id),
+  };
+}
+
+export async function observeMainInput(
+  store: Store,
+  config: Config,
+  paseo: PaseoApi,
+  main: { agentId: string; directory: string },
+  classifier: Classifier,
+) {
+  try {
+    await captureHumanIntake(store, config, paseo, main, classifier);
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      !["INTAKE_PENDING", "MAIN_INPUT_INTERPRETATION_REQUIRED"].includes(error.message)
+    )
+      throw error;
+  }
+  return currentMainInput(store, main.agentId);
+}
+
+function validateMainTarget(
+  store: Store,
+  config: Config,
+  main: { agentId: string; taskKeys: readonly string[] },
+  interpretation: MainInputInterpretation,
+): void {
+  const target = interpretation.target;
+  if (!target) {
+    if (
+      interpretation.action === "change" &&
+      main.taskKeys.some((key) => {
+        const task = store.task(key);
+        return (
+          task && JSON.parse(task.contract_json).intakeId === interpretation.previousWorkIntakeId
+        );
+      })
+    )
+      throw Error("MAIN_TARGET_REQUIRED");
+    return;
+  }
+  if (!main.taskKeys.includes(target.taskKey)) throw Error("MAIN_TARGET_NOT_OWNED");
+  const task = store.task(target.taskKey);
+  if (
+    !task ||
+    task.contract_hash !== target.contractHash ||
+    hash(JSON.parse(task.contract_json)) !== target.contractHash
+  )
+    throw Error("MAIN_TARGET_CONTRACT_CHANGED");
+  const contract = contractSchema.parse(JSON.parse(task.contract_json));
+  if (
+    contract.intakeId !== interpretation.previousWorkIntakeId ||
+    contract.packageAssessmentId !== target.packageAssessmentId
+  )
+    throw Error("MAIN_TARGET_BINDING_CHANGED");
+  if (
+    target.diffHash &&
+    new Git(config.gitExecutable).snapshot(contract).diffHash !== target.diffHash
+  )
+    throw Error("MAIN_TARGET_DIFF_CHANGED");
+}
+
+export function interpretMainInput(
+  store: Store,
+  config: Config,
+  main: { agentId: string; directory: string; taskKeys: readonly string[] },
+  input: MainInputInterpretation,
+) {
+  const interpretation = mainInputInterpretationSchema.parse(input);
+  return store.transaction(() => {
+    const current = currentMainInput(store, main.agentId);
+    if (
+      !current ||
+      current.intakeId !== interpretation.intakeId ||
+      current.factsHash !== interpretation.factsHash
+    )
+      throw Error("MAIN_INPUT_FACTS_CHANGED");
+    const row = store.db
+      .prepare("SELECT facts_json FROM assessments WHERE id=? AND owner_id=? AND kind='intake'")
+      .get(interpretation.intakeId, main.agentId) as { facts_json: string };
+    const facts = intakeFactsSchema.parse(JSON.parse(row.facts_json));
+    if (facts.mainAgentId !== main.agentId) throw Error("MAIN_INPUT_OWNER_MISMATCH");
+    if (hash(facts) !== interpretation.factsHash) throw Error("MAIN_INPUT_FACTS_CHANGED");
+    assertHumanReceipt(store, facts);
+    if (canonicalPath(facts.directory) !== canonicalPath(main.directory))
+      throw Error("INTAKE_DIRECTORY_MISMATCH");
+    const receipts = store.db
+      .prepare(
+        "SELECT kind FROM events WHERE kind LIKE 'HUMAN_INPUT_RECEIPT:%' ORDER BY sequence DESC",
+      )
+      .all() as { kind: string }[];
+    const newest = receipts
+      .map(({ kind }) => JSON.parse(kind.slice("HUMAN_INPUT_RECEIPT:".length)))
+      .find((receipt) => receipt.agentId === main.agentId);
+    if (newest && newest.messageId !== facts.messageId) throw Error("MAIN_INPUT_SUPERSEDED");
+    if (current.interpretation) {
+      if (hash(current.interpretation) !== hash(interpretation))
+        throw Error("MAIN_INPUT_INTERPRETATION_CONFLICT");
+      return current.interpretation;
+    }
+    if (current.previousWorkIntakeId !== interpretation.previousWorkIntakeId)
+      throw Error("MAIN_WORK_BINDING_CHANGED");
+    assertOperatorIntakeCompatibility(store, interpretation);
+    validateMainTarget(store, config, main, interpretation);
+    persistMainInputInterpretation(store, interpretation);
+    if (["question", "status", "continue", "approve"].includes(interpretation.action)) {
+      if (interpretation.previousWorkIntakeId) currentIntake(store, main.agentId, true);
+      else if (["continue", "approve"].includes(interpretation.action))
+        throw Error("CONTINUATION_AUTHORIZATION_MISSING");
+    }
+    let workIntakeId = interpretation.previousWorkIntakeId;
+    if (["start", "change"].includes(interpretation.action)) workIntakeId = interpretation.intakeId;
+    if (["plan", "review", "stop"].includes(interpretation.action)) workIntakeId = null;
+    store.db
+      .prepare("INSERT OR IGNORE INTO main_checkpoints(agent_id) VALUES(?)")
+      .run(main.agentId);
+    store.db
+      .prepare("UPDATE main_checkpoints SET work_intake_id=? WHERE agent_id=?")
+      .run(workIntakeId, main.agentId);
+    return interpretation;
+  });
+}
+
+function assertOperatorIntakeCompatibility(
+  store: Store,
+  interpretation: MainInputInterpretation,
+): void {
+  const approvals = modelAnswerApprovals(store);
+  if (
+    approvals.some(
+      (approval) =>
+        approval.confirmation?.assessmentId === interpretation.intakeId &&
+        approvedOriginal(store, approval),
+    )
+  )
+    throw Error("MAIN_INPUT_ALREADY_OPERATOR_BOUND");
+  const approval = approvals.find((value) => value.assessmentId === interpretation.intakeId);
+  if (!approval || !approvedOriginal(store, approval)) return;
+  const accepted = intakeResultSchema.parse(approval.effectiveResult);
+  const result = mainInputResult(interpretation);
+  if (
+    accepted.intent !== result.intent ||
+    accepted.needImplementation !== result.needImplementation
+  )
+    throw Error("MAIN_INPUT_CONTRADICTS_OPERATOR_CONFIRMATION");
 }
 
 export function effectiveIntakeAssessment(
@@ -537,14 +767,21 @@ export function effectiveIntakeAssessment(
   const approval = approvals.find(
     (row) => row.assessmentId === assessment.id && row.assessmentHash === hash(assessment),
   );
-  return approval
+  const effective: Assessment<IntakeResult> = approval
     ? {
         ...assessment,
         source: "operator-confirmed",
         reason: "OPERATOR_CONFIRMED_MODEL_ANSWER",
         result: intakeResultSchema.parse(approval.effectiveResult),
       }
-    : assessment;
+    : mainIntakeAuthority(store, assessment);
+  if (
+    awaitsMainInterpretation(store, assessment.id) &&
+    effective.source !== "main" &&
+    effective.source !== "operator-confirmed"
+  )
+    throw Error("MAIN_INPUT_INTERPRETATION_REQUIRED");
+  return effective;
 }
 
 function allApprovalLinks(store: Store): TaskApprovalLink[] {
@@ -580,7 +817,7 @@ function hasTaskApprovalLink(
     .get(approval.id, agentId) as { facts_json: string } | undefined;
   if (
     !factsRow ||
-    !["decisions", "operator-confirmed"].includes(approval.source) ||
+    !["decisions", "operator-confirmed", "main"].includes(approval.source) ||
     approval.result.intent !== "approval" ||
     !approval.result.needImplementation
   )
@@ -591,13 +828,17 @@ function hasTaskApprovalLink(
   } catch {
     return false;
   }
-  return approvalLinks(store, approval.id).some(
-    (link) =>
-      link.agentId === agentId &&
-      link.originalIntakeId === originalIntakeId &&
-      link.approvalMessageId === facts.messageId &&
-      link.approvalHash === hash(approval) &&
-      link.messageHash === hash(facts.text),
+  const links = approvalLinks(store, approval.id);
+  return (
+    links.length === 1 &&
+    links.some(
+      (link) =>
+        link.agentId === agentId &&
+        link.originalIntakeId === originalIntakeId &&
+        link.approvalMessageId === facts.messageId &&
+        link.approvalHash === hash(approval) &&
+        link.messageHash === hash(facts.text),
+    )
   );
 }
 
@@ -632,20 +873,15 @@ export function hasAuditedOwnerApproval(store: Store, contract: Contract): boole
     )
       return false;
     const approvalRow = store.db
-      .prepare("SELECT result_json FROM assessments WHERE id=? AND owner_id=? AND kind='intake'")
-      .get(link.approvalAssessmentId, intake.owner_id) as
-      | { result_json: string | null }
-      | undefined;
-    if (!approvalRow?.result_json) return false;
+      .prepare("SELECT id FROM assessments WHERE id=? AND owner_id=? AND kind='intake'")
+      .get(link.approvalAssessmentId, intake.owner_id) as { id: string } | undefined;
+    if (!approvalRow) return false;
     try {
       return hasTaskApprovalLink(
         store,
         intake.owner_id,
         contract.intakeId!,
-        effectiveIntakeAssessment(
-          store,
-          JSON.parse(approvalRow.result_json) as Assessment<IntakeResult>,
-        ),
+        effectiveIntakeAssessment(store, readIntakeAssessment(store, approvalRow.id)),
       );
     } catch {
       return false;
@@ -658,73 +894,98 @@ export function linkApprovalToOutstandingTask(
   agentId: string,
   taskKeys: readonly string[],
   approval: Assessment<IntakeResult>,
+  requestedTarget: Pick<Contract, "workflowId" | "taskId" | "role">,
 ): string | undefined {
-  const checkpoint = store.db
-    .prepare("SELECT work_intake_id FROM main_checkpoints WHERE agent_id=?")
-    .get(agentId) as { work_intake_id: string | null } | undefined;
-  if (
-    !checkpoint?.work_intake_id ||
-    !["decisions", "operator-confirmed"].includes(approval.source) ||
-    approval.result.intent !== "approval" ||
-    !approval.result.needImplementation
-  )
-    return undefined;
-  const factsRow = store.db
-    .prepare("SELECT facts_json FROM assessments WHERE id=? AND owner_id=?")
-    .get(approval.id, agentId) as { facts_json: string } | undefined;
-  if (!factsRow) return undefined;
-  const approvalFacts = intakeFactsSchema.parse(JSON.parse(factsRow.facts_json));
-  assertHumanReceipt(store, approvalFacts);
-  const candidates = taskKeys.flatMap((taskKey) => {
-    const task = store.task(taskKey);
-    if (!task || task.contract_hash !== hash(JSON.parse(task.contract_json))) return [];
-    const contract = contractSchema.parse(JSON.parse(task.contract_json)),
-      attempt = store.latest(taskKey);
-    const pausedWorker =
-      task.state === "NEEDS_CONFIRMATION" &&
-      attempt?.status === "NEEDS_CONFIRMATION" &&
-      !!attempt.agent_id;
-    const awaitingOwnerApproval = task.state === "READY" && contract.highRisk && !attempt;
+  return store.transaction(() => {
+    const checkpoint = store.db
+      .prepare("SELECT work_intake_id FROM main_checkpoints WHERE agent_id=?")
+      .get(agentId) as { work_intake_id: string | null } | undefined;
     if (
-      !contract.mutation ||
-      !contract.role.startsWith("implement-") ||
-      contract.intakeId !== checkpoint.work_intake_id ||
-      !contract.packageAssessmentId ||
-      (!pausedWorker && !awaitingOwnerApproval)
+      !checkpoint?.work_intake_id ||
+      !["decisions", "operator-confirmed", "main"].includes(approval.source) ||
+      approval.result.intent !== "approval" ||
+      !approval.result.needImplementation
     )
-      return [];
-    const binding = store.db
-      .prepare("SELECT intake_id,package_id,effective_class FROM task_assessments WHERE task_key=?")
-      .get(taskKey) as
-      | { intake_id: string; package_id: string; effective_class: string }
+      return undefined;
+    const factsRow = store.db
+      .prepare(
+        "SELECT facts_json,created_ms,rowid FROM assessments WHERE id=? AND owner_id=? AND kind='intake'",
+      )
+      .get(approval.id, agentId) as
+      | { facts_json: string; created_ms: number; rowid: number }
       | undefined;
+    if (!factsRow) return undefined;
     if (
-      !binding ||
-      binding.intake_id !== contract.intakeId ||
-      binding.package_id !== contract.packageAssessmentId ||
-      binding.effective_class !== contract.role
+      currentIntake(store, agentId, true).id !== checkpoint.work_intake_id ||
+      hash(currentIntake(store, agentId, false)) !== hash(approval)
     )
-      return [];
-    return [{ taskKey, task, contract, attempt }];
-  });
-  if (candidates.length !== 1) return undefined;
-  const target = candidates[0],
-    link: TaskApprovalLink = taskApprovalLinkSchema.parse({
-      agentId,
-      taskKey: target.taskKey,
-      contractHash: target.task.contract_hash,
-      originalIntakeId: target.contract.intakeId,
-      packageAssessmentId: target.contract.packageAssessmentId,
-      packageId: `${target.contract.workflowId}/${target.contract.taskId}`,
-      approvalAssessmentId: approval.id,
-      approvalMessageId: approvalFacts.messageId,
-      approvalHash: hash(approval),
-      messageHash: hash(approvalFacts.text),
+      return undefined;
+    const approvalFacts = intakeFactsSchema.parse(JSON.parse(factsRow.facts_json));
+    assertHumanReceipt(store, approvalFacts);
+    const requestedKey = `${requestedTarget.workflowId}/${requestedTarget.taskId}/${requestedTarget.role}`;
+    const existingLinks = approvalLinks(store, approval.id);
+    if (existingLinks.some((link) => link.taskKey !== requestedKey)) return undefined;
+    const candidates = taskKeys.flatMap((taskKey) => {
+      if (taskKey !== requestedKey) return [];
+      const task = store.task(taskKey);
+      if (!task || task.contract_hash !== hash(JSON.parse(task.contract_json))) return [];
+      const contract = contractSchema.parse(JSON.parse(task.contract_json)),
+        attempt = store.latest(taskKey);
+      const pausedWorker =
+        task.state === "NEEDS_CONFIRMATION" &&
+        attempt?.status === "NEEDS_CONFIRMATION" &&
+        !!attempt.agent_id;
+      const awaitingOwnerApproval = task.state === "READY" && contract.highRisk && !attempt;
+      if (
+        !contract.mutation ||
+        !contract.role.startsWith("implement-") ||
+        contract.intakeId !== checkpoint.work_intake_id ||
+        !contract.packageAssessmentId ||
+        (!existingLinks.length && !pausedWorker && !awaitingOwnerApproval)
+      )
+        return [];
+      const binding = store.db
+        .prepare(
+          `SELECT binding.intake_id,binding.package_id,binding.effective_class
+          FROM task_assessments AS binding JOIN assessments AS package ON package.id=binding.package_id
+          WHERE binding.task_key=? AND binding.created_ms<?
+          AND package.owner_id=? AND package.kind='package' AND package.rowid<?`,
+        )
+        .get(taskKey, factsRow.created_ms, agentId, factsRow.rowid) as
+        | { intake_id: string; package_id: string; effective_class: string }
+        | undefined;
+      if (
+        !binding ||
+        binding.intake_id !== contract.intakeId ||
+        binding.package_id !== contract.packageAssessmentId ||
+        binding.effective_class !== contract.role
+      )
+        return [];
+      return [{ taskKey, task, contract, attempt }];
     });
-  const kind = `${approvalLinkPrefix}${JSON.stringify(link)}`;
-  if (!store.db.prepare("SELECT 1 FROM events WHERE kind=?").get(kind))
+    if (candidates.length !== 1) return undefined;
+    const target = candidates[0],
+      link: TaskApprovalLink = taskApprovalLinkSchema.parse({
+        agentId,
+        taskKey: target.taskKey,
+        contractHash: target.task.contract_hash,
+        originalIntakeId: target.contract.intakeId,
+        packageAssessmentId: target.contract.packageAssessmentId,
+        packageId: `${target.contract.workflowId}/${target.contract.taskId}`,
+        approvalAssessmentId: approval.id,
+        approvalMessageId: approvalFacts.messageId,
+        approvalHash: hash(approval),
+        messageHash: hash(approvalFacts.text),
+      });
+    const kind = `${approvalLinkPrefix}${JSON.stringify(link)}`;
+    if (existingLinks.length) {
+      return existingLinks.length === 1 && hash(existingLinks[0]) === hash(link)
+        ? target.taskKey
+        : undefined;
+    }
     store.event(kind, target.attempt?.id ?? null);
-  return target.taskKey;
+    return target.taskKey;
+  });
 }
 
 // Operator-only confirmation of the model's own low-confidence answer. The
@@ -838,8 +1099,7 @@ function assertApprovalReply(
     reply.reason !== "INTAKE_HUMAN_ORIGIN_UNCONFIRMED" ||
     reply.source !== "fallback" ||
     replyFacts.origin !== "unverified" ||
-    replyFacts.directory !== facts.directory ||
-    replyFacts.dataScope !== facts.dataScope
+    replyFacts.directory !== facts.directory
   )
     throw Error("INTAKE_CONFIRMATION_IDENTITY_MISMATCH");
 }
@@ -989,7 +1249,6 @@ export function confirmExistingWork(
       !prior.result.needImplementation ||
       !["new-task", "change-request", "approval"].includes(prior.result.intent) ||
       facts.directory !== priorFacts.directory ||
-      facts.dataScope !== priorFacts.dataScope ||
       original.rowid >= current.rowid
     )
       throw Error("CONTINUATION_NOT_AN_EXISTING_APPROVED_OBJECTIVE");
@@ -1020,16 +1279,19 @@ function assertIntakeSettled(
   agentId: string,
   supersedingSequences: number[] = [],
 ): void {
+  const pendingAdvice = store.db
+    .prepare(
+      "SELECT id FROM assessments WHERE owner_id=? AND kind='intake' AND result_json IS NULL",
+    )
+    .all(agentId) as { id: string }[];
+  const latestInput = currentMainInput(store, agentId);
+  const mainResolved = !!latestInput?.interpretation;
   if (
-    store.db
-      .prepare(
-        "SELECT 1 FROM assessments WHERE owner_id=? AND kind='intake' AND result_json IS NULL LIMIT 1",
-      )
-      .get(agentId) ||
+    (!mainResolved && pendingAdvice.some((row) => !mainInputInterpretation(store, row.id))) ||
     store.db
       .prepare(`SELECT 1 FROM internal_messages receipt WHERE receipt.agent_id=? AND (receipt.kind LIKE 'human:%' OR receipt.kind LIKE 'operator-readonly-advisor:%')
       AND NOT EXISTS(SELECT 1 FROM assessments assessment WHERE assessment.owner_id=receipt.agent_id AND assessment.kind='intake'
-        AND json_extract(assessment.facts_json,'$.messageId')=receipt.message_id AND assessment.result_json IS NOT NULL) LIMIT 1`)
+        AND json_extract(assessment.facts_json,'$.messageId')=receipt.message_id) LIMIT 1`)
       .get(agentId)
   )
     throw Error("INTAKE_PENDING");
@@ -1044,6 +1306,22 @@ function assertIntakeSettled(
       approvedOriginal(store, approval),
   );
   for (const row of pending) {
+    const interpreted = store.db
+      .prepare(
+        "SELECT id FROM assessments WHERE owner_id=? AND kind='intake' AND json_extract(facts_json,'$.messageId') IS NOT NULL",
+      )
+      .all(agentId) as { id: string }[];
+    if (
+      interpreted.some(({ id }) => {
+        const value = mainInputInterpretation(store, id);
+        if (!value) return false;
+        const facts = store.db.prepare("SELECT facts_json FROM assessments WHERE id=?").get(id) as {
+          facts_json: string;
+        };
+        return row.kind === `${pendingPrefix}${hash(JSON.parse(facts.facts_json).messageId)}`;
+      })
+    )
+      continue;
     if (
       supersedingSequences.includes(row.sequence) ||
       approvedSupersession.some((approval) =>
@@ -1078,7 +1356,7 @@ export function assertTaskAssessment(store: Store, config: Config, contract: Con
     .get(contract.packageAssessmentId) as
     | { owner_id: string; facts_json: string; result_json: string | null }
     | undefined;
-  if (!intake?.result_json || !pkg?.result_json) throw Error("TASK_ASSESSMENT_REQUIRED");
+  if (!intake || !pkg) throw Error("TASK_ASSESSMENT_REQUIRED");
   if (pkg.owner_id !== intake.owner_id) throw Error("ASSESSMENT_OWNER_MISMATCH");
   assertIntakeSettled(store, intake.owner_id);
   const intakeFacts = JSON.parse(intake.facts_json) as IntakeFacts;
@@ -1089,40 +1367,22 @@ export function assertTaskAssessment(store: Store, config: Config, contract: Con
   );
   if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
     throw Error("INTAKE_REPOSITORY_SCOPE_MISMATCH");
-  if (contract.dataScope !== intakeFacts.dataScope && contract.dataScope !== "restricted")
-    throw Error("INTAKE_DATA_SCOPE_MISMATCH");
-  const intakeResult = JSON.parse(intake.result_json) as Assessment<IntakeResult>;
-  const assessment = JSON.parse(pkg.result_json) as Assessment<PackageResult>;
+  const intakeResult = effectiveIntakeAssessment(
+    store,
+    readIntakeAssessment(store, contract.intakeId),
+  );
+  const assessment = readPackageAssessment(store, contract.packageAssessmentId);
   if (!contract.mutation && !["planner", "advisor"].includes(contract.role))
     throw Error("INTAKE_ROLE_NOT_AUTHORIZED");
   if (contract.mutation && currentIntake(store, intake.owner_id, true).id !== contract.intakeId)
     throw Error("INTAKE_SUPERSEDED");
-  if (contract.mutation) {
-    const latest = currentIntake(store, intake.owner_id, false);
-    if (
-      latest.id !== contract.intakeId &&
-      latest.result.intent === "approval" &&
-      latest.result.needImplementation &&
-      !approvalLinks(store, latest.id).some(
-        (link) =>
-          link.agentId === intake.owner_id &&
-          link.taskKey === `${contract.workflowId}/${contract.taskId}/${contract.role}` &&
-          link.contractHash === hash(contract) &&
-          link.originalIntakeId === contract.intakeId &&
-          link.packageAssessmentId === contract.packageAssessmentId &&
-          link.packageId === `${contract.workflowId}/${contract.taskId}` &&
-          hasTaskApprovalLink(store, intake.owner_id, contract.intakeId!, latest),
-      )
-    )
-      throw Error("APPROVAL_TARGET_REQUIRED");
-  }
   if (
     !contract.mutation &&
     contract.role === "planner" &&
     !intakeResult.result.needPlanner &&
     !(
       intakeResult.result.needImplementation &&
-      assessment.source === "decisions" &&
+      ["decisions", "main"].includes(assessment.source) &&
       assessment.result.additionalPlanning
     )
   )
@@ -1134,7 +1394,7 @@ export function assertTaskAssessment(store: Store, config: Config, contract: Con
     intakeResult.result.intent !== "review-request" &&
     !(
       intakeResult.result.needImplementation &&
-      assessment.source === "decisions" &&
+      ["decisions", "main"].includes(assessment.source) &&
       assessment.result.advisorNeeded
     )
   )
@@ -1151,7 +1411,7 @@ export function assertTaskAssessment(store: Store, config: Config, contract: Con
     acceptance: string[];
     repository: string;
     baseCommit: string;
-    dataScope: string;
+    dataScope?: string;
     risks?: string[];
     checks?: Contract["checks"];
     mutation?: boolean;
@@ -1172,8 +1432,7 @@ export function assertTaskAssessment(store: Store, config: Config, contract: Con
     hash(facts.files) !== hash(contract.allowedPaths) ||
     facts.goal !== contract.prompt ||
     facts.repository !== contract.repository ||
-    facts.baseCommit !== contract.baseCommit ||
-    facts.dataScope !== contract.dataScope
+    facts.baseCommit !== contract.baseCommit
   )
     throw Error("PACKAGE_FACTS_MISMATCH");
   if (

@@ -13,7 +13,8 @@ export const researchRequestSchema = z.strictObject({
   repository: z.string(),
   query: z.string().min(2).max(200),
   paths: z.array(z.string().min(1)).min(1).max(20),
-  scope: z.enum(["public", "personal", "company", "restricted"]),
+  // Ignored legacy request input; repository and path ACLs remain active.
+  scope: z.string().optional(),
   synthesize: z.boolean().optional(),
 });
 export type ResearchRequest = z.infer<typeof researchRequestSchema>;
@@ -162,14 +163,13 @@ export async function researchWithSynthesis(
     if (
       store.stopped() ||
       !route.enabled ||
-      !route.dataScopes.includes(input.scope) ||
       !routeAllowsPath(route, input.repository) ||
       store.circuitOpen(route.access, Date.now()) ||
       store.circuitOpen(`route:${route.id}`, Date.now())
     ) {
       skipped.push({
         routeId: route.id,
-        reason: "route-disabled-source-scope-or-provider-blocked",
+        reason: "route-disabled-repository-or-provider-blocked",
       });
       continue;
     }

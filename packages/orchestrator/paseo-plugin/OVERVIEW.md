@@ -12,7 +12,9 @@ Workflows; laufende Aufträge behalten ihre geprüfte Konfiguration.
 Der normale Pi-Key wird weiterverwendet. Neue Schlüssel werden auf dem lokalen
 Windows-Host mit DPAPI für den aktuellen Benutzer verschlüsselt gespeichert;
 die Oberfläche erhält nur ihren Status zurück. Decisions sendet für freigegebene
-Rollen und Datenscopes den Auftrag und seine Abnahmekriterien an OpenAI. Der
+Rollen den Auftrag und seine Abnahmekriterien an OpenAI. Datenschutzklassen werden
+nicht mehr ausgewählt oder gefiltert. Firmen- und Privatprofile bleiben getrennte
+Konten mit eigenen Quoten. Der
 explizite Verbindungstest verwendet einen synthetischen öffentlichen Auftrag und
 startet keinen Coding-Agenten. Die lokale Budgetanzeige ist konservativ und
 ersetzt nicht die OpenAI-Abrechnung. API-Coding-Worker sind entsprechend der

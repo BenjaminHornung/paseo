@@ -97,7 +97,6 @@ const request: PreparationInput = {
   reasoning: "xhigh",
   modeId: "plan",
   autoRouting: true,
-  dataScope: "public",
 };
 function existingMain() {
   let state: { agentId: string; requestId: string; directory: string; state: string } | undefined;
@@ -113,7 +112,7 @@ function existingMain() {
     status: "idle",
     activeTurn: null as { id: string } | null,
     pendingPermissions: [] as string[],
-    labels: { unrelated: "preserve" } as Record<string, string>,
+    labels: { unrelated: "preserve", orchestratorScope: "restricted" } as Record<string, string>,
     capabilities: { supportsBackgroundWorkRefresh: true },
     runtimeInfo: { sessionId: "existing-native-session" },
   };
@@ -245,7 +244,6 @@ test("existing-main preparation preserves identity, selection and unrelated labe
     labels: {
       ...original.labels,
       orchestratorPreparation: request.requestId,
-      orchestratorScope: "public",
       orchestratorPreparationIdentity: main.snapshot.labels.orchestratorPreparationIdentity,
     },
   });
@@ -255,7 +253,7 @@ test("existing-main preparation preserves identity, selection and unrelated labe
   assert.equal(main.sent.length, 1, "retry must not replay the bootstrap");
   const before = [...main.events];
   await assert.rejects(
-    prepare({ ...request, dataScope: "company" }, main.paseo, main.automation),
+    prepare({ ...request, requestId: "changed-preparation-request" }, main.paseo, main.automation),
     /AUTOMATION_PREPARATION_CHANGED/,
   );
   assert.deepEqual(main.events, before);

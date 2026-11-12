@@ -7,7 +7,6 @@ const mk = (
   model: string,
   tier: Route["tier"],
   priority: number,
-  dataScopes: Route["dataScopes"],
   reasoning: Route["reasoning"],
   budgetBucket?: Route["budgetBucket"],
   enabled = true,
@@ -19,7 +18,6 @@ const mk = (
   model,
   tier,
   priority,
-  dataScopes,
   reasoning,
   budgetBucket,
   enabled,
@@ -30,92 +28,15 @@ const mk = (
   quotaAvailable: true,
 });
 export const catalog: readonly Route[] = [
-  mk(
-    "codex-sol",
-    "codex-pro200",
-    "paseo",
-    "gpt-6.1-sol",
-    3,
-    30,
-    ["public", "personal", "company", "restricted"],
-    "high",
-  ),
-  mk(
-    "codex-astra",
-    "codex-pro200",
-    "paseo",
-    "gpt-6-astra",
-    3,
-    60,
-    ["public", "personal", "company", "restricted"],
-    "xhigh",
-  ),
-  mk(
-    "codex-terra",
-    "codex-pro200",
-    "paseo",
-    "gpt-6.1-terra",
-    2,
-    20,
-    ["public", "personal", "company", "restricted"],
-    "medium",
-  ),
-  mk(
-    "pi-terra-api",
-    "openai-api",
-    "pi",
-    "gpt-6.1-terra",
-    2,
-    45,
-    ["public", "personal", "company"],
-    "medium",
-    "implementation",
-  ),
-  mk(
-    "pi-sol-api",
-    "openai-api",
-    "pi",
-    "gpt-6.1-sol",
-    3,
-    55,
-    ["public", "personal", "company"],
-    "high",
-    "premium-api",
-  ),
-  mk(
-    "pi-astra-api",
-    "openai-api",
-    "pi",
-    "gpt-6-astra",
-    3,
-    95,
-    ["public", "personal", "company"],
-    "high",
-    "premium-api",
-  ),
-  mk(
-    "pi-luna-api",
-    "openai-api",
-    "pi",
-    "gpt-6-luna",
-    1,
-    85,
-    ["public", "personal", "company"],
-    "low",
-    "emergency",
-  ),
-  mk(
-    "decisions-luna",
-    "openai-api",
-    "api",
-    "gpt-6-luna",
-    1,
-    10,
-    ["public", "personal", "company"],
-    "low",
-    "decisions",
-  ),
-  mk("deepseek-go", "opencode-go", "pi", "deepseek-v4.1-flash", 1, 5, ["public"], "medium"),
+  mk("codex-sol", "codex-pro200", "paseo", "gpt-6.1-sol", 3, 30, "high"),
+  mk("codex-astra", "codex-pro200", "paseo", "gpt-6-astra", 3, 60, "xhigh"),
+  mk("codex-terra", "codex-pro200", "paseo", "gpt-6.1-terra", 2, 20, "medium"),
+  mk("pi-terra-api", "openai-api", "pi", "gpt-6.1-terra", 2, 45, "medium", "implementation"),
+  mk("pi-sol-api", "openai-api", "pi", "gpt-6.1-sol", 3, 55, "high", "premium-api"),
+  mk("pi-astra-api", "openai-api", "pi", "gpt-6-astra", 3, 95, "high", "premium-api"),
+  mk("pi-luna-api", "openai-api", "pi", "gpt-6-luna", 1, 85, "low", "emergency"),
+  mk("decisions-luna", "openai-api", "api", "gpt-6-luna", 1, 10, "low", "decisions"),
+  mk("deepseek-go", "opencode-go", "pi", "deepseek-v4.1-flash", 1, 5, "medium"),
   // Company-owned identity: disabled by default, even if discovered. Only explicit authorization enables it.
   mk(
     "claude-company-review",
@@ -124,7 +45,6 @@ export const catalog: readonly Route[] = [
     "CLAUDE_MODEL_DISCOVER_FIRST",
     3,
     10,
-    ["company"],
     "high",
     undefined,
     false,
@@ -138,7 +58,6 @@ export const catalog: readonly Route[] = [
     "claude-haiku-5-5",
     1,
     4,
-    ["public", "personal"],
     "low",
     undefined,
     false,
@@ -164,15 +83,10 @@ export function validateCatalog(routes: readonly Route[]): void {
   for (const r of routes) {
     if (r.access === "opencode-go" && (r.id !== "deepseek-go" || r.model !== "deepseek-v4.1-flash"))
       throw new Error("OpenCode Go is reserved exclusively for DeepSeek V4.1 Flash");
-    if (
-      r.access === "claude-company-pro" &&
-      r.enabled &&
-      (!r.ownerApproved || r.dataScopes.some((x) => x !== "company"))
-    )
-      throw new Error("Company Claude Pro requires approval and company-only scope");
+    if (r.access === "claude-company-pro" && r.enabled && !r.ownerApproved)
+      throw new Error("Company Claude Pro requires approval");
     if (r.access === "anthropic-api" && r.enabled && !r.ownerApproved)
       throw new Error("No Anthropic API credit is included in Variant A");
-    if (r.dataScopes.length === 0 || !r.model || !r.id || r.priority < 0)
-      throw new Error(`Invalid route ${r.id}`);
+    if (!r.model || !r.id || r.priority < 0) throw new Error(`Invalid route ${r.id}`);
   }
 }

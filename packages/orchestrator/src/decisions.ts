@@ -114,7 +114,11 @@ const intakeQuestions: Choice[] = [
   yesNo("needAdvisor", "Is an independent opinion justified by a concrete risk or conflict?"),
   yesNo(
     "needImplementation",
-    "Does this message authorize implementation or changing an existing work order? Status/questions alone do not.",
+    "Does this message authorize a NEW implementation objective or a MATERIAL CHANGE to an existing work order? Status/questions and continuing an unchanged already authorized objective do not grant new implementation authority.",
+  ),
+  yesNo(
+    "preserveExistingWork",
+    "Does this message leave the existing authorized objective unchanged and permit its continuation? True only for purely informational questions/status or an instruction to continue exactly that objective. False for stop/pause/cancel, a new objective, material corrections, changed repository/files/permissions/budget, or uncertainty about whether existing work may continue. This answer NEVER authorizes new work or expands an existing contract.",
   ),
   yesNo(
     "extraReviewRecommended",
@@ -296,7 +300,21 @@ export class Decisions implements Classifier, DecisionSelector {
       packageIdentity(facts),
       facts,
       config,
-      packageQuestions,
+      facts.workCategoryCatalog
+        ? packageQuestions.map((question) =>
+            question.name === "workKind"
+              ? {
+                  ...question,
+                  instructions:
+                    "Choose the best work category from the frozen catalog by its name and description, independently of complexity. Category is not permission, model selection or a reason to skip declared UI acceptance. If no category fits, choose general.",
+                  choices: facts.workCategoryCatalog!.map((category) => ({
+                    value: category.id,
+                    description: `${category.label}: ${category.description}`,
+                  })),
+                }
+              : question,
+          )
+        : packageQuestions,
       packageResultSchema,
       fallbackPackage(),
     );
@@ -331,11 +349,96 @@ export class Decisions implements Classifier, DecisionSelector {
       ...(responseAudit ? { response: responseAudit } : {}),
       ...(confidence === undefined ? {} : { confidence }),
     });
-    const prior = this.store.db
-      .prepare("SELECT facts_hash,result_json,created_ms FROM assessments WHERE id=?")
-      .get(id) as
-      | { facts_hash: string; result_json: string | null; created_ms: number }
+    let claimed = false;
+    const assessmentRow = this.store.db.prepare(
+      "SELECT id,kind,owner_id,facts_hash,facts_json,result_json,state,created_ms FROM assessments WHERE id=?",
+    );
+    let prior = assessmentRow.get(id) as
+      | {
+          id: string;
+          kind: string;
+          owner_id: string;
+          facts_hash: string;
+          facts_json: string;
+          result_json: string | null;
+          state: string;
+          created_ms: number;
+        }
       | undefined;
+    if (prior) {
+      if (prior.facts_hash !== factsHash) throw Error("ASSESSMENT_FACTS_CHANGED_USE_NEW_REVISION");
+      const old = prior.result_json ? (JSON.parse(prior.result_json) as Assessment<T>) : undefined;
+      // This is the first model call for a previously local-only denial, never a
+      // replay of an attempted request. Keep the old decision in the audit log.
+      if (
+        kind === "intake" &&
+        "origin" in facts &&
+        facts.origin === "human" &&
+        prior.kind === kind &&
+        prior.owner_id === facts.mainAgentId &&
+        prior.facts_json === JSON.stringify(facts) &&
+        prior.state === "SETTLED" &&
+        old?.id === id &&
+        old.kind === kind &&
+        old.factsHash === factsHash &&
+        old.version === version &&
+        old.source === "fallback" &&
+        old.reason === "DECISIONS_SCOPE_BLOCKED" &&
+        !old.request &&
+        !old.response
+      ) {
+        const previous = prior;
+        claimed = this.store.transaction(() => {
+          const latestByRow = this.store.db
+            .prepare(
+              "SELECT id FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY rowid DESC LIMIT 1",
+            )
+            .get(facts.mainAgentId) as { id: string } | undefined;
+          const latestByTime = this.store.db
+            .prepare(
+              "SELECT id FROM assessments WHERE owner_id=? AND kind='intake' ORDER BY created_ms DESC,rowid DESC LIMIT 1",
+            )
+            .get(facts.mainAgentId) as { id: string } | undefined;
+          if (latestByRow?.id !== id || latestByTime?.id !== id) return false;
+          const auditRows = this.store.db
+            .prepare(
+              "SELECT kind FROM events WHERE kind LIKE 'DECISIONS_LOCAL_SCOPE_DENIAL_REOPENED:%' OR kind LIKE 'OPERATOR_INTAKE_APPROVED:%'",
+            )
+            .all() as { kind: string }[];
+          const previouslyHandled = auditRows.some(({ kind: event }) => {
+            const payload = JSON.parse(event.slice(event.indexOf(":") + 1));
+            return (
+              payload.previous?.id === id ||
+              payload.assessmentId === id ||
+              payload.confirmation?.assessmentId === id
+            );
+          });
+          if (previouslyHandled) return false;
+          const changed = this.store.db
+            .prepare(`UPDATE assessments SET result_json=NULL,state='PENDING',created_ms=?
+            WHERE id=? AND kind=? AND owner_id=? AND facts_hash=? AND facts_json=? AND state='SETTLED' AND result_json=? AND created_ms=?
+            AND NOT EXISTS(SELECT 1 FROM decision_calls WHERE key=?)`)
+            .run(
+              now,
+              id,
+              kind,
+              facts.mainAgentId,
+              factsHash,
+              previous.facts_json,
+              previous.result_json,
+              previous.created_ms,
+              hash({ id, version }),
+            ).changes;
+          if (!changed) return false;
+          this.store.event(
+            `DECISIONS_LOCAL_SCOPE_DENIAL_REOPENED:${JSON.stringify({ version, previous })}`,
+          );
+          return true;
+        });
+        if (claimed) prior = undefined;
+        else prior = assessmentRow.get(id) as typeof prior;
+      }
+    }
     if (prior) {
       if (prior.facts_hash !== factsHash) throw Error("ASSESSMENT_FACTS_CHANGED_USE_NEW_REVISION");
       if (
@@ -361,13 +464,14 @@ export class Decisions implements Classifier, DecisionSelector {
         ? (JSON.parse(prior.result_json) as Assessment<T>)
         : local("DECISIONS_OUTCOME_PENDING");
     }
-    const claimed = this.store.transaction(
-      () =>
-        this.store.db
-          .prepare("INSERT OR IGNORE INTO assessments VALUES(?,?,?,?,?,NULL,?,?)")
-          .run(id, kind, facts.mainAgentId, factsHash, JSON.stringify(facts), "PENDING", now)
-          .changes > 0,
-    );
+    if (!claimed)
+      claimed = this.store.transaction(
+        () =>
+          this.store.db
+            .prepare("INSERT OR IGNORE INTO assessments VALUES(?,?,?,?,?,NULL,?,?)")
+            .run(id, kind, facts.mainAgentId, factsHash, JSON.stringify(facts), "PENDING", now)
+            .changes > 0,
+      );
     if (!claimed)
       return this.assess(kind, id, facts, config, questions, schema, fallback, localOnlyReason);
     const finish = (result: Assessment<T>) => {
@@ -389,8 +493,6 @@ export class Decisions implements Classifier, DecisionSelector {
       return finish(local("INTAKE_HUMAN_ORIGIN_UNCONFIRMED"));
     const settings = config.decisions ?? defaultDecisionSettings();
     if (!settings.enabled) return finish(local("DECISIONS_DISABLED"));
-    if (!settings.dataScopes.includes(facts.dataScope))
-      return finish(local("DECISIONS_SCOPE_BLOCKED"));
     if (
       !settings.fundsConfirmed ||
       !Number.isFinite(Date.parse(settings.validUntil)) ||
@@ -410,9 +512,10 @@ export class Decisions implements Classifier, DecisionSelector {
       return finish(local("DECISIONS_CREDENTIAL_UNAVAILABLE"));
     }
     if (!credential) return finish(local("DECISIONS_KEY_MISSING"));
+    const { dataScope: _legacyDataScope, ...classificationFacts } = facts;
     const body = JSON.stringify({
       model: settings.model,
-      input: JSON.stringify(facts),
+      input: JSON.stringify(classificationFacts),
       questions,
       prompt_cache_options: { mode: "explicit" },
     });
@@ -531,7 +634,21 @@ export class Decisions implements Classifier, DecisionSelector {
         if (uncertain("extraReviewRecommended")) answers.extraReviewRecommended = false;
         if (answers.shouldSplit === true) answers.additionalPlanning = true;
       }
-      const result = accepted ? schema.parse(answers) : fallback;
+      const result = accepted ? schema.parse(answers) : { ...fallback };
+      if (kind === "intake") {
+        // A vague conversational intent must not erase a separately confident
+        // unchanged-work decision. It never grants a new implementation intake.
+        (result as IntakeResult).preserveExistingWork =
+          !refusal &&
+          !overLimit &&
+          answers.preserveExistingWork === true &&
+          (confidences.get("preserveExistingWork") ?? 0) >= settings.minConfidence &&
+          !["cancel", "new-task", "change-request", "review-request"].includes(
+            String(answers.intent),
+          ) &&
+          answers.needImplementation !== true &&
+          !(result as IntakeResult).needImplementation;
+      }
       const reason = overLimit
         ? "DECISIONS_RESERVATION_EXCEEDED"
         : refusal

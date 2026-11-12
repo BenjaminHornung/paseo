@@ -100,7 +100,7 @@ as a tab in its own source workspace, following the existing
 [cross-workspace lifecycle](agent-lifecycle.md). Read-only/main-workspace placement
 and the existing checks for later workspace drift are unchanged.
 
-This path preserves input authorization, data scopes, routing/budget checks,
+This path preserves input authorization, repository boundaries, routing/budget checks,
 isolation, leases, process observations, checks and review. It is not permission
 to edit a worktree outside the registered main's repository scope. Source checks
 with SDK stubs do not establish installed-runtime or full COMPLETE acceptance.
@@ -154,7 +154,7 @@ selected assessment; it sends no chat message and starts no task or model call.
 The original message, model response and human-origin evidence remain immutable.
 The controller records a separate confirmation bound to the exact assessment and
 the following answer's assessment hash. Another input, changed answer, different
-scope, pending decision or non-idle main blocks the action.
+repository binding, pending decision or non-idle main blocks the action.
 Intake reads use the daemon's projected timeline: native agent reports are tool
 messages, not new human requests. Human-origin receipts are still mandatory for
 the original task; text that merely resembles a report is never sufficient proof.
@@ -188,8 +188,8 @@ before replacing code; do not stop unrelated or unidentified processes.
 
 From that chat, choose **Diesen Hauptchat für den Composer vorbereiten** in the
 Command Center, or **Hauptchat vorbereiten** in its Orchestrator panel. The existing
-project, workspace, model, reasoning and mode are fixed; select the data scope and
-whether to prepare Auto-Routing. The form waits for an idle chat with no active turn
+project, workspace, model, reasoning and mode are fixed; choose whether to prepare
+Auto-Routing. The form waits for an idle chat with no active turn
 or pending permissions. The public `orchestrator.prepare-session` RPC accepts the
 same fields as new-session preparation plus `agentId` and the existing `workspaceId`.
 It rejects a busy or ineligible target without changing it.
@@ -197,7 +197,8 @@ It rejects a busy or ineligible target without changing it.
 Preparation keeps the agent/native session, cwd, workspace, title and history. It
 requires a successful fresh, session-bound native background query with no known
 terminal or provider-subagent work before marking the session. Reusing the same
-request preserves the target and data scope; a changed request binding fails closed.
+request preserves the target; a changed request binding fails closed. Legacy privacy
+fields are accepted only for the identity of an old request, with no data-classification policy.
 Requested Auto-Routing uses the normal existing-main activation: an idle recheck,
 the supported orchestration-instruction prompt and an accepted send before `ready`.
 Model, mode and sandbox settings remain unchanged; an existing main does not gain

@@ -15,7 +15,8 @@ export const preparationInput = z.object({
   reasoning: z.string(),
   modeId: z.string().optional(),
   autoRouting: z.boolean(),
-  dataScope: z.enum(["public", "personal", "company", "restricted"]).default("company"),
+  // Ignored legacy request input; new callers omit it.
+  dataScope: z.string().optional(),
 });
 export type PreparationInput = z.infer<typeof preparationInput>;
 export function existingMainSelection(agent: PaseoAgent) {

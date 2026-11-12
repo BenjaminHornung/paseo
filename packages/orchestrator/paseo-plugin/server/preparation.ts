@@ -51,13 +51,10 @@ async function prepareExistingMain(request: PreparationInput, paseo: PaseoApi, d
     .update(identity)
     .digest("hex");
   const assertPreparation = (agent: PaseoAgent) => {
-    if (agent.labels.orchestratorScope && agent.labels.orchestratorScope !== request.dataScope)
-      throw Error("AUTOMATION_PREPARATION_CHANGED");
     if (
       agent.labels.orchestratorPreparation &&
       (agent.labels.orchestratorPreparation !== request.requestId ||
-        agent.labels.orchestratorPreparationIdentity !== requestIdentity ||
-        agent.labels.orchestratorScope !== request.dataScope)
+        agent.labels.orchestratorPreparationIdentity !== requestIdentity)
     )
       throw Error("AUTOMATION_PREPARATION_CHANGED");
   };
@@ -86,7 +83,6 @@ async function prepareExistingMain(request: PreparationInput, paseo: PaseoApi, d
     await handle.setLabels({
       orchestratorPreparation: request.requestId,
       orchestratorPreparationIdentity: requestIdentity,
-      orchestratorScope: request.dataScope,
     });
   }
   const prepared = (await handle.refresh())?.agent;
@@ -169,7 +165,6 @@ function newMainOptions(request: PreparationInput, ownWorkspace: boolean) {
     },
     labels: {
       orchestratorPreparation: request.requestId,
-      orchestratorScope: request.dataScope,
       ...(ownWorkspace ? { orchestratorOwnWorkspace: "true" } : {}),
     },
   };

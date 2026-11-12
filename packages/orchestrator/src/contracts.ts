@@ -3,6 +3,11 @@ import { realpathSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import {
+  workCategorySchema,
+  workKindSchema,
+  type WorkCategory,
+} from "../paseo-plugin/shared/work-categories.ts";
+import {
   claudeSubscriptionAccess,
   isClaudeProvider,
   isClaudeSubscription,
@@ -42,7 +47,8 @@ export const contractSchema = z
       })
       .optional(),
     baseCommit: z.string().regex(/^[a-f0-9]{40,64}$/),
-    dataScope: z.enum(["public", "personal", "company", "restricted"]),
+    // Ignored legacy input: retain pinned contract bytes and hashes.
+    dataScope: z.string().optional(),
     role: z.enum([
       "planner",
       "advisor",
@@ -76,7 +82,7 @@ export const contractSchema = z
     mutation: z.boolean(),
     highRisk: z.boolean(),
     uiChanged: z.boolean(),
-    workKind: z.enum(["ui", "general"]).optional(),
+    workKind: workKindSchema.optional(),
     ownerApproved: z.boolean().default(false),
     estimatedMicroUsd: microUsd.default(0),
     implementationAgentId: z.string().min(1).optional(),
@@ -142,7 +148,8 @@ export const routeSchema = z
       .optional(),
     enabled: z.boolean(),
     maxConcurrent: z.number().int().min(1).max(10),
-    dataScopes: z.array(z.enum(["public", "personal", "company", "restricted"])).min(1),
+    // Ignored legacy configuration; routing no longer classifies data privacy.
+    dataScopes: z.array(z.string()).optional(),
     capabilities: z.array(z.enum(["code", "text"])).min(1),
     bucket: bucket.optional(),
     repositoryRoots: z
@@ -183,15 +190,11 @@ export const routeSchema = z
       ctx.addIssue({ code: "custom", message: "subscription requires codex without API bucket" });
     if (
       r.access === "opencode-go" &&
-      (r.provider !== "pi" ||
-        r.model !== "opencode-go/deepseek-v4.1-flash" ||
-        r.bucket ||
-        r.dataScopes.some((scope) => !["public", "company"].includes(scope)) ||
-        (r.dataScopes.includes("company") && !r.repositoryRoots?.length))
+      (r.provider !== "pi" || r.model !== "opencode-go/deepseek-v4.1-flash" || r.bucket)
     )
       ctx.addIssue({
         code: "custom",
-        message: "Go requires DeepSeek via Pi and explicit repository approval for company data",
+        message: "Go requires DeepSeek via Pi without an API bucket",
       });
     if (
       r.access === "openai-api" &&
@@ -224,8 +227,7 @@ export function routeAllowsPath(route: RuntimeRoute, cwd: string): boolean {
   if (
     !route.repositoryRoots?.length &&
     !isClaudeSubscription(route.access) &&
-    route.access !== "openai-api" &&
-    !(route.access === "opencode-go" && route.dataScopes.includes("company"))
+    route.access !== "openai-api"
   )
     return true;
   try {
@@ -253,7 +255,8 @@ export const decisionSettingsSchema = z.strictObject({
       "reviewer",
     ]),
   ),
-  dataScopes: z.array(z.enum(["public", "personal", "company", "restricted"])),
+  // Ignored legacy configuration; no privacy policy is enforced.
+  dataScopes: z.array(z.string()).optional(),
   minConfidence: z.number().min(0.5).max(1),
   timeoutMs: z.number().int().min(1000).max(30000),
   monthlyBudgetMicroUsd: microUsd.max(5000000),
@@ -270,7 +273,6 @@ export const defaultDecisionSettings = (): DecisionSettings => ({
   enabled: false,
   model: "gpt-6-luna",
   roles: [],
-  dataScopes: ["public", "personal"],
   minConfidence: 0.75,
   timeoutMs: 10000,
   monthlyBudgetMicroUsd: 5000000,
@@ -279,6 +281,21 @@ export const defaultDecisionSettings = (): DecisionSettings => ({
   validUntil: "",
   projectId: "",
 });
+function validateWorkCategories(
+  categories: WorkCategory[] | undefined,
+  routes: { id: string }[],
+  context: z.RefinementCtx,
+): void {
+  const ids = new Set<string>();
+  const routeIds = new Set(routes.map((route) => route.id));
+  for (const category of categories ?? []) {
+    if (ids.has(category.id))
+      context.addIssue({ code: "custom", message: "duplicate work category IDs" });
+    ids.add(category.id);
+    if (category.routeIds.some((id) => !routeIds.has(id)))
+      context.addIssue({ code: "custom", message: "workCategories references an unknown route" });
+  }
+}
 export const configSchema = z
   .strictObject({
     orchestrationVersion: z.union([z.literal(2), z.literal(3)]).optional(),
@@ -312,6 +329,7 @@ export const configSchema = z
       .optional(),
     liveDispatchApproved: z.boolean(),
     decisions: decisionSettingsSchema.optional(),
+    workCategories: z.array(workCategorySchema).optional(),
     roleRoutes: z
       .strictObject({
         planner: z.array(identifier).min(1),
@@ -334,6 +352,7 @@ export const configSchema = z
   .superRefine((c, ctx) => {
     if (new Set(c.routes.map((r) => r.id)).size !== c.routes.length)
       ctx.addIssue({ code: "custom", message: "duplicate route IDs" });
+    validateWorkCategories(c.workCategories, c.routes, ctx);
     if (c.routes.some((r) => r.access === "openai-api" && r.enabled) && !c.apiEnabled)
       ctx.addIssue({
         code: "custom",

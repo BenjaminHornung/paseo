@@ -1252,7 +1252,6 @@ export function taskPrompt(c: Contract): string {
       dependencies: c.dependencies,
       unknowns: c.unknowns,
       readOnly: !c.mutation,
-      dataScope: c.dataScope,
       reviewDiffHash: c.reviewDiffHash,
     },
   )}${placement}\nDo not delegate, commit, start background work, external process brokers/services, or claim controller acceptance. Report actual checks. ${output}`;

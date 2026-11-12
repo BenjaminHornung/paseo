@@ -44,15 +44,39 @@ import {
   recordInternalMessage,
   timelineCheckpointIndex,
 } from "./intake.ts";
-import { effectiveImplementation, packageFactsSchema, type Classifier } from "./assessments.ts";
+import {
+  effectiveImplementation,
+  packageFactsSchema,
+  packageIdentity,
+  preservesExistingWork,
+  type Classifier,
+  type PackageFacts,
+} from "./assessments.ts";
 import { researchWithSynthesis, researchRequestSchema } from "./research.ts";
 import { processMonitorFile } from "./process-monitor.ts";
 import { verifiedProviderSessionId } from "./completion.ts";
 import { intakeConfirmationSchema } from "../paseo-plugin/shared/intake-confirmation.ts";
+import {
+  mainInputInterpretationSchema,
+  mainPackageDeclarationSchema,
+} from "../paseo-plugin/shared/main-interpretation.ts";
+import { currentMainInput, interpretMainInput, observeMainInput } from "./intake.ts";
+import { legacyWorkCategories } from "../paseo-plugin/shared/work-categories.ts";
+import {
+  declareMainPackage,
+  effectivePackageAssessment,
+  mainInputInterpretation,
+} from "./main-interpretation.ts";
 
 export const settingsRequestSchema = z.discriminatedUnion("operation", [
   z.strictObject({ operation: z.literal("get") }),
   z.strictObject({ operation: z.literal("auto-list") }),
+  z.strictObject({
+    operation: z.literal("auto-interpret"),
+    agentId: z.string(),
+    directory: z.string(),
+    interpretation: mainInputInterpretationSchema.optional(),
+  }),
   z.strictObject({
     operation: z.literal("intake-approve"),
     agentId: z.string(),
@@ -149,6 +173,7 @@ export const settingsRequestSchema = z.discriminatedUnion("operation", [
     agentId: z.string(),
     directory: z.string(),
     contract: contractSchema,
+    packageInterpretation: mainPackageDeclarationSchema.optional(),
   }),
   z.strictObject({
     operation: z.literal("auto-worktree"),
@@ -182,6 +207,46 @@ export const settingsRequestSchema = z.discriminatedUnion("operation", [
     processMonitor: z.boolean().optional(),
   }),
 ]);
+function freezePackageRouting(store: Store, config: Config, facts: PackageFacts): PackageFacts {
+  const id = packageIdentity(facts);
+  const prior = store.db
+    .prepare("SELECT facts_json FROM assessments WHERE id=? AND kind='package'")
+    .get(id) as { facts_json: string } | undefined;
+  const identity = hash({
+    workCategories: config.workCategories,
+    roleRoutes: config.roleRoutes,
+    routes: config.routes,
+  });
+  if (prior) {
+    const frozen = packageFactsSchema.parse(JSON.parse(prior.facts_json));
+    if (
+      frozen.routingConfigIdentity &&
+      frozen.routingConfigIdentity !== identity &&
+      !store.db.prepare("SELECT 1 FROM task_assessments WHERE package_id=?").get(id)
+    )
+      throw Error("PACKAGE_ROUTING_CONFIG_CHANGED_USE_NEW_TASK");
+    return packageFactsSchema.parse({
+      ...facts,
+      ...(frozen.workCategoryCatalog ? { workCategoryCatalog: frozen.workCategoryCatalog } : {}),
+      ...(frozen.routingConfigIdentity
+        ? { routingConfigIdentity: frozen.routingConfigIdentity }
+        : {}),
+    });
+  }
+  return packageFactsSchema.parse({
+    ...facts,
+    workCategoryCatalog: [
+      ...legacyWorkCategories,
+      ...(config.workCategories ?? []).map((category) => ({
+        id: category.id,
+        label: category.label,
+        description: category.description,
+      })),
+    ],
+    routingConfigIdentity: identity,
+  });
+}
+
 function automaticRepository(directory: string, repository: string, git: Git): string {
   const workspace = canonicalPath(localPath(directory)),
     selected = canonicalPath(localPath(repository));
@@ -408,14 +473,34 @@ export async function settingsOperation(
     if (request.operation === "auto-research") {
       const main = requireAutomaticMain(request.agentId, request.directory, vault.root);
       const intake = currentIntake(store, main.agentId, false);
-      if (intake.source !== "decisions" || !intake.result.needExplorer)
+      if (!["decisions", "main"].includes(intake.source) || !intake.result.needExplorer)
         throw Error("EXPLORER_NOT_REQUIRED");
-      const row = store.db
-        .prepare("SELECT facts_json FROM assessments WHERE id=?")
-        .get(intake.id) as { facts_json: string };
-      if (request.request.scope !== JSON.parse(row.facts_json).dataScope)
-        throw Error("RESEARCH_DATA_SCOPE_MISMATCH");
       return await researchWithSynthesis(store, config, request.request, main.directory);
+    }
+    if (request.operation === "auto-interpret") {
+      const main = requireAutomaticMain(request.agentId, request.directory, vault.root);
+      const provider = createProvider(config.daemonUrl);
+      await provider.connect();
+      try {
+        await observeMainInput(store, config, provider.client, main, classifier);
+        const interpretation = request.interpretation
+          ? interpretMainInput(store, config, main, request.interpretation)
+          : undefined;
+        return {
+          input: currentMainInput(store, main.agentId),
+          interpretation,
+          workCategoryCatalog: [
+            ...legacyWorkCategories,
+            ...(config.workCategories ?? []).map((category) => ({
+              id: category.id,
+              label: category.label,
+              description: category.description,
+            })),
+          ],
+        };
+      } finally {
+        await provider.close();
+      }
     }
     if (
       request.operation === "auto-intake" ||
@@ -751,7 +836,7 @@ export async function settingsOperation(
           } catch {
             const intake = currentIntake(store, request.agentId, false);
             permitted =
-              intake.source === "decisions" &&
+              ["decisions", "main"].includes(intake.source) &&
               (intake.result.needPlanner ||
                 intake.result.needAdvisor ||
                 intake.result.intent === "review-request");
@@ -778,7 +863,6 @@ export async function settingsOperation(
       }
       const contract = {
         ...request.contract,
-        workflowId: automaticWorkflowId(request.agentId, request.contract.workflowId),
       };
       delete contract.amendsTaskKey;
       delete contract.amendsContractHash;
@@ -789,33 +873,59 @@ export async function settingsOperation(
         config.orchestrationVersion === 3
           ? currentIntake(store, request.agentId, false)
           : undefined;
+      const continuingIntake =
+        contract.mutation && latestIntake && preservesExistingWork(latestIntake)
+          ? currentIntake(store, request.agentId, true)
+          : undefined;
       if (
         config.orchestrationVersion === 3 &&
         contract.mutation &&
         latestIntake?.result.intent === "approval" &&
         latestIntake.result.needImplementation
       ) {
+        const declaredTarget = mainInputInterpretation(store, latestIntake.id)?.target;
+        // Approval selects a stored main-owned package. Its persisted workflow
+        // ID is already namespaced; only legacy raw names need normalization.
+        const storedWorkflow = main.taskKeys.some((key) =>
+          key.startsWith(`${contract.workflowId}/`),
+        );
+        if (!storedWorkflow)
+          contract.workflowId = automaticWorkflowId(request.agentId, contract.workflowId);
+        if (
+          declaredTarget &&
+          (declaredTarget.taskKey !==
+            `${contract.workflowId}/${contract.taskId}/${contract.role}` ||
+            store.task(declaredTarget.taskKey)?.contract_hash !== declaredTarget.contractHash)
+        )
+          return { state: "WAITING", reason: "APPROVAL_TARGET_REQUIRED" };
         const target = linkApprovalToOutstandingTask(
           store,
           request.agentId,
           main.taskKeys,
           latestIntake,
+          contract,
         );
         return target
           ? { key: target, state: "APPROVAL_LINKED" }
           : { state: "WAITING", reason: "APPROVAL_TARGET_REQUIRED" };
       }
+      contract.workflowId = automaticWorkflowId(request.agentId, contract.workflowId);
       if (
         config.orchestrationVersion === 3 &&
         contract.mutation &&
         latestIntake &&
-        ["question", "status"].includes(latestIntake.result.intent)
+        continuingIntake &&
+        main.taskKeys.some((key) => {
+          const task = store.task(key);
+          return task && JSON.parse(task.contract_json).intakeId === continuingIntake.id;
+        })
       )
         return { state: "NO_TASK", reason: "INFORMATIONAL_FOLLOW_UP" };
       if (
         config.orchestrationVersion === 3 &&
         contract.mutation &&
-        !latestIntake?.result.needImplementation
+        !latestIntake?.result.needImplementation &&
+        !continuingIntake
       )
         return { state: "WAITING", reason: "INTAKE_IMPLEMENTATION_NOT_AUTHORIZED" };
       let amendmentTarget: string | undefined;
@@ -824,7 +934,9 @@ export async function settingsOperation(
         contract.mutation &&
         latestIntake?.result.intent === "change-request"
       ) {
+        const declaredTarget = mainInputInterpretation(store, latestIntake.id)?.target;
         const candidates = main.taskKeys.flatMap((taskKey) => {
+          if (declaredTarget && declaredTarget.taskKey !== taskKey) return [];
           const task = store.task(taskKey);
           if (
             !task ||
@@ -849,6 +961,12 @@ export async function settingsOperation(
         if (candidates.length !== 1)
           return { state: "WAITING", reason: "AMENDMENT_WAITING_TARGET_REQUIRED" };
         const predecessor = candidates[0];
+        if (
+          declaredTarget &&
+          (predecessor.task.contract_hash !== declaredTarget.contractHash ||
+            git.snapshot(predecessor.prior).diffHash !== declaredTarget.diffHash)
+        )
+          return { state: "WAITING", reason: "MAIN_TARGET_BINDING_CHANGED" };
         if (contract.taskId === predecessor.prior.taskId)
           return { state: "WAITING", reason: "AMENDMENT_WAITING_NEW_TASK_ID_REQUIRED" };
         contract.workflowId = predecessor.prior.workflowId;
@@ -878,11 +996,6 @@ export async function settingsOperation(
             facts_json: string;
           })
         : undefined;
-      if (intakeRow) {
-        const scope = JSON.parse(intakeRow.facts_json).dataScope;
-        if (contract.dataScope !== scope && contract.dataScope !== "restricted")
-          throw Error("INTAKE_DATA_SCOPE_MISMATCH");
-      }
       // Placement is derived from the registered main, never from a model-supplied ID.
       await provider.connect();
       try {
@@ -928,54 +1041,89 @@ export async function settingsOperation(
         throw Error("SHARED_WORKSPACE_REQUIRES_SOURCE_DIRECTORY");
       if (contract.role === "reviewer") throw Error("AUTOMATION_REVIEW_IS_CONTROLLER_OWNED");
       if (intake && intakeRow) {
-        const facts = packageFactsSchema.parse({
-          mainAgentId: request.agentId,
-          intakeId: intake.id,
-          packageId: `${contract.workflowId}/${contract.taskId}`,
-          packageRevision: contract.packageRevision ?? 1,
-          ...(contract.amendsTaskKey
-            ? {
-                amendsTaskKey: contract.amendsTaskKey,
-                amendsContractHash: contract.amendsContractHash,
-                amendsDiffHash: contract.amendsDiffHash,
-              }
-            : {}),
-          repository: contract.repository,
-          baseCommit: contract.baseCommit,
-          dataScope: contract.dataScope,
-          goal: contract.prompt,
-          originalRequest: JSON.parse(intakeRow.facts_json).text,
-          acceptance: contract.acceptance,
-          files: contract.allowedPaths,
-          checks: contract.checks,
-          mutation: contract.mutation,
-          uiChanged: contract.uiChanged,
-          interfaces: contract.interfaces ?? [],
-          dependencies: contract.dependencies ?? [],
-          unknowns: contract.unknowns ?? [],
-          risks: [
-            ...(contract.uiChanged ? ["UI_CHANGED"] : []),
-            ...(contract.highRisk ? ["DECLARED_HIGH_RISK"] : []),
-          ],
-          evidence: (contract.references ?? [])
-            .flatMap((id) => {
-              const row = store.db
-                .prepare("SELECT result_json,expires_ms FROM research_requests WHERE id=?")
-                .get(id) as { result_json: string; expires_ms: number } | undefined;
-              if (!row || row.expires_ms < Date.now()) return [];
-              const result = JSON.parse(row.result_json);
-              return result.evidence.map(
-                (entry: { id: string; revision: string; summary: string }) => ({
-                  id: entry.id,
-                  revision: entry.revision,
-                  summary: entry.summary,
-                }),
-              );
-            })
-            .slice(0, 30),
-          priorFindings: [],
-        });
-        const assessment = await classifier.classifyPackage(facts, config);
+        // An unfinished Main proposal is not an authoritative package yet.
+        // Validate before claiming advice/facts so the same unregistered package
+        // can be completed after planning without rewriting immutable history.
+        if (intake.source === "main" && contract.mutation && !request.packageInterpretation)
+          return { state: "WAITING", reason: "MAIN_PACKAGE_INTERPRETATION_REQUIRED" };
+        if (contract.mutation && request.packageInterpretation)
+          effectiveImplementation(
+            {
+              ...request.packageInterpretation!,
+              shouldSplit: false,
+              extraReviewRecommended: false,
+            },
+            contract,
+          );
+        const facts = freezePackageRouting(
+          store,
+          config,
+          packageFactsSchema.parse({
+            mainAgentId: request.agentId,
+            intakeId: intake.id,
+            packageId: `${contract.workflowId}/${contract.taskId}`,
+            packageRevision: contract.packageRevision ?? 1,
+            ...(contract.amendsTaskKey
+              ? {
+                  amendsTaskKey: contract.amendsTaskKey,
+                  amendsContractHash: contract.amendsContractHash,
+                  amendsDiffHash: contract.amendsDiffHash,
+                }
+              : {}),
+            repository: contract.repository,
+            baseCommit: contract.baseCommit,
+            goal: contract.prompt,
+            originalRequest: JSON.parse(intakeRow.facts_json).text,
+            acceptance: contract.acceptance,
+            files: contract.allowedPaths,
+            checks: contract.checks,
+            mutation: contract.mutation,
+            uiChanged: contract.uiChanged,
+            interfaces: contract.interfaces ?? [],
+            dependencies: contract.dependencies ?? [],
+            unknowns: contract.unknowns ?? [],
+            risks: [
+              ...(contract.uiChanged ? ["UI_CHANGED"] : []),
+              ...(contract.highRisk ? ["DECLARED_HIGH_RISK"] : []),
+            ],
+            evidence: (contract.references ?? [])
+              .flatMap((id) => {
+                const row = store.db
+                  .prepare("SELECT result_json,expires_ms FROM research_requests WHERE id=?")
+                  .get(id) as { result_json: string; expires_ms: number } | undefined;
+                if (!row || row.expires_ms < Date.now()) return [];
+                const result = JSON.parse(row.result_json);
+                return result.evidence.map(
+                  (entry: { id: string; revision: string; summary: string }) => ({
+                    id: entry.id,
+                    revision: entry.revision,
+                    summary: entry.summary,
+                  }),
+                );
+              })
+              .slice(0, 30),
+            priorFindings: [],
+          }),
+        );
+        const selectedCategory = request.packageInterpretation?.workKind;
+        if (
+          selectedCategory &&
+          !["ui", "general"].includes(selectedCategory) &&
+          !facts.workCategoryCatalog?.some((category) => category.id === selectedCategory)
+        )
+          throw Error("MAIN_PACKAGE_CATEGORY_UNKNOWN");
+        const advice = await classifier.classifyPackage(facts, config);
+        if (request.packageInterpretation) {
+          store.transaction(() =>
+            declareMainPackage(store, {
+              version: 1,
+              packageAssessmentId: advice.id,
+              factsHash: hash(facts),
+              declaration: request.packageInterpretation!,
+            }),
+          );
+        }
+        const assessment = effectivePackageAssessment(store, advice);
         contract.intakeId = intake.id;
         contract.packageAssessmentId = assessment.id;
         if (contract.mutation) {
@@ -1115,7 +1263,6 @@ export async function settingsOperation(
           origin: "human",
           directory: appRoot,
           text: "Wie ist der aktuelle Status? Nur eine Statusfrage, keine Implementierung.",
-          dataScope: "public",
           knownFacts: [],
         },
         config,

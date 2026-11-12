@@ -20,7 +20,6 @@
     "enabled": false,
     "model": "gpt-6-luna",
     "roles": [],
-    "dataScopes": ["public", "personal"],
     "minConfidence": 0.8,
     "timeoutMs": 10000,
     "monthlyBudgetMicroUsd": 0,
@@ -41,7 +40,6 @@
       "modeId": "plan",
       "enabled": false,
       "maxConcurrent": 1,
-      "dataScopes": ["company"],
       "capabilities": ["code", "text"]
     },
     {
@@ -55,7 +53,6 @@
       "modeId": "auto-review",
       "enabled": true,
       "maxConcurrent": 2,
-      "dataScopes": ["public", "personal"],
       "capabilities": ["code", "text"]
     },
     {
@@ -69,7 +66,6 @@
       "modeId": "auto-review",
       "enabled": true,
       "maxConcurrent": 2,
-      "dataScopes": ["public", "personal"],
       "capabilities": ["code", "text"]
     },
     {
@@ -83,7 +79,6 @@
       "modeId": "auto-review",
       "enabled": true,
       "maxConcurrent": 2,
-      "dataScopes": ["public", "personal"],
       "capabilities": ["code", "text"]
     },
     {
@@ -96,7 +91,6 @@
       "tier": 1,
       "enabled": false,
       "maxConcurrent": 1,
-      "dataScopes": ["public"],
       "capabilities": ["code", "text"]
     }
   ]

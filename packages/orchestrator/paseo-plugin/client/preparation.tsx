@@ -35,7 +35,6 @@ function PreparationForm({ theme, layout, navigation, host, params }: PluginScre
   const [reasoning, setReasoning] = useState("");
   const [modeId, setModeId] = useState("");
   const [autoRouting, setAutoRouting] = useState(true);
-  const [dataScope, setDataScope] = useState<PreparationInput["dataScope"]>("company");
   const [request, setRequest] = useState<PreparationInput>();
   const projects = useQuery({
     queryKey: ["orchestrator-projects", host.id],
@@ -101,7 +100,6 @@ function PreparationForm({ theme, layout, navigation, host, params }: PluginScre
       reasoning: effort?.id ?? "",
       modeId: modeId || undefined,
       autoRouting,
-      dataScope,
     };
     setRequest(input);
     mutation.mutate(input);
@@ -196,18 +194,6 @@ function PreparationForm({ theme, layout, navigation, host, params }: PluginScre
               disabled={frozen}
               hint="Gilt nur für den neuen Hauptchat. Die Automatik wartet auf deinen Arbeitsauftrag. Berechtigungen und Abschlussprüfungen bleiben wirksam."
               onValueChange={setAutoRouting}
-            />
-            <SettingsSelect
-              label="Datenschutzklasse"
-              value={dataScope}
-              disabled={frozen}
-              options={[
-                { value: "company", label: "Firmenprojekt" },
-                { value: "personal", label: "Privat" },
-                { value: "public", label: "Ausschließlich öffentliche Testdaten" },
-                { value: "restricted", label: "Eingeschränkt" },
-              ]}
-              onValueChange={(value) => setDataScope(value as PreparationInput["dataScope"])}
             />
           </SettingsCard>
           {(projects.isPending ||

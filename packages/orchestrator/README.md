@@ -34,27 +34,64 @@ The default package grants no API spending. Stronger isolation would require a s
 credential broker and OS permission boundary, which this integration does not introduce.
 
 Completion requires a new public background query bound to the exact provider session,
-settled projected tools, configured checks and independent exact-diff review. Informational
-follow-ups preserve prior authorization while unclassified input blocks new writes.
+settled projected tools, configured checks and independent exact-diff review.
+Decisions is advisory. The main reads the current input identity through
+`orchestrator_interpret_input`, then submits an immutable `MainInputInterpretation`
+bound to its authenticated human receipt, frozen facts hash and expected previous work
+binding. Plan/review are read-only. Start/change authorize the stated objective;
+question/status/unchanged continuation preserve only existing authority, stop revokes
+it, and approval selects an exact pre-existing task/hash/package. Caller identity comes
+from AgentToolContext. New uninterpreted input blocks writes; a notification cannot
+become a human instruction. Existing accepted legacy assessments and operator
+confirmations remain readable; contradictory reinterpretations are rejected.
+New implementation packages carry `packageInterpretation` (complexity, optional
+ui/general workKind, additionalPlanning and advisorNeeded) in the normal registration
+tool. A separate immutable MainPackageInterpretation binds that declaration to exact
+package facts; effectiveImplementation retains hard risk, tier and owner gates.
+Advisory disabled/key-missing/low-confidence/timeout/PENDING/UNKNOWN states do not
+override valid main authority. Their actual call/reservation records remain immutable
+and are never replayed. This financial uncertainty is distinct from unknown processes,
+which still block completion. Late advice cannot change authority or revive a stop.
+An unregistered original package may then be admitted under its original intake;
+registered packages keep their immutable binding and are not duplicated by a question.
+Cached attempted or paid assessments are not reclassified or treated as new continuation evidence.
 Approvals append exact task/contract/intake/package links; amendments create a new immutable
 task revision after the predecessor settles. Missing capabilities remain explicit waits.
+For a named task approval, call the normal `orchestrator_register_task` with the existing
+package's workflowId, taskId and stored role. Only these fields select the target;
+submitted changes cannot edit its stored contract. The task must have been registered
+before the approval. One assessment binds atomically to one task; repeating that exact
+binding is idempotent, while a different or unknown target waits. An accepted task
+approval preserves the original objective's authority for ordinary work, including
+while target selection is unresolved; it grants no new objective or permission to
+another high-risk task. High-risk dispatch, continuation and verification still need
+that task's audited owner approval.
 Reviewer preference is preserved; unsupported completion boundaries are audited before
 falling back to the next eligible saved route.
 
 Under **Rollen & Modelle → Reihenfolge je Rolle & Arbeitsart → UI-Implementierung**,
 choose existing routes and order their priority, including routes created from Advanced
 profiles. The optional `roleRoutes.ui` list applies to mutating implementation packages
-whose bound Decisions result has `workKind: "ui"` or whose assessed execution facts
+whose bound package classification has `workKind: "ui"` or whose assessed execution facts
 have `uiChanged: true`, regardless of their
 `implement-simple`, `implement-normal` or `implement-complex` role. It does not change
-complexity, tier, capability, repository/data approvals, budgets, writer coordination,
-review or visual acceptance requirements. Existing scope approvals remain mandatory.
+complexity, tier, capability, repository approvals, budgets, writer coordination,
+review or visual acceptance requirements. Repository and file boundaries remain mandatory.
 
 Company `claude` and private `claude-private` routes can be saved in the same ordered
 list. They retain separate subscription access and circuits; private routes require a
 distinct effective native configuration directory, including inherited launcher
-environment. Existing data/repository, tier, funding and capability gates still apply.
-Saving a preference does not add data or repository approvals.
+environment. Existing repository, tier, funding and capability gates still apply.
+Saving a preference does not add repository approvals.
+
+Data privacy classification is no longer a controller feature. Preparation and settings
+have no public/personal/company/restricted selection or route allowlists. Account choices
+such as company/private Claude still select distinct subscriptions, launchers and quotas.
+Deprecated dataScope/dataScopes values load unchanged only to preserve legacy hashes;
+they do not affect eligibility or authorize work. A latest, authenticated local-only
+DECISIONS_SCOPE_BLOCKED assessment with no attempted call can enter the normal first-call
+lifecycle once, with an atomic audit of the old local decision. Existing model answers,
+unknown calls, operator-confirmed or superseded assessments are never replayed.
 
 Absent UI preferences preserve ordinary role routing; removing all UI assignments restores
 that behavior. Once configured, only the saved UI candidates are considered, in order,
@@ -67,6 +104,29 @@ existing tasks retain their pinned configuration.
 Older saved decisions without `workKind` remain legacy evidence; replay does not turn
 them into a new UI classification. Existing configurations remain compatible. UI work
 retains its required visual acceptance independently of implementation complexity.
+
+Under **Arbeitskategorie anlegen**, create a named category such as Datenbank, describe
+the work it covers and choose its primary model route. Select it under **Rolle oder
+Arbeitsart** to edit its name, description and ordered fallback routes, or delete it.
+Save and reload through the existing settings controls. Creating or editing a category
+preserves the existing UI preference. Each category requires at least one known route.
+The optional `workCategories` configuration does not add defaults to legacy files.
+
+New package facts freeze the actual category catalog and routing configuration identity.
+Decisions advises from those choices; the main selects a bound `workKind` from the
+catalog returned by `orchestrator_interpret_input`. A custom category takes precedence
+over UI routing, while actual `uiChanged` and UI work still require visual acceptance.
+An omitted or uncertain category uses ordinary role routing (with existing UI preference
+where applicable). An explicit category uses only its saved routes, including native
+session reuse; exhaustion waits rather than appending generic candidates. Registered
+tasks keep their pinned catalog and configuration after later edits. Existing paid,
+pending and unknown assessments are never reclassified by changing category settings.
+
+For a new main-authorized implementation, unknown complexity or additional planning
+returns the existing planning error before claiming package advice or authoritative
+facts. After clarification, submit the same unregistered package with complete facts
+and declaration. Complete declarations and registered contracts remain immutable;
+existing advice with changed facts still fails closed instead of rewriting its history.
 
 Existing focused checks run with `npm test` and `npm run typecheck` in this workspace.
 Root lint keeps every rule active. Its exact diagnostic baseline records reviewed source

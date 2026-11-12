@@ -2933,7 +2933,7 @@ describe("create_agent MCP tool", () => {
     });
 
     expect(response.structuredContent.guidance).toBe(
-      "You will get notified when the created agent finishes, errors, or needs permission. Do not poll for status; continue with other work until the notification arrives.",
+      "You will get notified when the created agent finishes, errors, or needs permission. Do not poll for status; continue with other work until the notification arrives. When no independent work remains, finish your current turn instead of keeping it alive to wait; the finish notification resumes you automatically.",
     );
   });
 

@@ -8,7 +8,13 @@
     "uiRouting": "The existing large settings and plan functions retain their established layers. Reviewed UI-category branches raise their complexity from 87 to 89 and 37 to 48 respectively; exact fingerprints are renewed only for those two functions. Routing safety filters remain shared and unchanged.",
     "sidebarIntegration": "Reconstructed sidebar retains the existing inline-style pattern and decreases total diagnostics from 71 to 46; exact fingerprints renewed, no new rule categories or allowances. Intake/scope preflight increases the existing settingsOperation complexity from 218 to 222; authorization gates are unchanged.",
     "decisionsPrivateRouting": "Only inherited complexity diagnostics in the same functions are renewed. Account binding/launcher validation raises authorize 71 to 78; work-kind branches raise assess 65 to 66, contract validation 29 to 33, plan 48 to 49, advance 34 to 35, assertTaskAssessment 60 to 61. Readable access hints reduce Settings 89 to 87; route creation stays 31 and worker creation stays 29. Native-family/idle/proof checks raise snapshot 44 to 48; exact native Bash and notification alternatives raise the existing foreground tools.every callback 21 to 25. The actual before/after diagnostics are recorded in phase3-lint-renewals.json. New functions remain subject to the normal threshold; new shadowing/ternaries/promise defects are fixed rather than exempted. No rule changes or new categories.",
-    "beta2CodexRetry": "The existing foreground tools.every callback rises from complexity 25 to 26 solely for the exact native terminal codex_stream_retry alternative. Current idle, session, native-work, trace, configured-check and review gates are unchanged. No new baseline entry or rule change."
+    "beta2CodexRetry": "The existing foreground tools.every callback rises from complexity 25 to 26 solely for the exact native terminal codex_stream_retry alternative. Current idle, session, native-work, trace, configured-check and review gates are unchanged. No new baseline entry or rule change.",
+    "intakeContinuation": "Historical predecessor: four existing function fingerprints were renewed for the unchanged-work assessment and its existing admission path: assess 66 to 75, captureHumanIntake remained 79 in that predecessor, currentIntake 25 to 26, settingsOperation 222 to 227. The independent confidence gate retained only an existing human-authorized intake; every intervening input retained origin and scope checks. Later DataScope-removal counts are recorded separately. No new baseline entries, rule changes or UI-author fingerprint renewals.",
+    "uiDecisionRows": "Two existing UI function fingerprints are renewed after the sidebar rows moved into DecisionRows/DecisionRowView and the answer parsing into shared status-view: StatusBody 68 to 65, DecisionsHistory 37 to 31. Both complexities decreased; no new entries, rule changes or exceptions.",
+    "dataScopeRemoval": "Thirteen existing complexity fingerprints are renewed after deleting the privacy policy and adding the explicitly approved local-only-denial first-call lifecycle. assess rises 75 to 94 for exact identity/version/state/latest/absence-of-call/audit/CAS guards; other counts decrease or stay unchanged: routes 31 to 29, contract route validation 33 to 29, PreparationForm 55, Settings 87, capture 79 to 91 (normal checkpoint retry and audit-bound settled-result binding after a caller failure), currentIntake 26 to 25, confirmation callback 23 to 22, task assessment 61 to 58, settingsOperation 227 to 223, amendment transaction 41 to 39, addAmendment 37 to 36, plan 49. New tests remain below the standard complexity limit. No new entries, disabled rules or broad allowance; preserved Sonnet row fingerprints remain unchanged.",
+    "targetedTaskApproval": "Four inherited fingerprints only: currentIntake remains 25, settingsOperation rises 223 to 224 for stored main-owned workflow selection, assertTaskAssessment decreases 58 to 53 by removing global per-task poisoning, continueExisting rises 36 to 39 for task-specific audited high-risk checks before and after its async preflight. Exact target selection and atomic one-assessment binding remain within normal lint thresholds. No new baseline entries, disabled rules or peer UI changes.",
+    "advisoryAuthority": "Nine inherited fingerprints only: capture 92 (was 91), currentIntake 23 (25), task assessment 51 (53), settingsOperation 238 (224), workflowStatus 29 (28), its task projection 38 unchanged, decisionHistory 34 unchanged, DecisionsHistory 30 (31). The existing five-deep worktree preflight only adds Main as an accepted read-only planning source; its previous exact block hash was matched to the immutable P1 snapshot. All new interpretation/schema/observation helpers and tests meet ordinary thresholds. No new entries, disabled rules or broad exceptions; raw accounting and effective authority stay separate.",
+    "workCategories": "Phase B renews only three existing function fingerprints: OrchestratorSettings 87 to 85 after extracting the existing priority editor and adding category validation; Engine.plan 49 to 46 with the shared category preference isolated from the existing dispatch/reuse policy; settingsOperation 238 to 247 for frozen package catalogs, pre-advice Main proposal validation and caller catalog readback. New category schemas, editor components and routing helper meet ordinary lint thresholds. No new baseline entries or rule changes. Phase-A counts above describe the immutable predecessor."
   },
   "entries": [
     {
@@ -161,8 +167,8 @@
     {
       "file": "packages/orchestrator/paseo-plugin/client/decisions-history.tsx",
       "rule": "eslint(complexity)",
-      "message": "function `DecisionsHistory` has a complexity of 37. Maximum allowed is 20.",
-      "sourceSha256": "841ee119bf89fef823bd3cf4a3d5b2e46074d4e5f082f5fddcdc893d92680f51",
+      "message": "function `DecisionsHistory` has a complexity of 30. Maximum allowed is 20.",
+      "sourceSha256": "35b9423d464111c814250be7c54f364ab3505e2a0811cec4adcb9defa2936e7d",
       "count": 1
     },
     {
@@ -337,7 +343,7 @@
       "file": "packages/orchestrator/paseo-plugin/client/preparation.tsx",
       "rule": "eslint(complexity)",
       "message": "function `PreparationForm` has a complexity of 55. Maximum allowed is 20.",
-      "sourceSha256": "cce70262bcdfbc99c8bce39271259199c294d4d2d8bf00002f7ab86baeec4b4d",
+      "sourceSha256": "0911e6cc5b2b1be6770d74fd983b0bb033fae0c2b525c0d28b5c1e616331e762",
       "count": 1
     },
     {
@@ -672,8 +678,8 @@
     {
       "file": "packages/orchestrator/paseo-plugin/client/settings.tsx",
       "rule": "eslint(complexity)",
-      "message": "function `OrchestratorSettings` has a complexity of 87. Maximum allowed is 20.",
-      "sourceSha256": "50e66b0259145005f056e5db2eb65f9a03ac1c79c0f1a474852b508cde5961f2",
+      "message": "function `OrchestratorSettings` has a complexity of 85. Maximum allowed is 20.",
+      "sourceSha256": "131dd5b901bd47d28979d8fcbc54ceaa1cccf0cf683f47cc4b60dd67513d362a",
       "count": 1
     },
     {
@@ -826,8 +832,8 @@
     {
       "file": "packages/orchestrator/paseo-plugin/shared/routes.ts",
       "rule": "eslint(complexity)",
-      "message": "function `createProfileRoute` has a complexity of 31. Maximum allowed is 20.",
-      "sourceSha256": "259277d1631ac94e7bb1dfcdceff39aa5e48c9e7fa0f35ce9fb7adbfcc2e6575",
+      "message": "function `createProfileRoute` has a complexity of 29. Maximum allowed is 20.",
+      "sourceSha256": "75903d7c16b9cf732f6f8291de98d223b44ae382c28095473a58c988a5832902",
       "count": 1
     },
     {
@@ -896,15 +902,15 @@
     {
       "file": "packages/orchestrator/src/automation.ts",
       "rule": "eslint(complexity)",
-      "message": "function `workflowStatus` has a complexity of 28. Maximum allowed is 20.",
-      "sourceSha256": "8644b5956cfb14409d528e44095898ebb18093ee9a789de9751c701602978e7d",
+      "message": "function `workflowStatus` has a complexity of 29. Maximum allowed is 20.",
+      "sourceSha256": "7be6ffc8c0c0179d9158a1d18dde65c6857053b38150539554d4f6f94f77d9ea",
       "count": 1
     },
     {
       "file": "packages/orchestrator/src/automation.ts",
       "rule": "eslint(complexity)",
       "message": "function has a complexity of 38. Maximum allowed is 20.",
-      "sourceSha256": "e2ad513c8714b354d1d53182f7d09c8a6e541005c8b0c963709a652869f1a3ef",
+      "sourceSha256": "a8a875ad1a15cc29dece07068357261dce0176189257d5f60e606d99930d2624",
       "count": 1
     },
     {
@@ -1036,8 +1042,8 @@
     {
       "file": "packages/orchestrator/src/contracts.ts",
       "rule": "eslint(complexity)",
-      "message": "function has a complexity of 33. Maximum allowed is 20.",
-      "sourceSha256": "d6d0bbd6a0426c48b2de254cca3fbd0a6299e79df8032c76a6b1be9abbdc6466",
+      "message": "function has a complexity of 29. Maximum allowed is 20.",
+      "sourceSha256": "c0efddb14a9ccd7ea55ba275fe1142ecd8cc303543f6eb64cfbb9d74f55afe1a",
       "count": 1
     },
     {
@@ -1058,7 +1064,7 @@
       "file": "packages/orchestrator/src/decision-history.ts",
       "rule": "eslint(complexity)",
       "message": "function `decisionHistory` has a complexity of 34. Maximum allowed is 20.",
-      "sourceSha256": "c3f9797d8aeb344133590e0abccef7de5278b73448c6f7fa265852ee190be0a7",
+      "sourceSha256": "95d350e61bf91a387d53414b1f403af9d95c30d9c5d59478f07a7392981fd468",
       "count": 1
     },
     {
@@ -1071,8 +1077,8 @@
     {
       "file": "packages/orchestrator/src/decisions.ts",
       "rule": "eslint(complexity)",
-      "message": "private async method `assess` has a complexity of 66. Maximum allowed is 20.",
-      "sourceSha256": "66b8ac73d93713d227a914b0a361cbe6cd59f087fc517b1ac1987ad97eda578d",
+      "message": "private async method `assess` has a complexity of 94. Maximum allowed is 20.",
+      "sourceSha256": "e785a84b5bb124cda0ae65f72979c964fe1523d88565113da767e6b1cb74ce84",
       "count": 1
     },
     {
@@ -1099,8 +1105,8 @@
     {
       "file": "packages/orchestrator/src/engine.ts",
       "rule": "eslint(complexity)",
-      "message": "async method `addAmendment` has a complexity of 37. Maximum allowed is 20.",
-      "sourceSha256": "2a26b8d5871707551a8c1646ee0a97ee85942e8e9fc5ce2a0ca9dae240689fbc",
+      "message": "async method `addAmendment` has a complexity of 36. Maximum allowed is 20.",
+      "sourceSha256": "966b2560b59bb7c0374fd3a9c088c6dffafad1fc7ea07213a958cc037c283f50",
       "count": 1
     },
     {
@@ -1120,15 +1126,15 @@
     {
       "file": "packages/orchestrator/src/engine.ts",
       "rule": "eslint(complexity)",
-      "message": "async method `continueExisting` has a complexity of 36. Maximum allowed is 20.",
-      "sourceSha256": "20fdc0a8dda0bf42e425515e557e61f28785aab2033e76fdda7f283e36b70ef4",
+      "message": "async method `continueExisting` has a complexity of 39. Maximum allowed is 20.",
+      "sourceSha256": "84f25abcdc4283df825e49e908bbf3efb5711deea02651b0f49527d0c0b90227",
       "count": 1
     },
     {
       "file": "packages/orchestrator/src/engine.ts",
       "rule": "eslint(complexity)",
-      "message": "async method `plan` has a complexity of 49. Maximum allowed is 20.",
-      "sourceSha256": "76295d12c142c80b18e245b680fc467af8c7d5a572b115aa33873519cd0a41ea",
+      "message": "async method `plan` has a complexity of 46. Maximum allowed is 20.",
+      "sourceSha256": "ea0a603386541e4ec4be46b2c85de22edd71d8cefd8f17c05fed7b22473baa6e",
       "count": 1
     },
     {
@@ -1204,29 +1210,29 @@
     {
       "file": "packages/orchestrator/src/intake.ts",
       "rule": "eslint(complexity)",
-      "message": "async function `captureHumanIntake` has a complexity of 79. Maximum allowed is 20.",
-      "sourceSha256": "240565ef71e09819fc5e26eb216952434d8d36095a3617ca8ea53bbbfa7ea1de",
+      "message": "async function `captureHumanIntake` has a complexity of 92. Maximum allowed is 20.",
+      "sourceSha256": "7c0bbe6ade8f49cb8d554ec9558f3c8b68c31a7bd7b843f80ba5e4c54ef1b0a7",
       "count": 1
     },
     {
       "file": "packages/orchestrator/src/intake.ts",
       "rule": "eslint(complexity)",
-      "message": "function `assertTaskAssessment` has a complexity of 61. Maximum allowed is 20.",
-      "sourceSha256": "c814b388508c793572637ea2d4ec5a04eef1bfddd7e11cdd2d67e55b55b95282",
+      "message": "function `assertTaskAssessment` has a complexity of 51. Maximum allowed is 20.",
+      "sourceSha256": "4d6265abcdfeec317f5de81aa2544363e57f82818cb229827b4a5a20b5072a8c",
       "count": 1
     },
     {
       "file": "packages/orchestrator/src/intake.ts",
       "rule": "eslint(complexity)",
-      "message": "function `currentIntake` has a complexity of 25. Maximum allowed is 20.",
-      "sourceSha256": "57a8ab3b0a4ad204331c5f7838a3b095510a1233e6b325b89a3d69c082e68357",
+      "message": "function `currentIntake` has a complexity of 23. Maximum allowed is 20.",
+      "sourceSha256": "0225ea68097213aa8fdfbcb88dfe9c155ef4217ed42619666809d48c7a858555",
       "count": 1
     },
     {
       "file": "packages/orchestrator/src/intake.ts",
       "rule": "eslint(complexity)",
-      "message": "function has a complexity of 23. Maximum allowed is 20.",
-      "sourceSha256": "4de26dadbd6d7c39374decc63cfae6833923deb4a1c48b08dd1733fdb4fd6525",
+      "message": "function has a complexity of 22. Maximum allowed is 20.",
+      "sourceSha256": "0840aa68154a7f58bcb75654fc9d9be2ad740d7c6440588a9788a1e94d06c18b",
       "count": 1
     },
     {
@@ -1379,8 +1385,8 @@
     {
       "file": "packages/orchestrator/src/settings.ts",
       "rule": "eslint(complexity)",
-      "message": "async function `settingsOperation` has a complexity of 222. Maximum allowed is 20.",
-      "sourceSha256": "2e479f9b100f99533157eac9f8d0a93514ef20088e2195557242393db43d0503",
+      "message": "async function `settingsOperation` has a complexity of 247. Maximum allowed is 20.",
+      "sourceSha256": "3d811dd4ca0f40d0fed24c1bf7aca094e72d84e1ba39b985d69ae62a752411d9",
       "count": 1
     },
     {
@@ -1408,7 +1414,7 @@
       "file": "packages/orchestrator/src/settings.ts",
       "rule": "eslint(max-depth)",
       "message": "Blocks are nested too deeply (5). Maximum allowed is 4.",
-      "sourceSha256": "150afcc9746b2cbda1133148e7ba959bd13c7d36d07c22bd2e42a875ed9d96c8",
+      "sourceSha256": "af3f8a9bb4781c972413fd14287c9ce13efcf26f6c31f7435d9587ea6e468d19",
       "count": 1
     },
     {
@@ -1575,8 +1581,8 @@
     {
       "file": "packages/orchestrator/src/store.ts",
       "rule": "eslint(complexity)",
-      "message": "function has a complexity of 41. Maximum allowed is 20.",
-      "sourceSha256": "58e3dba3976244cc79b79afc531eff367875ea83b5830a435716c72bcc8e4f1b",
+      "message": "function has a complexity of 39. Maximum allowed is 20.",
+      "sourceSha256": "6f340eaf75178dc3ae92c1a3f46556681e921a006d8f21b7bb53c6f4ec4cf0d1",
       "count": 1
     },
     {
@@ -1638,8 +1644,8 @@
     {
       "file": "packages/orchestrator/paseo-plugin/client/status.tsx",
       "rule": "eslint(complexity)",
-      "message": "function `StatusBody` has a complexity of 68. Maximum allowed is 20.",
-      "sourceSha256": "f718844ac9aa7630cfb3af20974d3179147ca13874dcf686a0445c395fc468b1",
+      "message": "function `StatusBody` has a complexity of 65. Maximum allowed is 20.",
+      "sourceSha256": "7a268f733c97a1b08dfbc2b2f8a0cba77593ca6ada2470c09c3fde5b62222c77",
       "count": 1
     },
     {

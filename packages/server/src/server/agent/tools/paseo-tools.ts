@@ -1676,7 +1676,7 @@ function createToolCatalog(
       const currentSnapshot = agentManager.getAgent(snapshot.id) ?? snapshot;
       const guidance =
         callerAgentId && notifyOnFinish && initialPromptStarted
-          ? "You will get notified when the created agent finishes, errors, or needs permission. Do not poll for status; continue with other work until the notification arrives."
+          ? "You will get notified when the created agent finishes, errors, or needs permission. Do not poll for status; continue with other work until the notification arrives. When no independent work remains, finish your current turn instead of keeping it alive to wait; the finish notification resumes you automatically."
           : "Creation acknowledged. Observe completion using get_agent_status/get_agent_activity or SDK/RPC subscriptions and wait APIs.";
       const response = {
         content: [],
@@ -1961,7 +1961,7 @@ function createToolCatalog(
   }
 
   const PROMPTED_AGENT_NOTIFICATION_GUIDANCE =
-    "You will get notified when the prompted agent finishes, errors, or needs permission. Do not poll for status; continue with other work until the notification arrives.";
+    "You will get notified when the prompted agent finishes, errors, or needs permission. Do not poll for status; continue with other work until the notification arrives. When no independent work remains, finish your current turn instead of keeping it alive to wait; the finish notification resumes you automatically.";
 
   registerTool(
     "send_agent_prompt",

@@ -6,7 +6,6 @@ import {
   SettingsCard,
   SettingsRow,
   SettingsSection,
-  SettingsSelect,
   SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -17,13 +16,6 @@ import {
   prepareSession,
   type PreparationInput,
 } from "../shared/preparation";
-
-const scopes = [
-  { value: "company", label: "Firmenprojekt" },
-  { value: "personal", label: "Privat" },
-  { value: "public", label: "Ausschließlich öffentliche Testdaten" },
-  { value: "restricted", label: "Eingeschränkt" },
-];
 
 export function ExistingPreparationForm({
   theme,
@@ -46,7 +38,6 @@ export function ExistingPreparationForm({
     [surface0, foregroundMuted, statusDanger, compact],
   );
   const prepare = useRpc(prepareSession);
-  const [dataScope, setDataScope] = useState<PreparationInput["dataScope"]>("company");
   const [autoRouting, setAutoRouting] = useState(true);
   const [request, setRequest] = useState<PreparationInput>();
   const target = useQuery({
@@ -71,7 +62,6 @@ export function ExistingPreparationForm({
       workspaceId: params.workspaceId,
       ...existingMainSelection(agent),
       autoRouting,
-      dataScope,
     };
     setRequest(input);
     mutation.mutate(input);
@@ -82,13 +72,8 @@ export function ExistingPreparationForm({
     params.projectId,
     params.workspaceId,
     autoRouting,
-    dataScope,
     mutation,
   ]);
-  const changeScope = useCallback(
-    (value: string) => setDataScope(value as PreparationInput["dataScope"]),
-    [],
-  );
   const refresh = useCallback(() => {
     void target.refetch();
   }, [target]);
@@ -119,13 +104,6 @@ export function ExistingPreparationForm({
             <SettingsRow label="Verzeichnis" hint={agent.cwd} />
             <SettingsRow label="Modell" hint={selection.model} />
             <SettingsRow label="Reasoning" hint={selection.reasoning || "Vom Modell vorgegeben"} />
-            <SettingsSelect
-              label="Datenschutzklasse"
-              value={dataScope}
-              options={scopes}
-              onValueChange={changeScope}
-              disabled={!!request}
-            />
             <SettingsSwitch
               label="Auto-Routing vorbereiten"
               value={autoRouting}

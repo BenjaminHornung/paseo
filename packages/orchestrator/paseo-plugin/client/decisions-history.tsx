@@ -1,25 +1,18 @@
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { Loading } from "@getpaseo/plugin/client/ui";
+import { Icon, Loading } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useState, useCallback } from "react";
 import { Text, View } from "react-native";
 import { decisionsHistory } from "../shared/decisions-history";
+import {
+  answerLabels,
+  describeAnswer,
+  storedAnswers,
+  type DecisionRow,
+} from "../shared/status-view";
 import { CompactAction } from "./compact-action";
 import { IntakeConfirmationAction } from "./intake-confirmation";
 
-const labels: Record<string, string> = {
-  intent: "Intention",
-  needExplorer: "Recherche",
-  needPlanner: "Planer",
-  needAdvisor: "Advisor",
-  needImplementation: "Implementierung",
-  extraReviewRecommended: "Zusätzliches Review",
-  complexity: "Komplexität",
-  workKind: "Arbeitsart",
-  additionalPlanning: "Weitere Planung",
-  advisorNeeded: "Advisor",
-  shouldSplit: "Paket aufteilen",
-};
 function TraceText({
   title,
   value,
@@ -54,6 +47,79 @@ function TraceText({
   );
 }
 
+const rowLayout = { flexDirection: "row", gap: 6 } as const;
+const rowRail = { width: 14, paddingTop: 2 } as const;
+const rowList = { gap: 6 } as const;
+const rowText = (color: string) => ({
+  flex: 1,
+  minWidth: 0,
+  color,
+  fontSize: 12,
+  lineHeight: 17,
+});
+const summaryText = (color: string) => ({ color, fontSize: 13, lineHeight: 18 });
+const flagText = (color: string) => ({ color });
+const emphasis = (color: string, strong: boolean) => ({
+  color,
+  fontWeight: strong ? ("600" as const) : ("400" as const),
+});
+
+function modalValue(refused: boolean, value: unknown): string {
+  if (refused) return "Verweigert";
+  if (typeof value === "boolean") return value ? "Ja" : "Nein";
+  return String(value);
+}
+
+function DecisionRowView({ row, theme }: { row: DecisionRow; theme: PluginSurfaceProps["theme"] }) {
+  const colors = theme.colors;
+  const confidence = row.confidence === undefined ? "" : ` ${Math.round(row.confidence * 100)} %`;
+  return (
+    <View style={rowLayout}>
+      <View style={rowRail}>
+        {row.used && <Icon name="Check" size={14} color={colors.accent} />}
+      </View>
+      <Text style={rowText(colors.foregroundMuted)}>
+        <Text style={emphasis(colors.foreground, row.used)}>{row.label}</Text>
+        {` · Modell ${row.model}${confidence}`}
+        {row.effective !== undefined && (row.changed ? " → " : " · ")}
+        {row.effective !== undefined && (
+          <Text style={emphasis(row.used ? colors.foreground : colors.foregroundMuted, row.used)}>
+            {`Controller ${row.effective}`}
+          </Text>
+        )}
+        {row.used && " · Ausgewählt"}
+        {row.changed && <Text style={flagText(colors.statusWarning)}> · Geändert</Text>}
+      </Text>
+    </View>
+  );
+}
+
+/** Sidebar view of the latest decision: model answers beside what the controller actually uses. */
+export function DecisionRows({
+  rows,
+  summary,
+  theme,
+}: {
+  rows: DecisionRow[];
+  summary: string;
+  theme: PluginSurfaceProps["theme"];
+}) {
+  if (!rows.length)
+    return summary ? <Text style={summaryText(theme.colors.foreground)}>{summary}</Text> : null;
+  return (
+    <View style={rowList}>
+      {rows.map((row) => (
+        <DecisionRowView key={row.key} row={row} theme={theme} />
+      ))}
+    </View>
+  );
+}
+
+const decisionSourceLabels: Record<string, string> = {
+  main: "Vom Hauptagenten eingeordnet",
+  decisions: "Decisions-Ergebnis",
+  fallback: "Controller-Fallback",
+};
 export function DecisionsHistory(
   props: PluginSurfaceProps & { directory: string; agentId: string },
 ) {
@@ -84,11 +150,7 @@ export function DecisionsHistory(
   const plain = (text: string) => (
     <Text style={{ color: colors.foregroundMuted, fontSize: 12, lineHeight: 18 }}>{text}</Text>
   );
-  let modelAnswers: unknown;
-  if (detail?.response || detail?.diagnostics) {
-    const parsed = JSON.parse(detail.response ?? detail.diagnostics!);
-    modelAnswers = Array.isArray(parsed) ? parsed : parsed?.answers;
-  }
+  const modelAnswers = detail && storedAnswers(detail);
   return (
     <View style={{ gap: 10 }}>
       {plain(
@@ -153,12 +215,7 @@ export function DecisionsHistory(
                   fontSize: 13,
                 }}
               >
-                {detail.source === "decisions"
-                  ? "Decisions-Ergebnis"
-                  : detail.source === "fallback"
-                    ? "Controller-Fallback"
-                    : "Noch offen"}{" "}
-                · {detail.reason}
+                {decisionSourceLabels[detail.source] ?? "Noch offen"} · {detail.reason}
               </Text>
               {plain(
                 detail.provenance === "REQUEST_ATTEMPT_RECORDED"
@@ -178,24 +235,18 @@ export function DecisionsHistory(
                   ? "Ursprüngliche Modellantworten"
                   : "Gespeicherte Diagnose (ohne Verweigerungen)"}
               </Text>
-              {Array.isArray(modelAnswers)
+              {modelAnswers
                 ? modelAnswers.map((answer, answerIndex) => {
-                    const name =
-                      typeof answer?.name === "string" ? answer.name : "Unbenannte Frage";
-                    const value =
-                      answer?.type === "refusal" ? "Verweigert" : (answer?.choice ?? answer?.value);
-                    const confidence =
-                      typeof answer?.confidence === "number"
-                        ? ` · ${(answer.confidence * 100).toFixed(1)} % Konfidenz`
-                        : "";
+                    const { name, refused, value, confidence } = describeAnswer(answer);
                     return (
                       <Text
                         key={answerIndex}
                         style={{ color: colors.foregroundMuted, fontSize: 12, lineHeight: 18 }}
                       >
-                        {labels[name] ?? name}:{" "}
-                        {typeof value === "boolean" ? (value ? "Ja" : "Nein") : String(value)}
-                        {confidence}
+                        {answerLabels[name] ?? name}: {modalValue(refused, value)}
+                        {confidence === undefined
+                          ? ""
+                          : ` · ${(confidence * 100).toFixed(1)} % Konfidenz`}
                       </Text>
                     );
                   })

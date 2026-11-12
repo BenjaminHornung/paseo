@@ -89,8 +89,7 @@ function sameCohort(left: Contract, right: Contract): boolean {
     left.workflowId === right.workflowId &&
     samePath(left.repository, right.repository) &&
     samePath(left.worktree, right.worktree) &&
-    left.baseCommit === right.baseCommit &&
-    left.dataScope === right.dataScope
+    left.baseCommit === right.baseCommit
   );
 }
 
@@ -156,6 +155,7 @@ export class Store {
     if (version === 0)
       this.transaction(() =>
         this.db.exec(`
+      -- Legacy scope column is retained but ignored; new workflows store an empty string.
       CREATE TABLE workflows(id TEXT PRIMARY KEY, repository TEXT NOT NULL, scope TEXT NOT NULL, config_hash TEXT NOT NULL);
       CREATE TABLE tasks(key TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id), contract_json TEXT NOT NULL,
         contract_hash TEXT NOT NULL, config_hash TEXT NOT NULL, config_json TEXT NOT NULL, state TEXT NOT NULL, rework INTEGER NOT NULL DEFAULT 0);
@@ -269,14 +269,11 @@ export class Store {
       const w = this.db.prepare("SELECT * FROM workflows WHERE id=?").get(c.workflowId) as
         | { repository: string; scope: string; config_hash: string }
         | undefined;
-      if (
-        w &&
-        (w.repository !== c.repository || w.scope !== c.dataScope || w.config_hash !== hash(config))
-      )
+      if (w && (w.repository !== c.repository || w.config_hash !== hash(config)))
         throw Error("Workflow identity changed");
       this.db
         .prepare("INSERT OR IGNORE INTO workflows VALUES(?,?,?,?)")
-        .run(c.workflowId, c.repository, c.dataScope, hash(config));
+        .run(c.workflowId, c.repository, "", hash(config));
       const existing = this.task(key);
       if (existing && (existing.contract_hash !== hash(c) || existing.config_hash !== hash(config)))
         throw Error("Immutable contract/config changed; use a new task ID");
@@ -324,8 +321,7 @@ export class Store {
         prior.workflowId !== c.workflowId ||
         prior.repository !== c.repository ||
         prior.worktree !== c.worktree ||
-        prior.baseCommit !== c.baseCommit ||
-        prior.dataScope !== c.dataScope
+        prior.baseCommit !== c.baseCommit
       )
         throw Error("AMENDMENT_WORKTREE_IDENTITY_MISMATCH");
       if (
@@ -379,16 +375,14 @@ export class Store {
         | undefined;
       if (
         workflow &&
-        (workflow.repository !== c.repository ||
-          workflow.scope !== c.dataScope ||
-          workflow.config_hash !== hash(config))
+        (workflow.repository !== c.repository || workflow.config_hash !== hash(config))
       )
         throw Error("Workflow identity changed");
       const existing = this.task(key);
       if (existing) throw Error("AMENDMENT_TASK_ID_ALREADY_REGISTERED");
       this.db
         .prepare("INSERT OR IGNORE INTO workflows VALUES(?,?,?,?)")
-        .run(c.workflowId, c.repository, c.dataScope, hash(config));
+        .run(c.workflowId, c.repository, "", hash(config));
       const updatedAttempt = this.db
         .prepare(
           "UPDATE attempts SET status='FAILED',error_kind='task-amended',result_hash=? WHERE id=? AND fence=? AND status='NEEDS_CONFIRMATION'",
@@ -753,8 +747,7 @@ export class Store {
         (!legacyPlacement && !sourcePlacement) ||
         other.workflowId !== c.workflowId ||
         !samePath(other.repository, c.repository) ||
-        other.baseCommit !== c.baseCommit ||
-        other.dataScope !== c.dataScope
+        other.baseCommit !== c.baseCommit
       )
         continue;
       paths.push(...this.scopePaths(other));

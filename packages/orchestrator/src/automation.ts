@@ -4,7 +4,8 @@ import { z } from "zod";
 import { canonicalPath, hash, localPath, type Contract, type RuntimeRoute } from "./contracts.ts";
 import { appRoot, atomicWrite, withSettingsLock } from "./settings-files.ts";
 import { Store, type TaskRow } from "./store.ts";
-import { currentIntake } from "./intake.ts";
+import { currentIntake, currentMainInput } from "./intake.ts";
+import { readPackageAssessment } from "./main-interpretation.ts";
 
 const mainSchema = z.object({
   agentId: z.string().min(1),
@@ -263,7 +264,10 @@ export function workflowStatus(store: Store, directory: string, agentId?: string
             .prepare("SELECT result_json FROM assessments WHERE id=?")
             .get(c.packageAssessmentId) as { result_json: string | null } | undefined)
         : undefined;
-      const assessment = classified?.result_json ? JSON.parse(classified.result_json) : undefined;
+      const assessment =
+        classified && c.packageAssessmentId
+          ? readPackageAssessment(store, c.packageAssessmentId)
+          : undefined;
       return [
         {
           key: row.key,
@@ -361,6 +365,7 @@ export function workflowStatus(store: Store, directory: string, agentId?: string
     tasks,
     intake,
     writeAuthorization,
+    mainInput: agentId ? currentMainInput(store, agentId) : undefined,
     repositoryScope: { directory: selected, includesDescendants: true },
     historyLimited: tasks.length === 40 || rows.length === 1000,
   };

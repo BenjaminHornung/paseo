@@ -136,7 +136,7 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
     store = new Store(dbPath);
   store.db
     .prepare("INSERT INTO workflows VALUES(?,?,?,?)")
-    .run(contract.workflowId, repoPath, contract.dataScope, hash(config));
+    .run(contract.workflowId, repoPath, "", hash(config));
   store.db
     .prepare(`INSERT INTO tasks(key,workflow_id,contract_json,contract_hash,config_hash,config_json,state)
     VALUES(?,?,?,?,?,?,?)`)

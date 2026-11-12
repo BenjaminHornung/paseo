@@ -12,7 +12,7 @@ import {
   SettingsSwitch,
   type SettingsInputHandle,
 } from "@getpaseo/plugin/client/ui";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import {
@@ -21,28 +21,25 @@ import {
   saveCredential,
   pauseDispatch,
   testDecisions,
-  roles,
-  routingCategories,
   type ControllerConfig,
   type DecisionSettings,
-  type RoutingCategory,
   type Route,
   type SettingsView,
 } from "../shared/settings";
 import { createProfileRoute, reasoningOptions, routeLabel } from "../shared/routes";
+import { workCategorySchema } from "../shared/work-categories";
+import { RoutingPreferences } from "./routing-preferences";
 
 type Tab = "routes" | "decisions" | "keys";
 const accessHints: Partial<Record<Route["access"], string>> = {
   "openai-api": "Luna über Pi; benötigt API-Freigabe, Taskbudget und Repository-Grenze.",
   "claude-company-pro": "Firmen-Abo; nur innerhalb der explizit freigegebenen Repository-Grenzen.",
-  "claude-personal-pro":
-    "Privates Abo; separates Konto, nur gespeicherte Datenfreigaben und Repository-Grenzen.",
+  "claude-personal-pro": "Privates Abo; separates Konto mit gespeicherten Repository-Grenzen.",
 };
 const defaults: DecisionSettings = {
   enabled: false,
   model: "gpt-6-luna",
   roles: [],
-  dataScopes: ["public", "personal"],
   minConfidence: 0.75,
   timeoutMs: 10000,
   monthlyBudgetMicroUsd: 5000000,
@@ -56,22 +53,6 @@ const tabs: { value: Tab; label: string }[] = [
   { value: "decisions", label: "Decisions" },
   { value: "keys", label: "Keys & Budgets" },
 ];
-const roleLabels: Record<RoutingCategory, string> = {
-  planner: "Planung",
-  advisor: "Beratung",
-  "implement-simple": "Kleine Implementierung",
-  "implement-normal": "Normale Implementierung",
-  "implement-complex": "Komplexe Implementierung",
-  reviewer: "Unabhängiges Review",
-  ui: "UI-Implementierung",
-};
-const routingOptions = routingCategories.map((value) => ({ value, label: roleLabels[value] }));
-const scopeLabels: Record<string, string> = {
-  public: "Öffentlich",
-  personal: "Privat",
-  company: "Firma",
-  restricted: "Eingeschränkt",
-};
 const efforts = reasoningOptions;
 const usd = (value: number) => String(value / 1000000);
 const safeError = (error: unknown) => {
@@ -97,6 +78,7 @@ export function OrchestratorSettings({
   initialTab,
 }: PluginSurfaceProps & { initialTab: Tab }) {
   const paseo = usePaseo();
+  const queryClient = useQueryClient();
   const load = useRpc(loadSettings),
     save = useRpc(saveSettings),
     credential = useRpc(saveCredential),
@@ -108,7 +90,6 @@ export function OrchestratorSettings({
   const draftRef = useRef<ControllerConfig | undefined>(undefined);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState("");
-  const [role, setRole] = useState<RoutingCategory>("planner");
   const [routeId, setRouteId] = useState("");
   const [newProfileId, setNewProfileId] = useState("");
   const [generation, setGeneration] = useState(0);
@@ -142,6 +123,9 @@ export function OrchestratorSettings({
   const accept = useCallback(
     (result: unknown, replaceDraft: boolean) => {
       const next = result as SettingsView;
+      // Plugin surfaces can remount on theme changes or reopening settings.
+      // Seed them from the last confirmed server view, not the initial query.
+      queryClient.setQueryData(["orchestrator-settings"], next);
       const replace = replaceDraft || !dirty;
       setView((previous) =>
         !replace && previous ? { ...next, revision: previous.revision } : next,
@@ -154,7 +138,7 @@ export function OrchestratorSettings({
       }
       setError("");
     },
-    [dirty],
+    [dirty, queryClient],
   );
   useEffect(() => {
     if (settings.data && !view) accept(settings.data, true);
@@ -165,6 +149,7 @@ export function OrchestratorSettings({
     onSuccess: (value, sent) => {
       if (draftRef.current === sent) accept(value, true);
       else {
+        queryClient.setQueryData(["orchestrator-settings"], value);
         setView(value as unknown as SettingsView);
         setError("Weitere Änderungen sind noch nicht gespeichert.");
       }
@@ -213,7 +198,7 @@ export function OrchestratorSettings({
     pauseMutation.isPending ||
     reloadMutation.isPending ||
     testMutation.isPending;
-  const change = (fn: (current: ControllerConfig) => ControllerConfig) => {
+  const change = useCallback((fn: (current: ControllerConfig) => ControllerConfig) => {
     if (draftRef.current) {
       const next = fn(draftRef.current);
       draftRef.current = next;
@@ -221,7 +206,7 @@ export function OrchestratorSettings({
     }
     setDirty(true);
     setError("");
-  };
+  }, []);
   if (!view || !draft)
     return settings.isError ? (
       <SettingsSection title="Orchestrator">
@@ -253,19 +238,6 @@ export function OrchestratorSettings({
     change((c) => ({
       ...c,
       routes: c.routes.map((r) => (r.id === route?.id ? { ...r, ...patch } : r)),
-    }));
-  const preference = draft.roleRoutes?.[role] ?? [];
-  const setPreference = (ids: string[]) =>
-    change((c) => ({
-      ...c,
-      roleRoutes: {
-        ...c.roleRoutes,
-        ...(Object.fromEntries(roles.map((r) => [r, c.roleRoutes?.[r] ?? []])) as Record<
-          Exclude<RoutingCategory, "ui">,
-          string[]
-        >),
-        [role]: role === "ui" && !ids.length ? undefined : ids,
-      },
     }));
   const provider = catalog.data?.providers.find((p) => p.provider === route?.provider);
   const models = (provider?.models ?? []).filter(
@@ -303,6 +275,7 @@ export function OrchestratorSettings({
     }
   };
   const invalid =
+    draft.workCategories?.some((category) => !workCategorySchema.safeParse(category).success) ||
     draft.maxWorkflows < 1 ||
     draft.maxWorkflows > 2 ||
     draft.maxRework < 0 ||
@@ -331,7 +304,6 @@ export function OrchestratorSettings({
         r.maxConcurrent < 1 ||
         r.maxConcurrent > 10 ||
         !efforts.includes(r.reasoning) ||
-        !r.dataScopes.length ||
         !r.capabilities.length,
     ) ||
     Object.values(draft.budgets).some((v) => !Number.isFinite(v) || v < 0) ||
@@ -440,71 +412,12 @@ export function OrchestratorSettings({
               />
             </SettingsCard>
           </SettingsSection>
-          <SettingsSection
-            title="Reihenfolge je Rolle & Arbeitsart"
-            info="Die erste Route ist primär; weitere werden in dieser Reihenfolge als Fallback verwendet."
-          >
-            <SettingsCard>
-              <SettingsSelect<RoutingCategory>
-                label="Rolle oder Arbeitsart"
-                value={role}
-                options={routingOptions}
-                onValueChange={setRole}
-              />
-              {role === "ui" && (
-                <SettingsRow
-                  label={preference.length ? "Eigene UI-Reihenfolge" : "Standardrouting aktiv"}
-                  hint="Gilt für Pakete mit UI-Änderungen. Ohne Zuordnung gilt die Reihenfolge der Implementierungsklasse. Mit Zuordnung werden nur diese Routen verwendet; ist keine geeignet, wartet der Controller. Qualitätsstufe, Datenfreigaben und Budget gelten weiterhin."
-                />
-              )}
-              {preference.map((id, index) => (
-                <View key={id}>
-                  {info(
-                    `${index + 1}. ${index === 0 ? "Primär" : "Fallback"}`,
-                    routeLabel(draft.routes.find((route) => route.id === id)!),
-                  )}
-                  <SettingsAction
-                    label="Position"
-                    actionLabel="Nach oben"
-                    disabled={index === 0}
-                    onPress={() => {
-                      const p = [...preference];
-                      [p[index - 1], p[index]] = [p[index], p[index - 1]];
-                      setPreference(p);
-                    }}
-                  />
-                  <SettingsAction
-                    label="Position"
-                    actionLabel="Nach unten"
-                    disabled={index === preference.length - 1}
-                    onPress={() => {
-                      const p = [...preference];
-                      [p[index + 1], p[index]] = [p[index], p[index + 1]];
-                      setPreference(p);
-                    }}
-                  />
-                  <SettingsAction
-                    label="Zuordnung"
-                    actionLabel="Entfernen"
-                    onPress={() => setPreference(preference.filter((_, i) => i !== index))}
-                  />
-                </View>
-              ))}
-              <SettingsSelect
-                label="Route hinzufügen"
-                value=""
-                options={[
-                  { label: "Route auswählen", value: "" },
-                  ...draft.routes
-                    .filter((r) => !preference.includes(r.id))
-                    .map((route) => ({ value: route.id, label: routeLabel(route) })),
-                ]}
-                onValueChange={(v) => {
-                  if (v) setPreference([...preference, v]);
-                }}
-              />
-            </SettingsCard>
-          </SettingsSection>
+          <RoutingPreferences
+            config={draft}
+            onChange={change}
+            generation={generation}
+            theme={theme}
+          />
           <SettingsSection title="Profil als zusätzliche Route">
             <SettingsCard>
               <SettingsSelect
@@ -711,20 +624,6 @@ export function OrchestratorSettings({
                   {num("Parallel je Route und Hauptsession", route.maxConcurrent, (n) =>
                     updateRoute({ maxConcurrent: n }),
                   )}
-                  {Object.entries(scopeLabels).map(([scope, label]) => (
-                    <SettingsSwitch
-                      key={`${route.id}-${scope}`}
-                      label={`Datenscope: ${label}`}
-                      value={route.dataScopes.includes(scope)}
-                      onValueChange={(v) =>
-                        updateRoute({
-                          dataScopes: v
-                            ? [...route.dataScopes, scope]
-                            : route.dataScopes.filter((s) => s !== scope),
-                        })
-                      }
-                    />
-                  ))}
                   {["code", "text"].map((cap) => (
                     <SettingsSwitch
                       key={`${route.id}-${cap}`}
@@ -766,20 +665,6 @@ export function OrchestratorSettings({
               "Modellwahl",
               "Die Rollenprioritäten im Tab Rollen & Modelle gelten verbindlich. Alte Decisions-Rollenzuordnungen sind in v3 ohne Wirkung.",
             )}
-            {Object.entries(scopeLabels).map(([scope, label]) => (
-              <SettingsSwitch
-                key={`decision-${scope}`}
-                label={`Datenscope: ${label}`}
-                value={decision.dataScopes.includes(scope)}
-                onValueChange={(v) =>
-                  updateDecision({
-                    dataScopes: v
-                      ? [...decision.dataScopes, scope]
-                      : decision.dataScopes.filter((s) => s !== scope),
-                  })
-                }
-              />
-            ))}
             {num(
               "Mindestkonfidenz",
               decision.minConfidence,

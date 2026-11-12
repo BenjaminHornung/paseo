@@ -34,6 +34,19 @@ import { isClaudeProvider } from "../paseo-plugin/shared/providers.ts";
 type AmendmentAdmissionResult =
   | { state: "READY"; key: string }
   | { state: "WAITING"; reason: string };
+function workCategoryPreference(
+  contract: Contract,
+  config: Config,
+): { category: string; routeIds: string[] } | undefined {
+  if (!contract.mutation || !contract.role.startsWith("implement-")) return;
+  if (contract.workKind && !["ui", "general"].includes(contract.workKind)) {
+    const category = config.workCategories?.find((item) => item.id === contract.workKind);
+    // Explicit categories never silently acquire generic or UI candidates.
+    return { category: contract.workKind, routeIds: category?.routeIds ?? [] };
+  }
+  if ((contract.uiChanged || contract.workKind === "ui") && config.roleRoutes?.ui)
+    return { category: "ui", routeIds: config.roleRoutes.ui };
+}
 type ReviewerRoute = RuntimeRoute & { provider: "codex" | "claude" | "claude-private" };
 interface ReviewerRouteSelection {
   eligible: RuntimeRoute[];
@@ -206,6 +219,12 @@ export class Engine {
     )
       throw Error("CONTINUATION_REVIEW_BINDING_MISMATCH");
     assertTaskAssessment(this.store, this.config, c);
+    if (
+      this.config.orchestrationVersion === 3 &&
+      c.highRisk &&
+      !hasAuditedOwnerApproval(this.store, c)
+    )
+      throw Error("CONTINUATION_OWNER_APPROVAL_REQUIRED");
     if (!this.canDispatch(key) || this.store.stopped()) throw Error("CONTINUATION_NOT_AUTHORIZED");
     const effectiveChecks = this.store.checkCommands(c);
     if (!a?.agent_id || a.status !== "NEEDS_CONFIRMATION" || !c.role.startsWith("implement-"))
@@ -236,6 +255,12 @@ export class Engine {
       throw Error("CONTINUATION_NOT_NEEDED_AWAITING_PROCESS_PROOF");
     this.store.claimContinuation(a.id, foreground.traceHash, () => {
       assertTaskAssessment(this.store, this.config, c);
+      if (
+        this.config.orchestrationVersion === 3 &&
+        c.highRisk &&
+        !hasAuditedOwnerApproval(this.store, c)
+      )
+        throw Error("CONTINUATION_OWNER_APPROVAL_REQUIRED");
       if (!this.canDispatch(key)) throw Error("CONTINUATION_NOT_AUTHORIZED");
       const scopeCheckpoint =
         hash(this.store.scopePaths(c)) === hash(c.allowedPaths)
@@ -332,8 +357,7 @@ export class Engine {
       prior.repository === contract.repository &&
       prior.worktree === contract.worktree &&
       prior.baseCommit === contract.baseCommit &&
-      prior.workflowId === contract.workflowId &&
-      prior.dataScope === contract.dataScope;
+      prior.workflowId === contract.workflowId;
     if (!sameWorktreeIdentity) return waiting("AMENDMENT_WAITING_WORKTREE_IDENTITY");
     assertTaskAssessment(this.store, this.config, contract);
     try {
@@ -427,7 +451,7 @@ export class Engine {
     routing?: {
       reason: string;
       source: string;
-      category?: "ui";
+      category?: string;
       confidence?: number;
       skipped?: { routeId: string; reason: string }[];
     };
@@ -461,7 +485,6 @@ export class Engine {
       model: r.model,
       tier: r.tier,
       reasoning: r.reasoning,
-      dataScopes: r.dataScopes,
       capabilities: r.capabilities,
       enabled: r.enabled,
       verified: r.revision !== "discovery-required",
@@ -473,20 +496,17 @@ export class Engine {
       quotaAvailable: true,
       priority: 0,
     }));
-    // UI is a work kind, independent of the assessed complexity and quality tier.
-    // Apply its explicit candidate list to both fresh dispatch and session reuse.
-    const uiPreference =
-      c.mutation && (c.uiChanged || c.workKind === "ui") && c.role.startsWith("implement-")
-        ? this.config.roleRoutes?.ui
-        : undefined;
-    const preference = uiPreference ?? this.config.roleRoutes?.[c.role] ?? routePreference[c.role];
-    const routingCategory = uiPreference ? { category: "ui" as const } : {};
+    // An explicit custom category wins over the UI preference. Actual UI facts
+    // still govern both visual gates independently below.
+    const categoryPreference = workCategoryPreference(c, this.config);
+    const preference =
+      categoryPreference?.routeIds ?? this.config.roleRoutes?.[c.role] ?? routePreference[c.role];
+    const routingCategory = categoryPreference ? { category: categoryPreference.category } : {};
     const input = {
       task: {
         workflowId: c.workflowId,
         taskId: c.taskId,
         role: c.role,
-        dataScope: c.dataScope,
         worktree: c.worktree,
         contractHash: hash(c),
         configurationHash: hash(this.config),
@@ -615,7 +635,7 @@ export class Engine {
       };
     }
     const d = decideRoute(input);
-    if (!d.route && !uiPreference) return { action: d.action, reason: d.reason };
+    if (!d.route && !categoryPreference) return { action: d.action, reason: d.reason };
     const skippedIds = d.route ? preference.slice(0, preference.indexOf(d.route.id)) : preference;
     const skipped = skippedIds.map((id) => {
       const configured = this.config.routes.find((route) => route.id === id),
@@ -626,7 +646,6 @@ export class Engine {
       else if (!candidate.healthy) reason = "confirmed-provider-or-route-circuit";
       else if (this.store.routeOccupied(configured, undefined, c))
         reason = "route-concurrency-limit-for-main";
-      else if (!configured.dataScopes.includes(c.dataScope)) reason = "data-scope-not-approved";
       else if (!routeAllowsPath(configured, c.worktree)) reason = "repository-not-approved";
       else if (configured.tier < c.minTier) reason = "quality-tier-insufficient";
       else if (
@@ -639,7 +658,10 @@ export class Engine {
       else if (configured.revision === "discovery-required") reason = "catalog-revision-unverified";
       return { routeId: id, reason };
     });
-    const reason = !d.route && uiPreference ? `ui-${d.reason}` : d.reason;
+    const reason =
+      !d.route && categoryPreference
+        ? `${categoryPreference.category === "ui" ? "ui" : "category"}-${d.reason}`
+        : d.reason;
     const routing = { reason, source: "policy", skipped, ...routingCategory };
     if (!d.route) return { action: d.action, reason, routing };
     const route = this.config.routes.find((r) => r.id === d.route!.id)!;
@@ -1327,7 +1349,6 @@ export class Engine {
           route.revision !== "discovery-required" &&
           route.id !== implementationRouteId &&
           route.tier >= Math.max(3, c.minTier) &&
-          route.dataScopes.includes(c.dataScope) &&
           routeAllowsPath(route, c.worktree) &&
           !this.store.circuitOpen(route.access, Date.now()) &&
           !this.store.circuitOpen(`route:${route.id}`, Date.now()),

@@ -122,7 +122,6 @@ try {
         reasoning: r.reasoning,
         enabled: r.enabled,
         tier: r.tier,
-        scopes: r.dataScopes,
       })),
     });
   } else if (command === "doctor") {
@@ -310,7 +309,6 @@ try {
           rework: t.rework,
           contractHash: t.contract_hash,
           role: c.role,
-          dataScope: c.dataScope,
           attempts: store.db
             .prepare(
               "SELECT id,status,agent_id,fence,error_kind FROM attempts WHERE task_key=? ORDER BY sequence",

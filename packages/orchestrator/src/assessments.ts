@@ -1,7 +1,10 @@
 import { z } from "zod";
+import {
+  workCategoryCatalogSchema,
+  workKindSchema,
+} from "../paseo-plugin/shared/work-categories.ts";
 import { hash, type Contract } from "./contracts.ts";
 
-const dataScope = z.enum(["public", "personal", "company", "restricted"]);
 export const intentSchema = z.enum([
   "question",
   "status",
@@ -20,12 +23,14 @@ export const intakeFactsSchema = z.strictObject({
   origin: z.enum(["human", "unverified"]),
   directory: z.string().min(1),
   text: z.string().min(1).max(12000),
-  dataScope,
+  // Ignored legacy facts remain intact for immutable assessment hashes.
+  dataScope: z.string().optional(),
   knownFacts: z.array(z.string().max(1000)).max(12).default([]),
 });
 export type IntakeFacts = z.infer<typeof intakeFactsSchema>;
 export const intakeResultSchema = z.strictObject({
   intent: intentSchema,
+  preserveExistingWork: z.boolean().optional(),
   needExplorer: z.boolean(),
   needPlanner: z.boolean(),
   needAdvisor: z.boolean(),
@@ -37,7 +42,8 @@ export const packageFactsSchema = z.strictObject({
   intakeId: z.string().min(1),
   packageId: z.string().min(1),
   packageRevision: z.number().int().positive().default(1),
-  dataScope,
+  // Ignored legacy facts remain intact for immutable assessment hashes.
+  dataScope: z.string().optional(),
   amendsTaskKey: z.string().min(1).max(240).optional(),
   amendsContractHash: z
     .string()
@@ -55,6 +61,11 @@ export const packageFactsSchema = z.strictObject({
   checks: z.object({ build: z.array(z.string()), test: z.array(z.string()) }).optional(),
   mutation: z.boolean().optional(),
   uiChanged: z.boolean().optional(),
+  workCategoryCatalog: workCategoryCatalogSchema.optional(),
+  routingConfigIdentity: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
   files: z.array(z.string().min(1)).min(1).max(100),
   interfaces: z.array(z.string().max(300)).max(30).default([]),
   dependencies: z.array(z.string().max(160)).max(30).default([]),
@@ -68,7 +79,7 @@ export const packageFactsSchema = z.strictObject({
 });
 export type PackageFacts = z.infer<typeof packageFactsSchema>;
 export const packageResultSchema = z.strictObject({
-  workKind: z.enum(["ui", "general"]).optional(),
+  workKind: workKindSchema.optional(),
   complexity: z.enum(["simple", "normal", "complex", "unknown"]),
   additionalPlanning: z.boolean(),
   advisorNeeded: z.boolean(),
@@ -76,6 +87,13 @@ export const packageResultSchema = z.strictObject({
   extraReviewRecommended: z.boolean(),
 });
 export type IntakeResult = z.infer<typeof intakeResultSchema>;
+export function preservesExistingWork(assessment: Assessment<IntakeResult>): boolean {
+  const { result, source, reason } = assessment;
+  if (result.needImplementation) return false;
+  if (source === "fallback" && reason !== "DECISIONS_LOW_CONFIDENCE") return false;
+  if (result.preserveExistingWork !== undefined) return result.preserveExistingWork;
+  return source !== "fallback" && ["question", "status"].includes(result.intent);
+}
 export type PackageResult = z.infer<typeof packageResultSchema>;
 export interface DecisionRequestAudit {
   model: string;
@@ -113,7 +131,7 @@ export interface Assessment<T> {
   kind: "intake" | "package";
   factsHash: string;
   version: string;
-  source: "decisions" | "fallback" | "operator-confirmed";
+  source: "decisions" | "fallback" | "operator-confirmed" | "main";
   reason: string;
   result: T;
   confidence?: number;
@@ -185,7 +203,7 @@ export function fallbackPackage(): PackageResult {
 export function effectiveImplementation(
   result: PackageResult,
   contract: Contract,
-): { role: Contract["role"]; minTier: 1 | 2 | 3; highRisk: boolean; workKind?: "ui" | "general" } {
+): { role: Contract["role"]; minTier: 1 | 2 | 3; highRisk: boolean; workKind?: string } {
   if (result.complexity === "unknown") throw Error("PACKAGE_CLASSIFICATION_REQUIRED");
   if (result.additionalPlanning) throw Error("PACKAGE_ADDITIONAL_PLANNING_REQUIRED");
   const hardRisk =

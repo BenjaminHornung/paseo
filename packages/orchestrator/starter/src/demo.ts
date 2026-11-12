@@ -6,7 +6,6 @@ const task: Task = {
   workflowId: "demo",
   taskId: "fix-1",
   role: "implement-simple",
-  dataScope: "public",
   worktree: "/demo/fix-1",
   contractHash: "abc",
   configurationHash: "v2",

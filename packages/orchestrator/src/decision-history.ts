@@ -5,11 +5,32 @@ import { appRoot } from "./settings-files.ts";
 import type { Assessment, IntakeResult, PackageResult } from "./assessments.ts";
 import { effectiveIntakeAssessment } from "./intake.ts";
 import { intakeFactsSchema } from "./assessments.ts";
+import {
+  effectivePackageAssessment,
+  readIntakeAssessment,
+  readPackageAssessment,
+} from "./main-interpretation.ts";
 
-function displayAssessment(store: Store, result?: Assessment<IntakeResult | PackageResult>) {
-  if (result?.kind !== "intake") return result;
-  const effective = effectiveIntakeAssessment(store, result as Assessment<IntakeResult>);
-  return effective.id === result.id ? effective : result;
+function displayAssessment(
+  store: Store,
+  result: Assessment<IntakeResult | PackageResult> | undefined,
+  id: string,
+  kind: string,
+) {
+  try {
+    if (kind === "package")
+      return result
+        ? effectivePackageAssessment(store, result as Assessment<PackageResult>)
+        : readPackageAssessment(store, id);
+    const effective = effectiveIntakeAssessment(
+      store,
+      (result as Assessment<IntakeResult> | undefined) ?? readIntakeAssessment(store, id),
+    );
+    return effective.id === id ? effective : result;
+  } catch {
+    // Uninterpreted inputs remain advisory diagnostics, never write authority.
+    return result;
+  }
 }
 
 function followingConfirmation(store: Store, agentId: string, assessmentId: string) {
@@ -128,20 +149,23 @@ export function decisionHistory(
       stored = row.result_json
         ? (JSON.parse(row.result_json) as Assessment<IntakeResult | PackageResult>)
         : undefined;
-    const result = displayAssessment(store, stored);
+    const result = displayAssessment(store, stored, assessmentId, row.kind);
     const call = store.db
       .prepare("SELECT state,reserved,charged FROM decision_calls WHERE key=?")
-      .get(hash({ id: assessmentId, version: result?.version ?? `${row.kind}-v3` })) as
+      .get(hash({ id: assessmentId, version: stored?.version ?? `${row.kind}-v3` })) as
       | { state: string; reserved: number; charged: number | null }
       | undefined;
+    let provenance = "NO_API_CALL";
+    if (call) provenance = "CALL_WITHOUT_REQUEST_AUDIT";
+    if (stored?.request) provenance = "REQUEST_ATTEMPT_RECORDED";
     detail = {
       id: assessmentId,
       input: JSON.stringify(redacted(facts), null, 2),
       result: result ? JSON.stringify(redacted(result.result), null, 2) : null,
-      response: result?.response ? JSON.stringify(redacted(result.response), null, 2) : null,
-      diagnostics: result?.answers ? JSON.stringify(redacted(result.answers), null, 2) : null,
-      request: result?.request ? JSON.stringify(redacted(result.request), null, 2) : null,
-      confidence: result?.confidence,
+      response: stored?.response ? JSON.stringify(redacted(stored.response), null, 2) : null,
+      diagnostics: stored?.answers ? JSON.stringify(redacted(stored.answers), null, 2) : null,
+      request: stored?.request ? JSON.stringify(redacted(stored.request), null, 2) : null,
+      confidence: stored?.confidence,
       source: result?.source ?? "pending",
       reason: result?.reason ?? "DECISIONS_OUTCOME_PENDING",
       callState: call?.state ?? "NOT_RECORDED",
@@ -149,11 +173,7 @@ export function decisionHistory(
       chargedMicroUsd: call?.charged ?? null,
       inputHash: result?.factsHash ?? hash(facts),
       approval: intakeApprovalView(store, view.mainAgentId, result, facts),
-      provenance: result?.request
-        ? "REQUEST_ATTEMPT_RECORDED"
-        : call
-          ? "CALL_WITHOUT_REQUEST_AUDIT"
-          : "NO_API_CALL",
+      provenance,
     };
   }
   return {

@@ -13,7 +13,6 @@ export type Role =
   | "implement-normal"
   | "implement-complex"
   | "reviewer";
-export type DataScope = "public" | "personal" | "company" | "restricted";
 export type QualityTier = 1 | 2 | 3;
 export type BudgetBucket = "decisions" | "implementation" | "premium-api" | "emergency";
 export interface Route {
@@ -23,7 +22,8 @@ export interface Route {
   model: string;
   tier: QualityTier;
   reasoning: "" | "off" | "low" | "medium" | "high" | "xhigh" | "max" | "ultracode";
-  dataScopes: readonly DataScope[];
+  /** Ignored legacy configuration. */
+  dataScopes?: readonly string[];
   capabilities: readonly string[];
   budgetBucket?: BudgetBucket;
   maxUsdPerTask?: number;
@@ -39,7 +39,8 @@ export interface Task {
   workflowId: string;
   taskId: string;
   role: Role;
-  dataScope: DataScope;
+  /** Ignored legacy task metadata. */
+  dataScope?: string;
   worktree: string;
   contractHash: string;
   configurationHash: string;
@@ -63,7 +64,8 @@ export interface Session {
   access: Access;
   contractHash: string;
   configurationHash: string;
-  dataScope: DataScope;
+  /** Ignored legacy session metadata. */
+  dataScope?: string;
   status: "idle" | "running" | "permission" | "unknown" | "ended";
   lastReconciledMs: number;
   lastUsedMs: number;

@@ -71,12 +71,6 @@ export function createProfileRoute(
     tier: access === "opencode-go" ? 1 : 2,
     enabled: false,
     maxConcurrent: 1,
-    dataScopes:
-      provider === "claude"
-        ? ["company"]
-        : access === "opencode-go"
-          ? ["public"]
-          : ["public", "personal"],
     capabilities: ["code", "text"],
     profileId: profile.id,
     profileName: profile.name,

@@ -34,7 +34,6 @@ export function decideRoute(input: {
         r.quotaAvailable &&
         verifiedProviderModel(r) &&
         r.tier >= task.minTier &&
-        r.dataScopes.includes(task.dataScope) &&
         task.requiredCapabilities.every((c) => r.capabilities.includes(c)) &&
         (!task.highRisk || r.tier === 3) &&
         !(task.role === "reviewer" && task.reviewImplementationRouteId === r.id) &&
@@ -51,8 +50,7 @@ export function decideRoute(input: {
         s.role === task.role &&
         s.worktree === task.worktree &&
         s.contractHash === task.contractHash &&
-        s.configurationHash === task.configurationHash &&
-        s.dataScope === task.dataScope,
+        s.configurationHash === task.configurationHash,
     )
     .sort((a, b) => b.lastUsedMs - a.lastUsedMs);
   for (const s of previous) {

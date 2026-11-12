@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import type { WorkCategory } from "./work-categories.ts";
 
 export const roles = [
   "planner",
@@ -16,7 +17,8 @@ export interface DecisionSettings {
   enabled: boolean;
   model: "gpt-6-luna";
   roles: Role[];
-  dataScopes: string[];
+  /** Ignored legacy configuration. */
+  dataScopes?: string[];
   minConfidence: number;
   timeoutMs: number;
   monthlyBudgetMicroUsd: number;
@@ -39,7 +41,8 @@ export interface Route {
   profileName?: string;
   enabled: boolean;
   maxConcurrent: number;
-  dataScopes: string[];
+  /** Ignored legacy configuration. */
+  dataScopes?: string[];
   capabilities: string[];
   featureValues?: Record<string, string | number | boolean | null>;
   bucket?: string;
@@ -58,6 +61,7 @@ export interface ControllerConfig {
   liveDispatchApproved: boolean;
   apiFunding?: { confirmed: boolean; cycle: string; availableMicroUsd: number; validUntil: string };
   roleRoutes?: Record<Role, string[]> & { ui?: string[] };
+  workCategories?: WorkCategory[];
   routes: Route[];
   decisions?: DecisionSettings;
   budgets: { decisions: number; implementation: number; "premium-api": number; emergency: number };
