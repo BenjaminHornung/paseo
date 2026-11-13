@@ -650,6 +650,7 @@ export class Store {
       task.config_hash !== request.configHash
     )
       throw Error("TERMINAL_REPAIR_BINDING_CHANGED");
+    this.assertTerminalRepairNativeBinding(attempt, request);
     const contract: Contract = JSON.parse(task.contract_json),
       config: Config = JSON.parse(task.config_json);
     const route: RuntimeRoute = JSON.parse(attempt.route_json);
@@ -671,6 +672,17 @@ export class Store {
       throw Error("TERMINAL_REPAIR_REVISION_CHANGED");
     this.assertTerminalRepairAvailable(contract, attempt);
     return { task, attempt, contract, checks, review };
+  }
+  private assertTerminalRepairNativeBinding(
+    attempt: Attempt,
+    request: TerminalRepairRequest,
+  ): void {
+    const grant = this.terminalRepairForAttempt(attempt.id);
+    if (
+      grant &&
+      (grant.agentId !== request.agentId || grant.nativeSessionId !== request.nativeSessionId)
+    )
+      throw Error("TERMINAL_REPAIR_SESSION_CHANGED");
   }
   private terminalRepairCheckEvidence(attempt: Attempt, request: TerminalRepairRequest) {
     const checks = this.db.prepare("SELECT * FROM turn_checks WHERE attempt_id=?").get(attempt.id);
@@ -715,7 +727,13 @@ export class Store {
     return this.transaction(() => {
       if (!reason.trim() || reason.length > 500) throw Error("TERMINAL_REPAIR_REASON_REQUIRED");
       const previous = this.terminalRepairGrant(key);
-      if (previous) throw Error("TERMINAL_REPAIR_ALREADY_GRANTED");
+      if (previous) {
+        const consumed = this.db
+          .prepare("SELECT 1 FROM events WHERE kind=?")
+          .get(`TERMINAL_REPAIR_CONSUMED:${hash(previous)}`);
+        if (!consumed || previous.predecessorAttemptId === request.predecessorAttemptId)
+          throw Error("TERMINAL_REPAIR_ALREADY_GRANTED");
+      }
       const predecessor = this.terminalRepairPredecessor(key, request),
         c = predecessor.contract;
       const approvedPaths = this.scopePaths(c);

@@ -231,9 +231,9 @@ export class Engine {
     )
       throw Error("CONTINUATION_OWNER_APPROVAL_REQUIRED");
     if (!this.canDispatch(key) || this.store.stopped()) throw Error("CONTINUATION_NOT_AUTHORIZED");
+    if (a?.status === "FAILED") return this.continueTerminalRepair(a, c, repair, findings);
     if (a && this.store.terminalRepairForAttempt(a.id))
       throw Error("TERMINAL_REPAIR_ALREADY_CONSUMED");
-    if (a?.status === "FAILED") return this.continueTerminalRepair(a, c, repair, findings);
     if (repair) this.assertContinuationRepair(c, repair.diffHash, findings);
     const effectiveChecks = this.store.checkCommands(c);
     if (

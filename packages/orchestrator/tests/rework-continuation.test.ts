@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { Engine } from "../src/engine.ts";
@@ -888,8 +888,21 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
         const noExtensionFile = path.join(root, "terminal-repair-existing-scope.sqlite");
         await state.backupTo(noExtensionFile);
         const noExtension = new Store(noExtensionFile);
+        const repairFile = path.join(worktreePath, "src", "in-progress.ts");
+        const originalSource = readFileSync(repairFile);
         try {
-          const { additionalAllowedPath: _additionalPath, ...existingScopeRequest } = request;
+          const { additionalAllowedPath: _additionalPath, ...inScopeRequest } = request;
+          const existingScopeRequest = {
+            ...inScopeRequest,
+            checks: {
+              build: contract.checks.build,
+              test: [
+                process.execPath,
+                "-e",
+                "process.exit(require('node:fs').readFileSync('src/in-progress.ts','utf8').includes('terminal-second-round-fixed') ? 0 : 1)",
+              ],
+            },
+          };
           let existingScopeSends = 0;
           const existingScopeEngine = new Engine(noExtension, repairConfig, {
             ...repairProvider,
@@ -898,6 +911,14 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
               assert.match(prompt, /src\/in-progress.ts/);
               assert.match(prompt, /Finish the objective/);
               existingScopeSends++;
+              if (existingScopeSends === 2)
+                writeFileSync(
+                  repairFile,
+                  Buffer.concat([
+                    originalSource,
+                    Buffer.from("\n// terminal-second-round-fixed\n"),
+                  ]),
+                );
               return {
                 ...snapshot,
                 status: "running",
@@ -967,7 +988,162 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
             /ALREADY_CONSUMED/,
           );
           assert.equal(noExtension.db.prepare("SELECT count(*) AS n FROM attempts").get()!.n, 2);
+          const firstGrant = noExtension.terminalRepairGrant(taskKey)!;
+          const firstConsumption = noExtension.db
+            .prepare("SELECT * FROM events WHERE kind=?")
+            .get(`TERMINAL_REPAIR_CONSUMED:${hash(firstGrant)}`);
+          await existingScopeEngine.acceptSnapshot(next.id, snapshot);
+          await assert.rejects(
+            () => existingScopeEngine.advance(next.id),
+            /Build, tests and scope must pass before review/,
+          );
+          const failedExtra = noExtension.attempt(next.id);
+          assert.equal(failedExtra.status, "FAILED");
+          assert.equal(noExtension.task(taskKey)!.state, "BLOCKED");
+          assert.equal(noExtension.task(taskKey)!.rework, 4);
+          const extraChecks = noExtension.db
+            .prepare("SELECT * FROM turn_checks WHERE attempt_id=?")
+            .get(next.id)!;
+          const extraReview = noExtension.db
+            .prepare("SELECT * FROM reviews WHERE attempt_id=?")
+            .get(next.id)!;
+          assert.equal(JSON.parse(String(extraChecks.result_json)).build.exit, 0);
+          assert.equal(JSON.parse(String(extraChecks.result_json)).test.exit, 1);
+          const nextRepair = {
+            diffHash: String(extraChecks.diff_hash),
+            findings: [{ ...reviewerFinding, file: "src/in-progress.ts" }],
+          };
+          await assert.rejects(
+            () => existingScopeEngine.continueExisting(taskKey, nextRepair),
+            /TERMINAL_REPAIR_(?:GRANT_REQUIRED|ALREADY_CONSUMED)/,
+          );
+          await existingScopeEngine.tick();
+          assert.equal(existingScopeSends, 1, "a failed extra round cannot restart automatically");
+          assert.equal(noExtension.db.prepare("SELECT count(*) AS n FROM attempts").get()!.n, 2);
+          assert.throws(
+            () =>
+              noExtension.approveTerminalRepair(
+                taskKey,
+                existingScopeRequest,
+                "replay old approval",
+              ),
+            /ALREADY_GRANTED/,
+          );
+          const nextRequest = {
+            ...existingScopeRequest,
+            predecessorAttemptId: failedExtra.id,
+            predecessorFence: failedExtra.fence,
+            diffHash: String(extraChecks.diff_hash),
+            checkEvidenceSha256: createHash("sha256")
+              .update(String(extraChecks.result_json))
+              .digest("hex"),
+            scopeRevision: noExtension.scopeRevision(repairContract),
+            checkRevision: noExtension.checkRevision(repairContract),
+          };
+          const eventsBeforeNativeMismatch = noExtension.db
+            .prepare("SELECT count(*) AS n FROM events")
+            .get()!.n;
+          const outboxBeforeNativeMismatch = noExtension.db
+            .prepare("SELECT * FROM outbox ORDER BY attempt_id")
+            .all();
+          observedSession = "replacement-native-session";
+          await sdkProvider.refresh("writer-old");
+          assert.equal(sdkProvider.nativeSessionId("writer-old"), observedSession);
+          assert.throws(
+            () =>
+              noExtension.approveTerminalRepair(
+                taskKey,
+                { ...nextRequest, nativeSessionId: observedSession },
+                "new approval cannot move the historical worker session",
+              ),
+            /TERMINAL_REPAIR_SESSION_CHANGED/,
+          );
+          assert.equal(
+            noExtension.db.prepare("SELECT count(*) AS n FROM events").get()!.n,
+            eventsBeforeNativeMismatch,
+          );
+          assert.deepEqual(noExtension.terminalRepairGrant(taskKey), firstGrant);
+          assert.deepEqual(noExtension.attempt(failedExtra.id), failedExtra);
+          assert.equal(noExtension.db.prepare("SELECT count(*) AS n FROM attempts").get()!.n, 2);
+          assert.equal(noExtension.scopeRevision(repairContract), request.scopeRevision);
+          assert.deepEqual(
+            noExtension.db.prepare("SELECT * FROM outbox ORDER BY attempt_id").all(),
+            outboxBeforeNativeMismatch,
+          );
+          observedSession = nativeSessionId;
+          await sdkProvider.refresh("writer-old");
+          noExtension.approveTerminalRepair(
+            taskKey,
+            nextRequest,
+            "new explicit approval for latest failed round",
+          );
+          assert.throws(
+            () =>
+              noExtension.approveTerminalRepair(taskKey, nextRequest, "replace pending approval"),
+            /ALREADY_GRANTED/,
+          );
+          assert.throws(
+            () =>
+              noExtension.approveTerminalRepair(taskKey, existingScopeRequest, "stale predecessor"),
+            /ALREADY_GRANTED|BINDING_CHANGED/,
+          );
+          assert.deepEqual(await existingScopeEngine.continueExisting(taskKey, nextRepair), {
+            agentId: originalAttempt.agent_id,
+            continued: false,
+            delivery: "pending",
+            attemptId: `${taskKey}/5`,
+          });
+          const secondExtra = noExtension.latest(taskKey)!;
+          assert.equal(secondExtra.agent_id, failedExtra.agent_id);
+          assert.equal(secondExtra.session_key, failedExtra.session_key);
+          assert.equal(secondExtra.fence, failedExtra.fence + 1);
+          assert.equal(
+            noExtension.terminalRepairForAttempt(secondExtra.id)!.nativeSessionId,
+            nativeSessionId,
+          );
+          assert.deepEqual(noExtension.terminalRepairForAttempt(next.id), firstGrant);
+          assert.deepEqual(
+            noExtension.db
+              .prepare("SELECT * FROM events WHERE kind=?")
+              .get(`TERMINAL_REPAIR_CONSUMED:${hash(firstGrant)}`),
+            firstConsumption,
+          );
+          assert.deepEqual(noExtension.attempt(oldId), originalAttempt);
+          assert.deepEqual(noExtension.attempt(next.id), failedExtra);
+          assert.deepEqual(
+            noExtension.db.prepare("SELECT * FROM reviews WHERE attempt_id=?").get(next.id),
+            extraReview,
+          );
+          assert.deepEqual(
+            noExtension.db.prepare("SELECT * FROM turn_checks WHERE attempt_id=?").get(next.id),
+            extraChecks,
+          );
+          assert.equal(noExtension.scopeRevision(repairContract), request.scopeRevision);
+          assert.deepEqual(noExtension.checkCommands(repairContract), existingScopeRequest.checks);
+          await existingScopeEngine.tick();
+          assert.equal(
+            existingScopeSends,
+            2,
+            "only the newly approved successor is delivered once",
+          );
+          assert.equal(noExtension.attempt(secondExtra.id).run_accepted, 1);
+          assert.equal(noExtension.task(taskKey)!.rework, 4);
+          assert.equal(noExtension.db.prepare("SELECT count(*) AS n FROM attempts").get()!.n, 3);
+          assert.throws(
+            () =>
+              noExtension.approveTerminalRepair(taskKey, nextRequest, "replay consumed approval"),
+            /ALREADY_GRANTED/,
+          );
+          noExtension.observe(secondExtra.id, "NEEDS_CONFIRMATION");
+          await assert.rejects(
+            () => existingScopeEngine.continueExisting(taskKey),
+            /ALREADY_CONSUMED/,
+            "a consumed terminal successor cannot use generic continuation",
+          );
+          assert.equal(existingScopeSends, 2);
+          assert.equal(noExtension.db.prepare("SELECT count(*) AS n FROM attempts").get()!.n, 3);
         } finally {
+          writeFileSync(repairFile, originalSource);
           noExtension.close();
         }
         assert.throws(

@@ -167,10 +167,15 @@ delivery blocker. Non-terminal continuations that executed retain
 `{agentId, continued:true}`. Neither result attests task completion.
 
 The old failed attempt, checks, review evidence and rework count remain unchanged.
-The successor receives fresh checks and a distinct independent review request. There
-is no second grant for that task or generic continuation of this extra attempt; an
-unknown send is reconciled through the existing outbox/run acknowledgement gates.
+The successor receives fresh checks and a distinct independent review request.
 Another failure blocks without resetting `maxRework`, counters, budgets or history.
+A further round requires separate explicit authorization and a new operator grant
+bound to that latest failed predecessor. The previous grant must already be
+consumed; an outstanding grant cannot be replaced, and the same or a stale
+predecessor cannot be approved again. Each grant permits exactly one successor;
+without a fresh matching grant, an extra attempt has no automatic rework or generic
+continuation. An unknown send is reconciled through the existing outbox/run
+acknowledgement gates.
 This path does not reload closed agents, change check timeouts, ignore job children,
 or reinterpret exit 124 as success. An operator must first reopen the same existing
 agent through the supported lifecycle when necessary.
