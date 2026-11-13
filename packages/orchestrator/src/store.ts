@@ -5,6 +5,11 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import type { Config, Contract, RuntimeRoute, ReviewResult } from "./contracts.ts";
 import {
+  assertNoVerificationWork,
+  assertRecoveryFinalization,
+  verificationRecovery,
+} from "./verification-recovery.ts";
+import {
   hash,
   apiTaskReservation,
   contractSchema,
@@ -1180,6 +1185,8 @@ export class Store {
     const { key, route, config, sessionKey, agentId, predecessor } = input;
     if (this.stopped()) throw Error("Dispatch stopped");
     const row = this.task(key);
+    const latest = this.latest(key);
+    assertNoVerificationWork(this, latest?.id);
     if (!row || (predecessor ? row.state !== "BLOCKED" : !["READY", "REWORK"].includes(row.state)))
       throw Error("Task not dispatchable");
     if (row.config_hash !== hash(config)) throw Error("Configuration fingerprint changed");
@@ -1248,6 +1255,7 @@ export class Store {
   }
   beginSend(id: string): boolean {
     return this.transaction(() => {
+      assertNoVerificationWork(this, id);
       if (this.stopped()) return false;
       const a = this.attempt(id);
       if (a.status !== "INTENT") return false;
@@ -1283,6 +1291,8 @@ export class Store {
     usage: unknown = null,
   ): void {
     this.transaction(() => {
+      if (verificationRecovery(this, id) && !["VERIFY", "NEEDS_CONFIRMATION"].includes(status))
+        throw Error("VERIFICATION_RECOVERY_WAIT");
       const a = this.attempt(id);
       if (
         !liveStates.includes(a.status) &&
@@ -1358,6 +1368,7 @@ export class Store {
     review?: ContinuationReviewBinding,
   ): void {
     this.transaction(() => {
+      assertNoVerificationWork(this, id);
       const humanCheckpoint = authorize();
       const a = this.attempt(id),
         c: Contract = JSON.parse(this.task(a.task_key)!.contract_json);
@@ -1403,6 +1414,7 @@ export class Store {
   }
   failConfirmed(id: string, reason: string, until: number | null, retryable: boolean): void {
     this.transaction(() => {
+      if (verificationRecovery(this, id)) throw Error("VERIFICATION_RECOVERY_WAIT");
       const a = this.attempt(id);
       if (!liveStates.includes(a.status)) throw Error("Attempt already terminal");
       const c: Contract = JSON.parse(this.task(a.task_key)!.contract_json);
@@ -1434,12 +1446,14 @@ export class Store {
     evidence: unknown,
     maxRework: number,
     release = true,
+    authorize?: (contracts: readonly Contract[]) => void,
   ): void {
     this.transaction(() => {
       const a = this.attempt(id);
       if (a.status !== "VERIFY") throw Error("Verification requires confirmed finished agent");
       const task = this.task(a.task_key)!;
       const contract: Contract = JSON.parse(task.contract_json);
+      assertRecoveryFinalization(this, id, ok, Boolean(authorize));
       if (this.db.prepare("SELECT 1 FROM check_locks WHERE worktree=?").get(contract.worktree))
         throw Error("Verification processes still owned or unknown");
       if (!ok && contract.workspace && contract.mutation) {
@@ -1448,7 +1462,10 @@ export class Store {
           WHERE a.status='VERIFY'`)
           .all() as unknown as (TaskRow & { attempt_id: string; fence: number })[];
         const cohort = peers.filter((peer) => sameCohort(contract, JSON.parse(peer.contract_json)));
+        for (const peer of cohort)
+          assertRecoveryFinalization(this, peer.attempt_id, false, Boolean(authorize));
         const round = Math.max(...cohort.map((peer) => peer.rework)) + 1;
+        authorize?.(cohort.map((peer) => JSON.parse(peer.contract_json) as Contract));
         for (const peer of cohort) {
           // One failed combined revision is one repair round for every member,
           // rather than serially charging healthy peers for the same failure.
@@ -1473,6 +1490,7 @@ export class Store {
         }
         return;
       }
+      authorize?.([contract]);
       this.db
         .prepare("INSERT INTO reviews VALUES(?,?,?)")
         .run(id, diffHash, JSON.stringify(evidence));

@@ -25,12 +25,24 @@ import { readFileSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { CurrentPaseoCompletion, type CompletionCapability } from "./completion.ts";
 import { Decisions, type DecisionSelector } from "./decisions.ts";
-import { assertTaskAssessment, hasAuditedOwnerApproval } from "./intake.ts";
+import { assertTaskAssessment, hasAuditedOwnerApproval, observeOperatorWake } from "./intake.ts";
 import { taskDispatchAllowed } from "./automation.ts";
 import { appRoot } from "./settings-files.ts";
 import { z } from "zod";
 import { isClaudeProvider } from "../paseo-plugin/shared/providers.ts";
 import type { ContinuationResult } from "../paseo-plugin/shared/continuation.ts";
+import {
+  verificationRecoveryRequestSchema,
+  verificationRecovery,
+  prepareVerificationRecovery,
+  assertVerificationRecoveryEvidence,
+  verificationRecoveryClaimHash,
+  recordVerificationRecovery,
+  type VerificationRecoveryMarker,
+} from "./verification-recovery.ts";
+import { recordOperatorWakeOrigin } from "./intake-identity.ts";
+import type { PaseoApi } from "@getpaseo/client";
+import type { VerificationRecoveryResult } from "./verification-recovery.ts";
 
 type AmendmentAdmissionResult =
   | { state: "READY"; key: string }
@@ -102,6 +114,7 @@ const taskCheckpointSchema = z.strictObject({
 type TaskCheckpoint = z.infer<typeof taskCheckpointSchema>;
 
 export class Engine {
+  private recoveryFinishProof: string | undefined;
   readonly store: Store;
   readonly config: Config;
   readonly provider: Provider;
@@ -638,6 +651,9 @@ export class Engine {
     const e = this.context(key);
     if (e !== this) return e.plan(key, allowDecisions);
     const c = this.contract(key);
+    const existing = this.store.latest(key);
+    if (existing && verificationRecovery(this.store, existing.id))
+      return { action: "wait", reason: "verification-only-recovery" };
     assertTaskAssessment(this.store, this.config, c);
     if (this.store.stopped()) return { action: "wait", reason: "dispatch-stopped" };
     if (!this.canDispatch(key)) return { action: "wait", reason: "automatic-routing-paused" };
@@ -1067,6 +1083,7 @@ export class Engine {
     return this.deliver(a.id);
   }
   async deliver(id: string): Promise<Attempt> {
+    if (verificationRecovery(this.store, id)) throw Error("VERIFICATION_RECOVERY_NO_NEW_WORK");
     const a = this.store.attempt(id);
     const e = this.context(a.task_key);
     if (e !== this) return e.deliver(id);
@@ -1077,16 +1094,17 @@ export class Engine {
     await this.provider.authorize(route, c.worktree);
     assertTaskAssessment(this.store, this.config, c);
     if (!this.canDispatch(a.task_key)) return this.store.attempt(id);
+    if (a.agent_id) {
+      const before = await this.observed(await this.provider.refresh(a.agent_id));
+      if (!before || (await this.completion.assess(before)).state !== "VERIFY")
+        throw Error("Session not idle");
+      this.validateSnapshot(c, route, before);
+      assertTaskAssessment(this.store, this.config, c);
+      this.assertTerminalRepairDelivery(a, before);
+    }
+    if (!this.canDispatch(a.task_key) || !this.store.beginSend(id)) return this.store.attempt(id);
     try {
       if (a.agent_id) {
-        const before = await this.observed(await this.provider.refresh(a.agent_id));
-        if (!before || (await this.completion.assess(before)).state !== "VERIFY")
-          throw Error("Session not idle");
-        this.validateSnapshot(c, route, before);
-        assertTaskAssessment(this.store, this.config, c);
-        this.assertTerminalRepairDelivery(a, before);
-        if (!this.canDispatch(a.task_key) || !this.store.beginSend(id))
-          return this.store.attempt(id);
         if (route.provider === "pi") {
           if (!this.provider.rebindSession) throw Error("Pi budget rebind unavailable");
           await this.provider.rebindSession(
@@ -1113,9 +1131,6 @@ export class Engine {
         this.store.db.prepare("UPDATE attempts SET run_accepted=1 WHERE id=?").run(id);
         await this.acceptSnapshot(id, result);
       } else {
-        if (!this.canDispatch(a.task_key) || !this.store.beginSend(id))
-          return this.store.attempt(id);
-        assertTaskAssessment(this.store, this.config, c);
         const agentId = await this.provider.create(
           route,
           { ...c, allowedPaths: this.store.scopePaths(c), checks: this.store.checkCommands(c) },
@@ -1149,6 +1164,22 @@ export class Engine {
       c = this.contract(a.task_key),
       r: RuntimeRoute = JSON.parse(a.route_json);
     if (a.agent_id !== s.id) throw Error("Agent binding mismatch");
+    const recovery = verificationRecovery(this.store, id);
+    if (recovery) {
+      try {
+        if (s.nativeSessionId !== recovery.request.nativeSessionId)
+          throw Error("VERIFICATION_RECOVERY_SESSION_CHANGED");
+        this.recoveryBindings(id);
+        await this.recoveryProcesses(recovery);
+        this.recoveryBindings(id);
+        this.store.observe(id, "VERIFY");
+        this.runVerification(id);
+      } catch (error) {
+        this.store.observe(id, "NEEDS_CONFIRMATION");
+        throw error;
+      }
+      return;
+    }
     this.validateSnapshot(c, r, s);
     if (
       r.access === "openai-api" &&
@@ -1306,6 +1337,7 @@ export class Engine {
     }
   }
   private runVerification(id: string, fresh = false) {
+    const recovery = this.recoveryBindings(id);
     const a = this.store.attempt(id),
       c = this.contract(a.task_key),
       before = this.git.snapshot(c);
@@ -1316,6 +1348,7 @@ export class Engine {
       ? (JSON.parse(cached.result_json) as ReturnType<Engine["checkTree"]>)
       : undefined;
     const claimed = this.store.transaction(() => {
+      if (recovery) this.recoveryBindings(id);
       const current = this.store.attempt(id);
       if (
         !["TURN_COMPLETE", "VERIFY"].includes(current.status) ||
@@ -1328,12 +1361,13 @@ export class Engine {
       if (this.store.db.prepare("SELECT 1 FROM check_locks WHERE worktree=?").get(c.worktree))
         return "occupied";
       if (
-        !fresh &&
+        (!fresh || recovery) &&
         cached?.diff_hash === before.diffHash &&
         old?.build.quiescent &&
         old.test.quiescent
       )
         return "cached";
+      if (recovery) throw Error("VERIFICATION_RECOVERY_CHECKS_WAIT");
       this.store.db.prepare("INSERT INTO check_locks VALUES(?,?)").run(c.worktree, id);
       return "claimed";
     });
@@ -1388,7 +1422,9 @@ export class Engine {
       e = this.context(a.task_key);
     if (e !== this) return e.advance(id);
     if (a.status !== "VERIFY") return;
+    this.recoveryBindings(id);
     const c = this.contract(a.task_key);
+    this.assertVerificationAuthority([c]);
     if (c.role === "planner") {
       const checks = this.runVerification(id),
         s = await this.provider.wait(a.agent_id!);
@@ -1408,6 +1444,8 @@ export class Engine {
         checks.diffHash,
         { stage: "planning", plan: plan.success ? plan.data : null, checks },
         this.config.maxRework,
+        true,
+        (contracts) => this.assertFinalizationAuthority(contracts),
       );
       return;
     }
@@ -1449,6 +1487,8 @@ export class Engine {
           controllerFindings: reviewResult.data.findings ?? [],
         },
         this.config.maxRework,
+        true,
+        (contracts) => this.assertFinalizationAuthority(contracts),
       );
       return;
     }
@@ -1483,7 +1523,7 @@ export class Engine {
     } catch (error) {
       if (!lstatSync(artifact).isFile() || readFileSync(artifact, "utf8") !== contents) throw error;
     }
-    this.verify(id, {
+    await this.verifyObservedRevision(id, {
       diffHash: current.diffHash,
       reviewedDiffHash: row.diff_hash,
       implementationAgentId: a.agent_id,
@@ -1500,6 +1540,146 @@ export class Engine {
       unresolvedIssues: 0,
       artifacts: [artifact],
     });
+  }
+  private recoveryBindings(id: string): VerificationRecoveryMarker | undefined {
+    const marker = verificationRecovery(this.store, id);
+    if (!marker) return;
+    assertVerificationRecoveryEvidence(this.store, marker);
+    const snapshot = this.git.snapshot(this.contract(marker.taskKey));
+    if (
+      snapshot.diffHash !== marker.request.diffHash ||
+      snapshot.scopeViolations ||
+      snapshot.diffCheckExit
+    )
+      throw Error("VERIFICATION_RECOVERY_DIFF_CHANGED");
+    if (
+      this.store.stopped() ||
+      !this.config.liveDispatchApproved ||
+      !this.canDispatch(marker.taskKey)
+    )
+      throw Error("VERIFICATION_RECOVERY_AUTHORITY_WAIT");
+    return marker;
+  }
+  private async recoveryProcesses(marker: VerificationRecoveryMarker): Promise<void> {
+    const r = marker.request,
+      c = this.contract(marker.taskKey);
+    const review = this.store.db
+      .prepare("SELECT route_json FROM review_runs WHERE attempt_id=?")
+      .get(r.attemptId)!;
+    const identities = [
+      {
+        id: r.agentId,
+        nativeId: r.nativeSessionId,
+        contract: c,
+        route: JSON.parse(this.store.attempt(r.attemptId).route_json),
+      },
+      {
+        id: r.reviewerId,
+        nativeId: r.reviewerNativeSessionId,
+        contract: this.reviewerContract(c, r.agentId, r.diffHash),
+        route: JSON.parse(String(review.route_json)),
+      },
+    ];
+    for (const identity of identities) {
+      const snapshot = await this.observed(await this.provider.refresh(identity.id));
+      if (
+        !snapshot ||
+        snapshot.id !== identity.id ||
+        snapshot.status !== "idle" ||
+        snapshot.nativeSessionId !== identity.nativeId ||
+        !snapshot.turnComplete ||
+        snapshot.foregroundActive ||
+        (await this.completion.assess(snapshot)).state !== "VERIFY"
+      )
+        throw Error("VERIFICATION_RECOVERY_PROCESSES_WAIT");
+      this.validateSnapshot(identity.contract, identity.route, snapshot);
+    }
+    for (const identity of identities)
+      if (this.provider.nativeSessionId?.(identity.id) !== identity.nativeId)
+        throw Error("VERIFICATION_RECOVERY_SESSION_CHANGED");
+    assertVerificationRecoveryEvidence(this.store, marker);
+    if (this.git.snapshot(c).diffHash !== r.diffHash)
+      throw Error("VERIFICATION_RECOVERY_DIFF_CHANGED");
+  }
+  async recoverVerification(
+    key: string,
+    input: unknown,
+    operator: { reason: string; paseo: PaseoApi },
+  ): Promise<VerificationRecoveryResult> {
+    const { reason, paseo } = operator;
+    const context = this.context(key);
+    if (context !== this) return context.recoverVerification(key, input, operator);
+    const request = verificationRecoveryRequestSchema.parse(input);
+    const previous = verificationRecovery(this.store, request.attemptId);
+    if (previous) {
+      if (
+        previous.taskKey !== key ||
+        hash(previous.request) !== hash(request) ||
+        previous.reason !== reason
+      )
+        throw Error("VERIFICATION_RECOVERY_REPLAY_CONFLICT");
+      assertVerificationRecoveryEvidence(this.store, previous);
+      if (this.git.snapshot(this.contract(key)).diffHash !== request.diffHash)
+        throw Error("VERIFICATION_RECOVERY_DIFF_CHANGED");
+      return { recoveryId: hash(previous), attemptId: request.attemptId, replayed: true };
+    }
+    if (this.store.stopped() || !this.config.liveDispatchApproved)
+      throw Error("VERIFICATION_RECOVERY_AUTHORITY_WAIT");
+    const marker = prepareVerificationRecovery(this.store, key, request, reason);
+    const expected = verificationRecoveryClaimHash(this.store, marker);
+    await this.provider.refresh(request.origin.mainAgentId);
+    await this.recoveryProcesses(marker);
+    await observeOperatorWake(this.store, paseo, request.origin);
+    if (
+      this.provider.nativeSessionId?.(request.origin.mainAgentId) !== request.origin.sessionId ||
+      this.provider.nativeSessionId?.(request.agentId) !== request.nativeSessionId ||
+      this.provider.nativeSessionId?.(request.reviewerId) !== request.reviewerNativeSessionId
+    )
+      throw Error("VERIFICATION_RECOVERY_MAIN_CHANGED");
+    this.store.transaction(() => {
+      if (verificationRecovery(this.store, request.attemptId))
+        throw Error("VERIFICATION_RECOVERY_REPLAY_CONFLICT");
+      if (
+        verificationRecoveryClaimHash(this.store, marker) !== expected ||
+        hash(prepareVerificationRecovery(this.store, key, request, reason)) !== hash(marker)
+      )
+        throw Error("VERIFICATION_RECOVERY_CLAIM_CHANGED");
+      recordOperatorWakeOrigin(this.store, request.origin, reason);
+      this.assertVerificationAuthority([this.contract(key)]);
+      if (!this.canDispatch(key)) throw Error("VERIFICATION_RECOVERY_AUTHORITY_WAIT");
+      const original = this.store.db
+        .prepare("SELECT evidence_json FROM reviews WHERE attempt_id=?")
+        .get(request.attemptId)!;
+      this.store.event(
+        `VERIFICATION_RECOVERY_ARCHIVE:${JSON.stringify({
+          evidenceJson: original.evidence_json,
+          sha256: request.finalEvidenceSha256,
+          previous: {
+            taskState: "BLOCKED",
+            attemptState: "FAILED",
+            rework: request.rework,
+            fence: request.fence,
+            leaseState: "RELEASED",
+          },
+        })}`,
+        request.attemptId,
+      );
+      this.store.db.prepare("DELETE FROM reviews WHERE attempt_id=?").run(request.attemptId);
+      this.store.db
+        .prepare("UPDATE attempts SET status='VERIFY' WHERE id=?")
+        .run(request.attemptId);
+      this.store.db.prepare("UPDATE tasks SET state='VERIFY' WHERE key=?").run(key);
+      const leaseChanged = this.store.db
+        .prepare(
+          "UPDATE leases SET state='HELD',heartbeat_ms=? WHERE worktree=? AND attempt_id=? AND fence=? AND state='RELEASED'",
+        )
+        .run(Date.now(), marker.leaseResource, request.attemptId, request.fence).changes;
+      if (leaseChanged !== 1) throw Error("VERIFICATION_RECOVERY_LEASE_CHANGED");
+      if (this.store.verificationBlocked(this.contract(key), request.attemptId))
+        throw Error("VERIFICATION_RECOVERY_PEERS_CHANGED");
+      recordVerificationRecovery(this.store, marker);
+    });
+    return { recoveryId: hash(marker), attemptId: request.attemptId, replayed: false };
   }
   private recordReview(id: string, state: string, result: string | null): void {
     this.store.transaction(() => {
@@ -1625,6 +1805,8 @@ export class Engine {
         snapshot.diffHash,
         { phase: "pre-review", build, test, scopeViolations: snapshot.scopeViolations, changed },
         snapshot.scopeViolations ? 0 : this.config.maxRework,
+        true,
+        (contracts) => this.assertFinalizationAuthority(contracts),
       );
       throw Error("Build, tests and scope must pass before review");
     }
@@ -1742,6 +1924,12 @@ export class Engine {
     const a = this.store.attempt(id),
       c = this.contract(a.task_key);
     if (a.status !== "VERIFY") throw Error("Implementation must be quiescent");
+    const recovery = this.recoveryBindings(id);
+    if (recovery) {
+      await this.recoveryProcesses(recovery);
+      this.recoveryBindings(id);
+      return { state: "DONE", agentId: recovery.request.reviewerId };
+    }
     if (this.store.verificationBlocked(c, id)) return { state: "WAITING_PEERS", agentId: null };
     if (this.store.db.prepare("SELECT 1 FROM check_locks WHERE worktree=?").get(c.worktree)) {
       this.store.observe(id, "NEEDS_CONFIRMATION");
@@ -1889,6 +2077,49 @@ export class Engine {
       .get(id) as unknown as ReviewRunRow;
     return { state: row.state, agentId: row.agent_id };
   }
+  private assertVerificationAuthority(contracts: readonly Contract[]): void {
+    for (const contract of contracts) {
+      const task = this.store.task(`${contract.workflowId}/${contract.taskId}/${contract.role}`);
+      if (!task) throw Error("Verification task missing");
+      const config = configSchema.parse(JSON.parse(task.config_json));
+      assertTaskAssessment(this.store, config, contract);
+      if (
+        config.orchestrationVersion === 3 &&
+        contract.mutation &&
+        contract.highRisk &&
+        !hasAuditedOwnerApproval(this.store, contract)
+      )
+        throw Error("VERIFICATION_OWNER_APPROVAL_REQUIRED");
+    }
+  }
+  private async verifyObservedRevision(id: string, input: unknown) {
+    const recovery = this.recoveryBindings(id);
+    if (recovery) await this.recoveryProcesses(recovery);
+    this.recoveryFinishProof = recovery ? id : undefined;
+    try {
+      return this.verify(id, input);
+    } finally {
+      this.recoveryFinishProof = undefined;
+    }
+  }
+  private assertFinalizationAuthority(contracts: readonly Contract[]): void {
+    this.assertVerificationAuthority(contracts);
+    for (const contract of contracts) {
+      const key = `${contract.workflowId}/${contract.taskId}/${contract.role}`;
+      const attempt = this.store.latest(key);
+      if (!attempt) continue;
+      const marker = this.recoveryBindings(attempt.id);
+      if (!marker) continue;
+      if (
+        this.recoveryFinishProof !== attempt.id ||
+        this.provider.nativeSessionId?.(marker.request.agentId) !==
+          marker.request.nativeSessionId ||
+        this.provider.nativeSessionId?.(marker.request.reviewerId) !==
+          marker.request.reviewerNativeSessionId
+      )
+        throw Error("VERIFICATION_RECOVERY_PROCESSES_WAIT");
+    }
+  }
   verify(id: string, input: unknown): { ok: boolean; reasons: string[] } {
     const context = this.context(this.store.attempt(id).task_key);
     if (context !== this) return context.verify(id, input);
@@ -1896,6 +2127,9 @@ export class Engine {
       a = this.store.attempt(id),
       c = this.contract(a.task_key);
     if (a.status !== "VERIFY") throw Error("Agent is not confirmed quiescent");
+    if (this.recoveryBindings(id) && this.recoveryFinishProof !== id)
+      throw Error("VERIFICATION_RECOVERY_PROCESSES_WAIT");
+    this.assertVerificationAuthority([c]);
     if (e.implementationAgentId !== a.agent_id || e.reviewerAgentId === a.agent_id)
       throw Error("Independent reviewer identity required");
     const review = this.store.db
@@ -1942,6 +2176,8 @@ export class Engine {
       after.diffHash,
       { ...e, reviewResult: result, artifacts, checks: { build, test }, reasons: v.reasons },
       this.config.maxRework,
+      true,
+      (contracts) => this.assertFinalizationAuthority(contracts),
     );
     return v;
   }

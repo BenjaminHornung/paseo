@@ -1,11 +1,13 @@
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi, PaseoAgent, PaseoAgentHandle } from "@getpaseo/client";
 import { canonicalPath, hash } from "./contracts.ts";
 import type { Store } from "./store.ts";
 import type { IntakeFacts } from "./assessments.ts";
 import { observedTimeline } from "./timeline.ts";
+import { operatorWakeBindingSchema, type OperatorWakeBinding } from "./verification-recovery.ts";
 
 interface Entry {
   timestamp?: string;
+  providerMessageId?: string;
   item: { type: string; text?: string; messageId?: string; clientMessageId?: string };
 }
 export interface IntakeIdentity {
@@ -28,6 +30,30 @@ interface InternalMessageOrigin {
   identity: IntakeIdentity;
   directory: string;
   kind: InternalMessageKind;
+  provenance?: "operator";
+}
+const operatorOriginPrefix = "OPERATOR_INTERNAL_ORIGIN:";
+export async function assertOperatorMainIdle(
+  handle: PaseoAgentHandle,
+  binding: OperatorWakeBinding,
+): Promise<void> {
+  assertOperatorMainSnapshot((await handle.refresh())?.agent, binding);
+}
+export function assertOperatorMainSnapshot(
+  agent: PaseoAgent | null | undefined,
+  binding: OperatorWakeBinding,
+): void {
+  if (
+    !agent ||
+    agent.id !== binding.mainAgentId ||
+    agent.status !== "idle" ||
+    agent.activeTurn ||
+    agent.pendingPermissions?.length ||
+    agent.runtimeInfo?.sessionId !== binding.sessionId ||
+    canonicalPath(agent.cwd) !== canonicalPath(binding.directory) ||
+    agent.provider.split("/")[0] !== "codex"
+  )
+    throw Error("VERIFICATION_RECOVERY_MAIN_CHANGED");
 }
 const nativeId = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const operatorAdvisorPrefix = "operator-readonly-advisor:";
@@ -252,12 +278,111 @@ export function provenInternalMessages(store: Store, agentId: string): InternalM
   const rows = store.db
     .prepare("SELECT kind FROM events WHERE substr(kind,1,?)=?")
     .all(internalOriginPrefix.length, internalOriginPrefix) as { kind: string }[];
-  return rows.flatMap(({ kind }) => {
+  const native = rows.flatMap(({ kind }) => {
     const origin = JSON.parse(kind.slice(internalOriginPrefix.length)) as InternalMessageOrigin;
     if (origin.identity.agentId !== agentId) return [];
     assertInternalOrigin(store, origin);
     return [origin];
   });
+  const operator = store.db
+    .prepare("SELECT kind FROM events WHERE substr(kind,1,?)=?")
+    .all(operatorOriginPrefix.length, operatorOriginPrefix) as { kind: string }[];
+  for (const row of operator) {
+    const { binding } = JSON.parse(row.kind.slice(operatorOriginPrefix.length));
+    if (binding.mainAgentId !== agentId) continue;
+    native.push(validateOperatorWakeOrigin(store, operatorWakeBindingSchema.parse(binding)));
+  }
+  const aliases = new Map<string, InternalMessageOrigin>();
+  for (const origin of native) {
+    const key = hash([origin.identity.sessionId, origin.identity.nativeMessageId]);
+    const previous = aliases.get(key);
+    if (
+      previous &&
+      (previous.identity.messageId !== origin.identity.messageId ||
+        previous.identity.textHash !== origin.identity.textHash ||
+        previous.directory !== origin.directory)
+    )
+      throw Error("INTAKE_INTERNAL_ORIGIN_CONFLICT");
+    aliases.set(key, origin);
+  }
+  return native;
+}
+
+export function validateOperatorWakeOrigin(
+  store: Store,
+  binding: OperatorWakeBinding,
+): InternalMessageOrigin {
+  const identity = intakeIdentities(store, binding.mainAgentId, binding.sessionId).find(
+    (item) => item.messageId === binding.receiptId,
+  );
+  const row = store.db
+    .prepare("SELECT * FROM assessments WHERE id=? AND kind='intake'")
+    .get(binding.assessmentId);
+  if (
+    !identity ||
+    !row ||
+    row.owner_id !== binding.mainAgentId ||
+    row.facts_hash !== binding.factsHash ||
+    identity.textHash !== binding.textHash ||
+    (identity.nativeMessageId && identity.nativeMessageId !== binding.nativeMessageId)
+  )
+    throw Error("OPERATOR_WAKE_BINDING_CHANGED");
+  const facts = JSON.parse(String(row.facts_json)) as IntakeFacts;
+  if (
+    facts.origin !== "unverified" ||
+    facts.messageId !== binding.nativeMessageId ||
+    facts.mainAgentId !== binding.mainAgentId ||
+    hash(facts) !== binding.factsHash ||
+    hash(facts.text) !== binding.textHash ||
+    canonicalPath(facts.directory) !== canonicalPath(binding.directory) ||
+    !nativeId.test(binding.nativeMessageId) ||
+    store.db
+      .prepare("SELECT kind FROM internal_messages WHERE agent_id=? AND message_id=?")
+      .get(binding.mainAgentId, binding.receiptId)?.kind !== "wake"
+  )
+    throw Error("OPERATOR_WAKE_BINDING_CHANGED");
+  const origin: InternalMessageOrigin = {
+    identity: { ...identity, nativeMessageId: binding.nativeMessageId },
+    directory: canonicalPath(binding.directory),
+    kind: "wake",
+    provenance: "operator",
+  };
+  const nativeReceipt = store.db
+    .prepare("SELECT kind FROM internal_messages WHERE agent_id=? AND message_id=?")
+    .get(binding.mainAgentId, binding.nativeMessageId);
+  if (nativeReceipt && nativeReceipt.kind !== "wake")
+    throw Error("INTAKE_INTERNAL_ORIGIN_CONFLICT");
+  assertNoHumanOriginClaim(store, origin);
+  return origin;
+}
+
+export function recordOperatorWakeOrigin(
+  store: Store,
+  binding: OperatorWakeBinding,
+  reason: string,
+): void {
+  validateOperatorWakeOrigin(store, binding);
+  const checkpoint = store.db
+    .prepare("SELECT work_intake_id FROM main_checkpoints WHERE agent_id=?")
+    .get(binding.mainAgentId);
+  if (checkpoint?.work_intake_id !== binding.workIntakeId)
+    throw Error("OPERATOR_WAKE_WORK_CHANGED");
+  const existing = store.db
+    .prepare("SELECT kind FROM events WHERE substr(kind,1,?)=?")
+    .all(operatorOriginPrefix.length, operatorOriginPrefix) as { kind: string }[];
+  for (const row of existing) {
+    const old = JSON.parse(row.kind.slice(operatorOriginPrefix.length));
+    if (
+      old.binding.mainAgentId !== binding.mainAgentId ||
+      ![old.binding.receiptId, old.binding.nativeMessageId].some((id: string) =>
+        [binding.receiptId, binding.nativeMessageId].includes(id),
+      )
+    )
+      continue;
+    if (hash(old) !== hash({ binding, reason })) throw Error("OPERATOR_WAKE_BINDING_CONFLICT");
+    return;
+  }
+  store.event(`${operatorOriginPrefix}${JSON.stringify({ binding, reason })}`);
 }
 
 export function isProvenInternalIntake(store: Store, assessmentId: string): boolean {
@@ -455,6 +580,29 @@ export async function bindLegacyIntakeIdentity(
   });
 }
 
+// Resolve an observed transport alias; receipts and session checks still prove origin.
+function resolveObservedNativeEntry<T extends Entry>(entry: T, identities: IntakeIdentity[]): T {
+  const item = entry.item;
+  if (item.type !== "user_message" || entry.providerMessageId === undefined) return entry;
+  if (!nativeId.test(entry.providerMessageId)) return entry;
+  if (!item.clientMessageId && item.messageId === entry.providerMessageId) return entry;
+  const clientMessageId = item.clientMessageId ?? item.messageId;
+  if (
+    !clientMessageId ||
+    typeof item.text !== "string" ||
+    (item.messageId !== clientMessageId && item.messageId !== entry.providerMessageId)
+  )
+    throw Error("INTAKE_MESSAGE_IDENTITY_AMBIGUOUS");
+  const identity = identities.find((candidate) => candidate.messageId === clientMessageId);
+  if (
+    identity &&
+    (identity.textHash !== hash(item.text) ||
+      (identity.nativeMessageId && identity.nativeMessageId !== entry.providerMessageId))
+  )
+    throw Error("INTAKE_MESSAGE_IDENTITY_AMBIGUOUS");
+  return { ...entry, item: { ...item, clientMessageId, messageId: entry.providerMessageId } };
+}
+
 // Message IDs can change when Paseo rehydrates a Codex session. A native ID is
 // preferred; a first rehydration also needs the saved timestamp AND content hash,
 // the same native session and a complete, unambiguous history. Text alone never
@@ -464,9 +612,19 @@ export function resolveIntakeIdentities<T extends Entry>(
   identities: IntakeIdentity[],
   fullHistory: boolean,
 ): T[] {
+  const observed = entries.map((entry) => resolveObservedNativeEntry(entry, identities));
+  const nativeIds = new Set<string>();
+  const clientIds = new Set<string>();
+  for (const { item } of observed) {
+    if (item.type !== "user_message" || !item.clientMessageId || !item.messageId) continue;
+    if (nativeIds.has(item.messageId) || clientIds.has(item.clientMessageId))
+      throw Error("INTAKE_MESSAGE_IDENTITY_AMBIGUOUS");
+    nativeIds.add(item.messageId);
+    clientIds.add(item.clientMessageId);
+  }
   const resolved = new Map<T, string>();
   for (const identity of identities) {
-    const candidates = entries.filter((entry) => {
+    const candidates = observed.filter((entry) => {
       const item = entry.item;
       if (
         item.type !== "user_message" ||
@@ -492,9 +650,10 @@ export function resolveIntakeIdentities<T extends Entry>(
       throw Error("INTAKE_MESSAGE_IDENTITY_AMBIGUOUS");
     resolved.set(candidates[0], identity.messageId);
   }
-  return entries.map((entry) =>
-    resolved.has(entry)
-      ? { ...entry, item: { ...entry.item, clientMessageId: resolved.get(entry) } }
-      : entry,
-  );
+  const result: T[] = [];
+  for (const entry of observed) {
+    const clientMessageId = resolved.get(entry);
+    result.push(clientMessageId ? { ...entry, item: { ...entry.item, clientMessageId } } : entry);
+  }
+  return result;
 }

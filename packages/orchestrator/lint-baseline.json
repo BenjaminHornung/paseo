@@ -2,6 +2,8 @@
   "description": "Reviewed controller import/integration source debt; all rules remain active and new diagnostics fail.",
   "originCandidate": "80c9ef3a278d8be4fea59ce9b79cc9ab37a71075df0ce60f59b9aad350da9390",
   "dispositions": {
+    "verificationOnlyRecovery": "Five inherited fingerprints only: captureHumanIntake 95 to 96 for separately audited operator provenance without native-echo synthesis; plan 46 to 48 for durable no-new-work admission; acceptSnapshot 31 to 34 for verification-only process waits; advance remains 35 while using the observed finalization helper; review 65 to 66 for immutable DONE/PASS reuse without reviewer restart. All predecessor spans were matched to the immutable A/B-V2 hashes before renewal. New recovery schemas, audit/evidence/eligibility/process/CAS helpers meet normal thresholds. No new entries, rule exceptions or disabled checks.",
+    "prospectiveOriginAndFinalization": "Only two inherited complexity fingerprints are renewed: captureHumanIntake remains 95 after rechecking the native session for every newly observed receipt alias; advance remains 35 after strict task authority admission and transactional finish callbacks. Both predecessor messages and hashes were checked against b997. New observed-alias and finalization-authority helpers meet normal thresholds. No new baseline entries, rule changes or broad exceptions; historical assessments and terminal attempts remain untouched.",
     "style": "Exact complexity, nesting, local shadow names and existing React allocation diagnostics are retained without a behavioral rewrite of the imported controller.",
     "nodeWorkerMessages": "Four targetOrigin diagnostics concern Node worker_threads postMessage, which has no browser targetOrigin argument.",
     "auditAnswerOrder": "One index key displays immutable stateless audit answer rows whose refusal names can be null; no mutable row state is keyed by the index.",
@@ -1101,8 +1103,8 @@
     {
       "file": "packages/orchestrator/src/engine.ts",
       "rule": "eslint(complexity)",
-      "message": "async method `acceptSnapshot` has a complexity of 31. Maximum allowed is 20.",
-      "sourceSha256": "9650807de6929c8ff380edeb0b9f913a237b21608fadff1cf8779025710b6d43",
+      "message": "async method `acceptSnapshot` has a complexity of 34. Maximum allowed is 20.",
+      "sourceSha256": "5c8dab29584ca3569041668fc52c26c3514f45cec8e39328fcf4b8439d23f9e6",
       "count": 1
     },
     {
@@ -1116,7 +1118,7 @@
       "file": "packages/orchestrator/src/engine.ts",
       "rule": "eslint(complexity)",
       "message": "async method `advance` has a complexity of 35. Maximum allowed is 20.",
-      "sourceSha256": "877b88a175ddcfb559d8837d2f67fc2be9372879424c76db5e2825a7f313593d",
+      "sourceSha256": "57410675850ae44f66a93993da34e1de9d0ed01d36a5915359f63fb69d51bba4",
       "count": 1
     },
     {
@@ -1136,15 +1138,15 @@
     {
       "file": "packages/orchestrator/src/engine.ts",
       "rule": "eslint(complexity)",
-      "message": "async method `plan` has a complexity of 46. Maximum allowed is 20.",
-      "sourceSha256": "ea0a603386541e4ec4be46b2c85de22edd71d8cefd8f17c05fed7b22473baa6e",
+      "message": "async method `plan` has a complexity of 48. Maximum allowed is 20.",
+      "sourceSha256": "68937f5e8ddbbc6300fbdd5c02aa1e2a0b6afb70e626aa9280e0e0b2159e3bb0",
       "count": 1
     },
     {
       "file": "packages/orchestrator/src/engine.ts",
       "rule": "eslint(complexity)",
-      "message": "async method `review` has a complexity of 65. Maximum allowed is 20.",
-      "sourceSha256": "f226fb90b4b5e0d77de93b908fbd62ed45835233fb15a43a9869b776bcddc867",
+      "message": "async method `review` has a complexity of 66. Maximum allowed is 20.",
+      "sourceSha256": "a9e2b11845c512315ad1ebf9dcca3339ba6306aea5859854a3dfbb2a6e1a3d6c",
       "count": 1
     },
     {
@@ -1213,8 +1215,8 @@
     {
       "file": "packages/orchestrator/src/intake.ts",
       "rule": "eslint(complexity)",
-      "message": "async function `captureHumanIntake` has a complexity of 95. Maximum allowed is 20.",
-      "sourceSha256": "f3a2b55ae259e778ffe2dd3cd987035ed4b7e15be7ed0baf67cad21adac6a8ec",
+      "message": "async function `captureHumanIntake` has a complexity of 96. Maximum allowed is 20.",
+      "sourceSha256": "4b4c786cb8b7b070a68bb5ee48fdd506866377975883c5ed88edecf6b47fe81c",
       "count": 1
     },
     {

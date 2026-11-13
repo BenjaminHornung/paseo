@@ -8443,6 +8443,7 @@ export class Session {
               const payloadEntry = {
                 provider: snapshot.provider,
                 item: entry.item,
+                providerMessageId: entry.providerMessageId,
                 timestamp: entry.timestamp,
                 seqStart: entry.seqStart,
                 seqEnd: entry.seqEnd,

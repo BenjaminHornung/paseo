@@ -970,6 +970,72 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
         assert.equal(sent, 0, "revoked dispatch authority blocks the pending delivery");
         assert.equal(state.attempt(successor.id).status, "INTENT");
         dispatchAllowed = true;
+        const pendingTask = { ...state.task(taskKey)! };
+        const consumedGrant = state.terminalRepairGrant(taskKey);
+        observedSession = "different-native-session-before-send";
+        await assert.rejects(
+          () => repairEngine.deliver(successor.id),
+          /TERMINAL_REPAIR_DELIVERY_BINDING_CHANGED/,
+        );
+        assert.equal(sent, 0);
+        assert.equal(
+          state.attempt(successor.id).status,
+          "INTENT",
+          "a pre-send session failure must not poison the pending outbox",
+        );
+        assert.equal(state.attempt(successor.id).run_accepted, 0);
+        assert.equal(
+          state.db.prepare("SELECT state FROM outbox WHERE attempt_id=?").get(successor.id)!.state,
+          "PENDING",
+        );
+        assert.equal(state.task(taskKey)!.rework, 3);
+        assert.deepEqual({ ...state.task(taskKey)! }, pendingTask);
+        assert.deepEqual(
+          state.terminalRepairGrant(taskKey),
+          consumedGrant,
+          "a pre-send failure neither regrants nor consumes another exception",
+        );
+        assert.equal(state.db.prepare("SELECT count(*) AS n FROM attempts").get()!.n, 2);
+        assert.equal(
+          state.db
+            .prepare("SELECT count(*) AS n FROM events WHERE attempt_id=? AND kind='SEND_BEGIN'")
+            .get(successor.id)!.n,
+          0,
+        );
+        observedSession = nativeSessionId;
+
+        // Fork the private fixture before send; an ambiguous outcome must never
+        // be reset to pending just to exercise the successful branch below.
+        const uncertainFile = path.join(root, "terminal-uncertain-send.sqlite");
+        await state.backupTo(uncertainFile);
+        const uncertain = new Store(uncertainFile);
+        let unknownSends = 0;
+        try {
+          const uncertainEngine = new Engine(uncertain, repairConfig, {
+            ...repairProvider,
+            run: async () => {
+              unknownSends++;
+              throw Error("fixture-send-outcome-unknown");
+            },
+          });
+          await uncertainEngine.deliver(successor.id);
+          assert.equal(uncertain.attempt(successor.id).status, "NEEDS_CONFIRMATION");
+          assert.equal(
+            uncertain.db.prepare("SELECT state FROM outbox WHERE attempt_id=?").get(successor.id)!
+              .state,
+            "SENDING",
+          );
+          await uncertainEngine.tick();
+          await uncertainEngine.deliver(successor.id);
+          assert.equal(
+            unknownSends,
+            1,
+            "an unknown post-beginSend outcome cannot cause a second send",
+          );
+          assert.equal(uncertain.latest(taskKey)!.id, successor.id);
+        } finally {
+          uncertain.close();
+        }
         await repairEngine.tick();
         assert.equal(sent, 1, "the normal tick delivers the already claimed successor once");
         assert.equal(state.latest(taskKey)!.id, successor.id);

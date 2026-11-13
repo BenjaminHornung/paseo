@@ -32,5 +32,11 @@ export async function observedTimeline(
     entries.unshift(...older.entries);
     page = older;
   }
-  return { ...tail, entries, startCursor: page.startCursor, hasOlder: page.hasOlder };
+  return {
+    ...tail,
+    agent: page.agent,
+    entries,
+    startCursor: page.startCursor,
+    hasOlder: page.hasOlder,
+  };
 }

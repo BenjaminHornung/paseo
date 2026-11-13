@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
-import { configSchema, contractSchema, hash, localPath } from "./contracts.ts";
+import { canonicalPath, configSchema, contractSchema, hash, localPath } from "./contracts.ts";
 import { Store } from "./store.ts";
 import { appRoot, codeRoot } from "./settings-files.ts";
 import { Engine } from "./engine.ts";
@@ -21,6 +21,7 @@ import { bindLegacyIntakeIdentity, rebaseLegacyIntakeCursor } from "./intake-ide
 import { readAutomation } from "./automation.ts";
 import { terminalRepairRequestSchema } from "./terminal-repair.ts";
 import { CurrentPaseoCompletion } from "./completion.ts";
+import { verificationRecoveryRequestSchema } from "./verification-recovery.ts";
 
 async function approveTerminalRepair(
   store: Store,
@@ -60,6 +61,46 @@ async function approveTerminalRepair(
   if (engine.git.snapshot(contract).diffHash !== request.diffHash)
     throw Error("TERMINAL_REPAIR_DIFF_CHANGED");
   return store.approveTerminalRepair(key, request, reason);
+}
+
+async function recoverVerificationCommand(
+  store: Store,
+  provider: PaseoProvider,
+  key: string,
+  file: string,
+  reason: string,
+) {
+  const request = verificationRecoveryRequestSchema.parse(
+    JSON.parse(readFileSync(localPath(file), "utf8")),
+  );
+  const task = store.task(key);
+  if (!task) throw Error("VERIFICATION_RECOVERY_TASK_REQUIRED");
+  const main = readAutomation().mains.find(
+    (item) =>
+      item.agentId === request.origin.mainAgentId &&
+      canonicalPath(item.directory) === canonicalPath(request.origin.directory),
+  );
+  if (!main) throw Error("VERIFICATION_RECOVERY_MAIN_CHANGED");
+  const engine = new Engine(store, configSchema.parse(JSON.parse(task.config_json)), provider);
+  const result = await engine.recoverVerification(key, request, { reason, paseo: provider.client });
+  let waiting: string | undefined;
+  if (!result.replayed) {
+    try {
+      await engine.advance(request.attemptId);
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !/^(?:VERIFICATION_RECOVERY_|INTAKE_|MAIN_INPUT_|CONTINUATION_OWNER_)/.test(error.message)
+      )
+        throw error;
+      waiting = error.message;
+    }
+  }
+  return {
+    ...result,
+    state: store.attempt(request.attemptId).status,
+    ...(waiting ? { waiting } : {}),
+  };
 }
 
 const root = appRoot;
@@ -231,9 +272,13 @@ try {
     print(await e.plan(key));
   } else {
     const mutating =
-      ["intake-bind", "scope-approve", "checks-approve", "terminal-repair-approve"].includes(
-        command,
-      ) ||
+      [
+        "intake-bind",
+        "scope-approve",
+        "checks-approve",
+        "terminal-repair-approve",
+        "verification-recover",
+      ].includes(command) ||
       (command === "workflow" &&
         [
           "add",
@@ -251,7 +296,22 @@ try {
       print({ state: "not-initialized", entries: [] });
     } else {
       store = new Store(stateFile);
-      if (command === "terminal-repair-approve" && subcommand && argument && process.argv[5]) {
+      if (command === "verification-recover" && subcommand && argument && process.argv[5]) {
+        print(
+          await recoverVerificationCommand(
+            store,
+            await connection(),
+            subcommand,
+            argument,
+            process.argv[5],
+          ),
+        );
+      } else if (
+        command === "terminal-repair-approve" &&
+        subcommand &&
+        argument &&
+        process.argv[5]
+      ) {
         print({
           approved: true,
           grantId: await approveTerminalRepair(

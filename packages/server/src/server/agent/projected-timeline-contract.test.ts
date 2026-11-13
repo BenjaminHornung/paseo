@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { expect, test } from "vitest";
 import pino from "pino";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
+import { createPaseoApi } from "@getpaseo/client";
 import { createDaemonTestContext } from "../test-utils/daemon-test-context.js";
 import { DaemonClient } from "../test-utils/daemon-client.js";
 import { createMessageCollector } from "../test-utils/message-collector.js";
@@ -49,7 +50,33 @@ test("projects Codex child history and confines old-client degradation to the ch
       cwd,
       title: "Projected contract",
     });
+    const clientMessageId = "submitted-controller-wake";
+    const nativeMessageId = "11111111-1111-7111-8111-111111111111";
+    await ctx.client.sendAgentMessage(agent.id, "Controlled internal wake", {
+      messageId: clientMessageId,
+    });
     app.startsTurn({ threadId: "thread-1" });
+    app.child.stdout.write(
+      JSON.stringify({
+        method: "item/started",
+        params: {
+          threadId: "thread-1",
+          item: {
+            type: "userMessage",
+            id: nativeMessageId,
+            content: [{ type: "text", text: "Controlled internal wake" }],
+          },
+        },
+      }) + "\n",
+    );
+    const handle = createPaseoApi(ctx.client).agents.ref(agent.id);
+    await expect
+      .poll(async () => {
+        const timeline = await handle.timeline.refetch();
+        return timeline.entries.find((entry) => entry.item.type === "user_message")
+          ?.providerMessageId;
+      })
+      .toBe(nativeMessageId);
     app.startsSubAgent({ callId: "spawn-child", threadId: "child-thread", agentPath: "child" });
     for (const delta of ["A", "B", "C"]) {
       app.child.stdout.write(
@@ -99,7 +126,7 @@ test("projects Codex child history and confines old-client degradation to the ch
     const root = await legacy.fetchAgentTimeline(agent.id, { projection: "canonical", limit: 0 });
     expect(root.error).toBeNull();
     expect(root.projection).toBe("projected");
-    expect(root.entries).toHaveLength(1);
+    expect(root.entries).toHaveLength(2);
     expect((await legacy.buildAgentForkContext(agent.id)).attachment.text).toContain(
       "[Child] child",
     );

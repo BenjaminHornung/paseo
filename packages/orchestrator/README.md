@@ -82,6 +82,10 @@ or substitutes for final independent review and any required visual acceptance.
 
 After native history replay, controller-owned activation, wake and reminder messages
 retain their internal origin through the existing receipt/session/message identity audit.
+While a submitted prompt and its native echo are both observed, the public timeline's
+optional `providerMessageId` preserves their exact correlation in that audit before
+checkpoint slicing. This prospective proof survives native-only replay even when the
+echo timestamp differs; it does not infer an unobserved historical alias.
 If the first native alias is missing, capture reads complete history for the strict,
 unique content-hash and timestamp match before classifying new input. Only unresolved
 internal identities relevant to the checkpoint, an unverified intake/open pending binding,
@@ -96,7 +100,33 @@ Observe-only recovery waits when an implementation is not VERIFY; it does not re
 a closed worker, attest its processes or accept its review. Reopening the same existing
 agent uses the normal public reload path with fresh identity and safety checks.
 
+Finalization checks current task authority before evaluating quality and again inside
+the finish transaction, including every affected cohort contract. Uninterpreted new
+input or missing task-specific owner approval pauses the existing revision without
+changing its verdict, repair counter or lease. After legitimate clarification, the
+same revision can finish normally; this does not reopen previously failed attempts.
+
 An exhausted task (`BLOCKED`, latest attempt `FAILED`) cannot be resumed by an agent.
+An explicitly authorized historical approval-only finalization failure can instead use
+the operator-only command `verification-recover <task-key> <request.json> <reason>`.
+The strict request schema is `src/verification-recovery.ts`. It binds the attempt/fence,
+original work intake, receipt and native message/session, contract/config, diff,
+scope/check revisions and exact cached check/review/final-verdict hashes. Raw JSON
+hashes use SHA-256 of the unchanged stored strings; `reviewRunSha256` hashes
+`JSON.stringify` of the complete `SELECT * FROM review_runs` row. `checkBindingHash`
+uses the existing canonical hash of `Store.checkCommandBinding(contract)`.
+
+This command records separate operator provenance, never a human receipt or observed
+native echo. One transaction archives the original failed verdict and reenters VERIFY
+on the same attempt/lease without changing its repair counter. A durable marker then
+allows only cached verification: missing/changed evidence or process uncertainty waits;
+no new checks, reviewer, implementation, attempt or negative repair round is allowed.
+The command advances only that attempt through the normal finalizer, never all READY
+tasks. An exact replay reports existing state without repeating the exception; changed
+bindings reject. Reentry alone is not completion. After legitimate same-ID runtime
+recovery, use normal `workflow reconcile <attempt-id>` and `workflow advance <attempt-id>`
+for that same revision. No generic historical status reset is provided.
+
 After explicit authorization for one additional repair, an operator may run:
 
 ```text

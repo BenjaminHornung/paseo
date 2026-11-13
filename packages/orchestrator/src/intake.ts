@@ -29,7 +29,7 @@ import {
 } from "./main-interpretation.ts";
 import { Git } from "./git.ts";
 import { Store } from "./store.ts";
-import { observedTimeline, type TimelineObservation } from "./timeline.ts";
+import { observedTimeline, timelineReadbackHash, type TimelineObservation } from "./timeline.ts";
 import { verifiedProviderSessionId } from "./completion.ts";
 import type { IntakeConfirmation } from "../paseo-plugin/shared/intake-confirmation.ts";
 import {
@@ -41,9 +41,12 @@ import {
   recordInternalMessageOrigins,
   isProvenInternalIntake,
   provenInternalMessages,
-  unboundInternalIdentities,
   relevantCaptureIdentities,
+  validateOperatorWakeOrigin,
+  assertOperatorMainIdle,
+  assertOperatorMainSnapshot,
 } from "./intake-identity.ts";
+import type { OperatorWakeBinding } from "./verification-recovery.ts";
 
 const taskApprovalLinkSchema = z.strictObject({
   agentId: z.string().min(1),
@@ -139,6 +142,69 @@ export function timelineCheckpointIndex(
   if (matches.length > 1) throw Error("INTAKE_MESSAGE_IDENTITY_AMBIGUOUS");
   return matches.length ? entries.indexOf(matches[0]!) : -1;
 }
+export async function observeOperatorWake(
+  store: Store,
+  paseo: PaseoApi,
+  binding: OperatorWakeBinding,
+): Promise<void> {
+  const origin = validateOperatorWakeOrigin(store, binding);
+  const checkpoint = store.db
+    .prepare("SELECT message_id,work_intake_id FROM main_checkpoints WHERE agent_id=?")
+    .get(binding.mainAgentId);
+  if (!checkpoint?.message_id || checkpoint.work_intake_id !== binding.workIntakeId)
+    throw Error("OPERATOR_WAKE_WORK_CHANGED");
+  const handle = paseo.agents.ref(binding.mainAgentId);
+  await assertOperatorMainIdle(handle, binding);
+  const history = await observedTimeline(handle, "projected");
+  await assertOperatorMainIdle(handle, binding);
+  // Keep the final history read after every metadata/process await. A changed
+  // input window is a wait, never an implicit extension of operator authority.
+  const fresh = await observedTimeline(handle, "projected");
+  assertOperatorMainSnapshot(fresh.agent ? handle.current() : null, binding);
+  if (timelineReadbackHash(fresh) !== timelineReadbackHash(history))
+    throw Error("VERIFICATION_RECOVERY_UNCAPTURED_INPUT");
+  const proven = provenInternalMessages(store, binding.mainAgentId).filter(
+    (item) => item.identity.sessionId === binding.sessionId,
+  );
+  const origins = [...proven, origin];
+  const identities = intakeIdentities(store, binding.mainAgentId, binding.sessionId).filter(
+    (identity) => !origins.some((item) => item.identity.messageId === identity.messageId),
+  );
+  identities.push(...origins.map((item) => item.identity));
+  const direct = resolveIntakeIdentities(fresh.entries, identities, false);
+  const relevant = relevantCaptureIdentities(store, {
+    identities,
+    entries: direct,
+    checkpointEntry: direct[timelineCheckpointIndex(direct, String(checkpoint.message_id))],
+  });
+  const entries = resolveIntakeIdentities(fresh.entries, relevant, !fresh.hasOlder);
+  const matching = entries.filter(
+    (entry) =>
+      entry.item.type === "user_message" &&
+      entry.item.messageId === binding.nativeMessageId &&
+      hash(entry.item.text) === binding.textHash,
+  );
+  const wake = matching[0]?.item;
+  if (fresh.hasOlder || matching.length !== 1 || wake?.type !== "user_message")
+    throw Error("VERIFICATION_RECOVERY_ORIGIN_UNOBSERVED");
+  if (wake.clientMessageId !== binding.receiptId) throw Error("INTAKE_MESSAGE_IDENTITY_AMBIGUOUS");
+  const checkpointIndex = timelineCheckpointIndex(entries, String(checkpoint.message_id));
+  if (checkpointIndex < 0) throw Error("INTAKE_HISTORY_GAP");
+  const anchor = String(checkpoint.message_id).match(/^cursor:(.+):(\d+)$/);
+  if (anchor && fresh.endCursor?.epoch !== anchor[1]) throw Error("INTAKE_HISTORY_EPOCH_CHANGED");
+  for (const entry of entries.slice(checkpointIndex + 1)) {
+    const item = entry.item;
+    if (item.type !== "user_message") continue;
+    const internal = origins.some(
+      ({ identity, directory }) =>
+        identity.messageId === item.clientMessageId &&
+        identity.nativeMessageId === item.messageId &&
+        identity.textHash === hash(item.text) &&
+        directory === canonicalPath(binding.directory),
+    );
+    if (!internal) throw Error("VERIFICATION_RECOVERY_UNCAPTURED_INPUT");
+  }
+}
 export function abandonHumanInput(store: Store, agentId: string, messageId: string): void {
   store.transaction(() => {
     store.db
@@ -218,7 +284,14 @@ export async function captureHumanIntake(
   const emptyBaseline = checkpoint?.message_id?.startsWith("empty:");
   if (emptyBaseline && checkpoint?.message_id !== `empty:${sessionId}`)
     throw Error("INTAKE_HISTORY_SESSION_CHANGED");
-  const identities = intakeIdentities(store, main.agentId, sessionId);
+  const operatorOrigins = provenInternalMessages(store, main.agentId).filter(
+    (origin) => origin.provenance === "operator" && origin.identity.sessionId === sessionId,
+  );
+  const identities = intakeIdentities(store, main.agentId, sessionId).filter(
+    (identity) =>
+      !operatorOrigins.some((origin) => origin.identity.messageId === identity.messageId),
+  );
+  identities.push(...operatorOrigins.map((origin) => origin.identity));
   const anchor = checkpoint?.message_id?.match(/^cursor:(.+):(\d+)$/);
   const receiptEvents = store.db
     .prepare("SELECT at_ms,kind FROM events WHERE kind LIKE 'HUMAN_INPUT_RECEIPT:%' AND at_ms<?")
@@ -285,14 +358,20 @@ export async function captureHumanIntake(
     if (checkpointIndex < 0) throw Error("INTAKE_HISTORY_GAP");
     checkpointEntry = entries[checkpointIndex];
   }
-  const newInternalAlias = unboundInternalIdentities(store, relevant).some((identity) =>
-    entries.some(
-      (entry) =>
-        entry.item.type === "user_message" &&
-        entry.item.clientMessageId === identity.messageId &&
-        !!entry.item.messageId &&
-        entry.item.messageId !== identity.messageId,
-    ),
+  const newInternalAlias = entries.some(
+    ({ item }) =>
+      item.type === "user_message" &&
+      item.clientMessageId &&
+      item.messageId &&
+      item.clientMessageId !== item.messageId &&
+      store.db
+        .prepare("SELECT 1 FROM internal_messages WHERE agent_id=? AND message_id=?")
+        .get(main.agentId, item.clientMessageId) &&
+      !identities.some(
+        (identity) =>
+          identity.messageId === item.clientMessageId &&
+          identity.nativeMessageId === item.messageId,
+      ),
   );
   if (newInternalAlias && (await verifiedProviderSessionId(handle)) !== sessionId)
     throw Error("INTAKE_HISTORY_SESSION_CHANGED");
@@ -314,6 +393,7 @@ export async function captureHumanIntake(
     const item = entry.item;
     if (item.type !== "user_message") continue;
     const messageId = item.clientMessageId ?? item.messageId;
+    if (operatorOrigins.some((origin) => origin.identity.messageId === messageId)) continue;
     if (
       !messageId ||
       !sessionId ||

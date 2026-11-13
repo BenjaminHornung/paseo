@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
+import { createHash } from "node:crypto";
+import { createPaseoApi, type PaseoAgentTimelineRefetchOptions } from "@getpaseo/client";
+import { AgentTimelineEntryPayloadSchema } from "@getpaseo/protocol/messages";
 import { editAutomation, readAutomation, taskDispatchAllowed } from "../src/automation.ts";
 import {
   intakeIdentity,
@@ -1400,14 +1403,20 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
   // Legacy configurations retain their role lists until UI is explicitly configured.
   assert.equal(config.roleRoutes?.ui, undefined);
   writeFileSync(configFile, JSON.stringify(config));
-  const messages: { id: string; text: string; timestamp: string; nativeId?: string }[] = [];
+  const messages: {
+    id: string;
+    text: string;
+    timestamp: string;
+    nativeId?: string;
+    observedProviderId?: string;
+    liveMessageId?: string;
+    replayedClientId?: string;
+  }[] = [];
   let rehydratedHistory = false;
   let historyGap = false;
   let sessionChangesDuringHistory = false;
   const historyReads: string[] = [];
-  const timelinePage = async (
-    request: { direction?: string; cursor?: { seq: number }; limit?: number } = {},
-  ) => {
+  const timelinePage = async (request: PaseoAgentTimelineRefetchOptions = {}) => {
     historyReads.push(request.direction ?? "tail");
     const olderEntries = Array.from({ length: rehydratedHistory ? 220 : 0 }, (_, index) => ({
       timestamp: index < 2 ? "2025-01-02T00:00:00.000Z" : "2026-01-01T00:00:00.000Z",
@@ -1428,10 +1437,16 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
         timestamp: message.timestamp,
         seqStart: olderEntries.length + index + 1,
         seqEnd: olderEntries.length + index + 1,
+        ...(!rehydratedHistory && message.nativeId
+          ? { providerMessageId: message.observedProviderId ?? message.nativeId }
+          : {}),
         item: {
           type: "user_message",
-          clientMessageId: rehydratedHistory && message.nativeId ? undefined : message.id,
-          messageId: rehydratedHistory ? (message.nativeId ?? message.id) : message.id,
+          clientMessageId:
+            rehydratedHistory && message.nativeId ? message.replayedClientId : message.id,
+          messageId: rehydratedHistory
+            ? (message.nativeId ?? message.id)
+            : (message.liveMessageId ?? message.id),
           text: message.text,
         },
       })),
@@ -1455,37 +1470,67 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
   let backgroundActive: boolean | null = false;
   let savedSessionId: string | null = null;
   let providerSessionId = "fixture-session";
-  const client = {
-    agents: {
-      ref: (id: string) => ({
-        id,
-        refresh: async () => ({
-          agent: {
-            id,
-            cwd: repo,
-            provider: "codex/codex",
-            status: "idle",
-            activeTurn: false,
-            pendingPermissions: [],
-            runtimeInfo: { sessionId: savedSessionId },
-            labels: { orchestratorScope: "public" },
-          },
-        }),
-        timeline: {
-          refetch: timelinePage,
-        },
-        backgroundWork: {
-          refresh: async () => ({
-            agentId: id,
-            providerSessionId,
-            observationId: "fresh-session-identity",
-            coverage: "codex_background_terminals",
-            queriedProviderSessionIds: [providerSessionId],
-            items: [],
-            providerSubagents: [],
+  let finalTimelineSessionChange = false;
+  let recoveryHistoryReads = 0;
+  const mainSnapshot = (id: string, sessionId = savedSessionId) => ({
+    id,
+    cwd: repo,
+    provider: "codex/codex",
+    status: "idle",
+    activeTurn: false,
+    pendingPermissions: [],
+    runtimeInfo: { sessionId },
+    labels: { orchestratorScope: "public" },
+  });
+  const timelineApi = createPaseoApi({
+    getLastServerInfoMessage: () => ({ serverId: "fixture-server" }),
+    fetchAgent: async ({ agentId: requestedId }: { agentId: string }) => ({
+      agent: mainSnapshot(requestedId),
+    }),
+    fetchAgentTimeline: async (id: string, request: Parameters<typeof timelinePage>[0]) => {
+      const page = await timelinePage(request);
+      if (finalTimelineSessionChange && request?.direction === "before") recoveryHistoryReads++;
+      return {
+        ...page,
+        agent: mainSnapshot(
+          id,
+          finalTimelineSessionChange && recoveryHistoryReads === 2
+            ? "different-final-timeline-session"
+            : savedSessionId,
+        ),
+        entries: page.entries.map((entry) =>
+          AgentTimelineEntryPayloadSchema.parse({
+            ...entry,
+            provider: "codex",
+            collapsed: [],
+            sourceSeqRanges: [{ startSeq: entry.seqStart, endSeq: entry.seqEnd }],
           }),
-        },
+        ),
+      };
+    },
+  } as unknown as Parameters<typeof createPaseoApi>[0]);
+  t.after(() => timelineApi.dispose());
+  const client = {
+    workspaces: {
+      open: async (directory: string) => ({
+        id: "fixture-worker-workspace",
+        refresh: async () => ({ workspaceDirectory: directory }),
       }),
+    },
+    agents: {
+      ref: (id: string) => {
+        const handle = timelineApi.agents.ref(id);
+        handle.backgroundWork.refresh = async () => ({
+          agentId: id,
+          providerSessionId,
+          observationId: "fresh-session-identity",
+          coverage: "codex_background_terminals",
+          queriedProviderSessionIds: [providerSessionId],
+          items: [],
+          providerSubagents: [],
+        });
+        return handle;
+      },
     },
   };
   const fakeProvider = {
@@ -2277,10 +2322,15 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
   const approvedPlan = await riskEngine.plan(highRiskResult.key);
   assert.equal(approvedPlan.action, "start", JSON.stringify(approvedPlan));
 
-  const seedVerification = (taskKey: string, attemptId: string) => {
-    const task = riskStore.task(taskKey)!;
+  const seedVerification = (
+    taskKey: string,
+    attemptId: string,
+    state = riskStore,
+    engine = riskEngine,
+  ) => {
+    const task = state.task(taskKey)!;
     const contract = contractSchema.parse(JSON.parse(task.contract_json));
-    const diffHash = riskEngine.git.snapshot(contract).diffHash;
+    const diffHash = engine.git.snapshot(contract).diffHash;
     const implementationAgentId = `implementation-${attemptId}`;
     const reviewerAgentId = `reviewer-${attemptId}`;
     const reviewResult = { diffHash, pass: true, unresolvedIssues: 0 };
@@ -2292,22 +2342,29 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
       diffCheckExit: 0,
       changed: false,
     };
-    riskStore.db
+    state.db
       .prepare(`INSERT INTO attempts(id,task_key,sequence,status,route_json,agent_id,fence,session_key,created_ms,result_hash,error_kind)
-      VALUES(?,?,1,'VERIFY',?,?,1,?,?,NULL,NULL)`)
+      VALUES(?,?,?,'VERIFY',?,?,1,?,?,NULL,NULL)`)
       .run(
         attemptId,
         taskKey,
+        (state.latest(taskKey)?.sequence ?? 0) + 1,
         JSON.stringify(route),
         implementationAgentId,
-        riskEngine.sessionKey(contract, route),
+        engine.sessionKey(contract, route),
         Date.now(),
       );
-    riskStore.db
+    state.db
       .prepare(`INSERT INTO leases(worktree,attempt_id,fence,state,heartbeat_ms) VALUES(?,?,1,'HELD',?)
       ON CONFLICT(worktree) DO UPDATE SET attempt_id=excluded.attempt_id,fence=excluded.fence,state=excluded.state,heartbeat_ms=excluded.heartbeat_ms`)
-      .run(contract.worktree, attemptId, Date.now());
-    riskStore.db
+      .run(
+        contract.workspace
+          ? `scope:${hash({ worktree: contract.worktree, key: taskKey })}`
+          : contract.worktree,
+        attemptId,
+        Date.now(),
+      );
+    state.db
       .prepare("INSERT INTO review_runs VALUES(?,?,?,?,?,?,?)")
       .run(
         attemptId,
@@ -2318,7 +2375,7 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
         diffHash,
         JSON.stringify(reviewResult),
       );
-    riskStore.db
+    state.db
       .prepare("INSERT INTO turn_checks VALUES(?,?,?)")
       .run(attemptId, diffHash, JSON.stringify(checkResult));
     return { contract, diffHash, implementationAgentId, reviewerAgentId };
@@ -2362,22 +2419,31 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
     reason: "owner-approval-required",
   });
   const unapprovedProof = seedVerification(secondRiskResult.key, "high-risk-unapproved-proof");
-  const unapprovedVerification = riskEngine.verify("high-risk-unapproved-proof", {
-    diffHash: unapprovedProof.diffHash,
-    reviewedDiffHash: unapprovedProof.diffHash,
-    implementationAgentId: unapprovedProof.implementationAgentId,
-    reviewerAgentId: unapprovedProof.reviewerAgentId,
-    buildExit: 0,
-    testExit: 0,
-    reviewPass: true,
-    visualAcceptance: false,
-    ownerApproved: true,
-    scopeViolations: 0,
-    unresolvedIssues: 0,
-    artifacts: [configFile],
-  });
-  assert.equal(unapprovedVerification.ok, false);
-  assert.ok(unapprovedVerification.reasons.includes("approval-required"));
+  assert.throws(
+    () =>
+      riskEngine.verify("high-risk-unapproved-proof", {
+        diffHash: unapprovedProof.diffHash,
+        reviewedDiffHash: unapprovedProof.diffHash,
+        implementationAgentId: unapprovedProof.implementationAgentId,
+        reviewerAgentId: unapprovedProof.reviewerAgentId,
+        buildExit: 0,
+        testExit: 0,
+        reviewPass: true,
+        visualAcceptance: false,
+        ownerApproved: true,
+        scopeViolations: 0,
+        unresolvedIssues: 0,
+        artifacts: [configFile],
+      }),
+    /VERIFICATION_OWNER_APPROVAL_REQUIRED/,
+  );
+  assert.equal(riskStore.attempt("high-risk-unapproved-proof").status, "VERIFY");
+  assert.equal(
+    riskStore.db
+      .prepare("SELECT count(*) AS n FROM reviews WHERE attempt_id=?")
+      .get("high-risk-unapproved-proof")!.n,
+    0,
+  );
   riskStore.db
     .prepare("UPDATE attempts SET status='NEEDS_CONFIRMATION' WHERE id=?")
     .run("high-risk-unapproved-proof");
@@ -2829,6 +2895,11 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
           advisoryOptions,
         );
         const mainRisks: { key: string; contract: Contract; hash: string }[] = [];
+        editAutomation(
+          agentId,
+          (main) => ({ ...main!, workerPlacement: "main-workspace" }),
+          vaultRoot,
+        );
         for (const taskId of ["main-p1", "main-p3"]) {
           const registration = (await settingsOperation(
             {
@@ -2855,6 +2926,11 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
           });
           riskState.close();
         }
+        editAutomation(
+          agentId,
+          (main) => ({ ...main!, workerPlacement: "source-workspace" }),
+          vaultRoot,
+        );
         const p1 = mainRisks[0]!,
           p3 = mainRisks[1]!;
         await registerInput("advisory-approve-p1-001", "Approve P1 only", false);
@@ -2914,9 +2990,102 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
         );
         afterQuestion.close();
 
+        // An unresolved new input is an authority wait, not a failed code revision.
+        const finalState = new Store(database);
+        try {
+          const finalEngine = new Engine(finalState, config, fakeProvider);
+          const proof = seedVerification(p1.key, "authority-finalization", finalState, finalEngine);
+          const evidence = {
+            diffHash: proof.diffHash,
+            reviewedDiffHash: proof.diffHash,
+            implementationAgentId: proof.implementationAgentId,
+            reviewerAgentId: proof.reviewerAgentId,
+            buildExit: 0,
+            testExit: 0,
+            reviewPass: true,
+            visualAcceptance: false,
+            ownerApproved: true,
+            scopeViolations: 0,
+            unresolvedIssues: 0,
+            artifacts: [configFile],
+          };
+          const before = () => ({
+            attempt: { ...finalState.attempt("authority-finalization") },
+            task: { ...finalState.task(p1.key)! },
+            lease: finalState.db
+              .prepare("SELECT * FROM leases WHERE attempt_id=?")
+              .get("authority-finalization"),
+            reviews: finalState.db
+              .prepare("SELECT * FROM reviews WHERE attempt_id=?")
+              .all("authority-finalization"),
+          });
+          const original = before();
+          await registerInput("verification-unresolved-question", "Why is this ready?", false);
+          assert.throws(
+            () => finalEngine.verify("authority-finalization", evidence),
+            /INTAKE_PENDING|MAIN_INPUT_INTERPRETATION_REQUIRED/,
+          );
+          assert.deepEqual(
+            before(),
+            original,
+            "authority uncertainty preserves the revision, evidence, counter and lease",
+          );
+          await interpret("question");
+          const finish = finalState.finish.bind(finalState);
+          finalState.finish = (...args: Parameters<Store["finish"]>) => {
+            markIntakeClassificationPending(finalState, agentId, "verification-raced-input");
+            return finish(...args);
+          };
+          assert.throws(
+            () => finalEngine.verify("authority-finalization", evidence),
+            /INTAKE_PENDING|MAIN_INPUT_INTERPRETATION_REQUIRED/,
+          );
+          assert.deepEqual(
+            before(),
+            original,
+            "the final transaction rechecks authority before any finish writes",
+          );
+          finalState.finish = finish;
+          await registerInput(
+            "verification-raced-input",
+            "Explain the same unchanged result",
+            false,
+          );
+          await interpret("question");
+          seedVerification(p3.key, "unapproved-cohort-peer", finalState, finalEngine);
+          const cohortBefore = {
+            own: before(),
+            peer: { ...finalState.attempt("unapproved-cohort-peer") },
+            task: { ...finalState.task(p3.key)! },
+          };
+          assert.throws(
+            () => finalEngine.verify("authority-finalization", { ...evidence, reviewPass: false }),
+            /VERIFICATION_OWNER_APPROVAL_REQUIRED/,
+          );
+          assert.deepEqual(
+            {
+              own: before(),
+              peer: { ...finalState.attempt("unapproved-cohort-peer") },
+              task: { ...finalState.task(p3.key)! },
+            },
+            cohortBefore,
+            "a rejected cohort finalization cannot consume P3 without its own approval",
+          );
+          // Dispose only the synthetic peer attempt after the rollback assertion.
+          for (const table of ["review_runs", "turn_checks", "leases"])
+            finalState.db
+              .prepare(`DELETE FROM ${table} WHERE attempt_id=?`)
+              .run("unapproved-cohort-peer");
+          finalState.db.prepare("DELETE FROM attempts WHERE id=?").run("unapproved-cohort-peer");
+          assert.equal(finalEngine.verify("authority-finalization", evidence).ok, true);
+          assert.equal(finalState.attempt("authority-finalization").status, "COMPLETE");
+        } finally {
+          finalState.close();
+        }
+
         // A controller wake lost its client ID during native history replay.
         // The old false unverified claim must not require a new human click.
-        async function recoverInternalWake() {
+        async function recoverInternalWake(wakeTest: TestContext) {
           const wake = {
             id: "dc5b5935-c85f-4acf-913a-b6054f6b8e4e",
             nativeId: "11111111-1111-7111-8111-111111111111",
@@ -3102,6 +3271,537 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
               false,
               "the proven native alias avoids full reads on later pulses",
             );
+            const delayedWake = {
+              id: "44444444-4444-7444-8444-444444444444",
+              nativeId: "55555555-5555-7555-8555-555555555555",
+              observedProviderId: "unsupported-provider-message-format",
+              liveMessageId: undefined as string | undefined,
+              text: "A later controlled controller notification",
+              timestamp: new Date().toISOString(),
+            };
+            await settingsOperation(
+              {
+                operation: "auto-wake",
+                agentId,
+                activationId: activation.requestId,
+                fingerprint: hash(delayedWake),
+                messageId: delayedWake.id,
+              },
+              advisoryOptions,
+            );
+            await settingsOperation(
+              { operation: "auto-wake-settle", agentId, messageId: delayedWake.id, sent: true },
+              advisoryOptions,
+            );
+            const delayedState = new Store(database);
+            const delayedClaim = await new Decisions(delayedState).classifyIntake(
+              intakeFactsSchema.parse({
+                mainAgentId: agentId,
+                messageId: delayedWake.nativeId,
+                origin: "unverified",
+                directory: repo,
+                text: delayedWake.text,
+              }),
+              config,
+            );
+            const delayedFacts = {
+              ...delayedState.db
+                .prepare("SELECT * FROM assessments WHERE id=?")
+                .get(delayedClaim.id)!,
+            };
+            markIntakeClassificationPending(delayedState, agentId, delayedWake.nativeId);
+            const delayedCalls = delayedState.db
+              .prepare("SELECT count(*) AS n FROM decision_calls")
+              .get()!.n;
+            const delayedRequests = intakeRequests.length;
+            delayedState.close();
+            messages.push(delayedWake);
+            rehydratedHistory = false;
+            await readInput();
+            const unsupportedState = new Store(database);
+            try {
+              assert.throws(
+                () => currentIntake(unsupportedState, agentId, true),
+                /INTAKE_HUMAN_ORIGIN_UNCONFIRMED|MAIN_INPUT_INTERPRETATION_REQUIRED|INTAKE_PENDING/,
+              );
+              assert.equal(
+                unsupportedState.db
+                  .prepare(
+                    "SELECT count(*) AS n FROM events WHERE kind LIKE 'INTAKE_INTERNAL_ORIGIN:%' AND kind LIKE ?",
+                  )
+                  .get(`%${delayedWake.nativeId}%`)!.n,
+                0,
+                "an unsupported optional ID adds no origin proof",
+              );
+            } finally {
+              unsupportedState.close();
+            }
+            delayedWake.observedProviderId = "66666666-6666-7666-8666-666666666666";
+            delayedWake.liveMessageId = delayedWake.nativeId;
+            await assert.rejects(
+              () => readInput(),
+              /INTAKE_MESSAGE_IDENTITY_AMBIGUOUS/,
+              "contradictory supported client/message/provider IDs remain blocked",
+            );
+            delayedWake.observedProviderId = delayedWake.nativeId;
+            delayedWake.liveMessageId = undefined;
+            await readInput(); // Actual observed SubmittedPrompt/native-echo correlation.
+            delayedWake.timestamp = new Date(
+              Date.parse(delayedWake.timestamp) + 20329,
+            ).toISOString();
+            rehydratedHistory = true;
+            await readInput(); // Only native IDs survive the replay; timestamps no longer match.
+            const replayedState = new Store(database);
+            try {
+              assert.equal(currentIntake(replayedState, agentId, true).id, beforeWork);
+              assert.equal(
+                intakeRequests.length,
+                delayedRequests,
+                "the observed echo is not new classification input",
+              );
+              assert.equal(
+                replayedState.db.prepare("SELECT count(*) AS n FROM decision_calls").get()!.n,
+                delayedCalls,
+              );
+              assert.deepEqual(
+                {
+                  ...replayedState.db
+                    .prepare("SELECT * FROM assessments WHERE id=?")
+                    .get(delayedClaim.id)!,
+                },
+                delayedFacts,
+              );
+              assert.equal(
+                replayedState.db
+                  .prepare("SELECT work_intake_id FROM main_checkpoints WHERE agent_id=?")
+                  .get(agentId)!.work_intake_id,
+                beforeWork,
+              );
+              assert.ok(
+                replayedState.db
+                  .prepare(
+                    "SELECT 1 FROM events WHERE kind LIKE 'INTAKE_INTERNAL_ORIGIN:%' AND kind LIKE ?",
+                  )
+                  .get(`%${delayedWake.nativeId}%`),
+                "observed alias is durable in the existing origin audit",
+              );
+            } finally {
+              replayedState.close();
+            }
+            // Reproduce the historical terminal approval-only failure. This is
+            // synthetic fixture history, never a runtime status repair.
+            const recoveryState = new Store(database);
+            const savedMainSession = savedSessionId;
+            savedSessionId = providerSessionId;
+            try {
+              const recoveryConfig = configSchema.parse({
+                ...JSON.parse(recoveryState.task(p1.key)!.config_json),
+                liveDispatchApproved: true,
+              });
+              recoveryState.db
+                .prepare("UPDATE tasks SET config_json=?,config_hash=? WHERE key=?")
+                .run(JSON.stringify(recoveryConfig), hash(recoveryConfig), p1.key);
+              const historicalWake = {
+                id: "77777777-7777-7777-8777-777777777777",
+                nativeId: "88888888-8888-7888-8888-888888888888",
+                text: "Old explicitly operator-attested transport",
+                timestamp: new Date().toISOString(),
+                replayedClientId: undefined as string | undefined,
+              };
+              recoveryState.db
+                .prepare("INSERT INTO internal_messages VALUES(?,?,?)")
+                .run(agentId, historicalWake.id, "wake");
+              rememberIntakeIdentity(recoveryState, {
+                agentId,
+                sessionId: providerSessionId,
+                messageId: historicalWake.id,
+                timestamp: new Date(Date.parse(historicalWake.timestamp) - 20329).toISOString(),
+                textHash: hash(historicalWake.text),
+              });
+              const oldClaim = await new Decisions(recoveryState).classifyIntake(
+                intakeFactsSchema.parse({
+                  mainAgentId: agentId,
+                  messageId: historicalWake.nativeId,
+                  origin: "unverified",
+                  directory: repo,
+                  text: historicalWake.text,
+                }),
+                config,
+              );
+              markIntakeClassificationPending(recoveryState, agentId, historicalWake.nativeId);
+              recoveryState.db
+                .prepare("UPDATE main_checkpoints SET message_id=? WHERE agent_id=?")
+                .run(historicalWake.nativeId, agentId);
+              messages.push(historicalWake);
+              const nativeRowsBefore = recoveryState.db
+                .prepare("SELECT kind FROM events WHERE kind LIKE 'INTAKE_MESSAGE_IDENTITY:%'")
+                .all();
+              const claimBefore = {
+                ...recoveryState.db
+                  .prepare("SELECT * FROM assessments WHERE id=?")
+                  .get(oldClaim.id)!,
+              };
+              const nativeIds = new Map([
+                [agentId, providerSessionId],
+                ["recovery-worker", "worker-native"],
+                ["recovery-reviewer", "reviewer-native"],
+              ]);
+              let starts = 0,
+                driftDuringReviewer = false;
+              let duringReviewer: (() => void) | undefined;
+              const recoveryProvider = {
+                ...fakeProvider,
+                nativeSessionId: (id: string) => nativeIds.get(id) ?? null,
+                refresh: async (id: string) => {
+                  if (id === "recovery-reviewer") duringReviewer?.();
+                  if (id === "recovery-reviewer" && driftDuringReviewer)
+                    nativeIds.set("recovery-worker", "changed-after-await");
+                  return {
+                    ...(await fakeProvider.refresh(id)),
+                    cwd: id === agentId ? repo : p1.contract.workspace!.directory,
+                    workspaceId: p1.contract.workspace!.id,
+                    nativeSessionId: nativeIds.get(id) ?? null,
+                  };
+                },
+                run: async () => {
+                  starts++;
+                  throw Error("unexpected implementation send");
+                },
+                create: async () => {
+                  starts++;
+                  throw Error("unexpected reviewer creation");
+                },
+              } as unknown as PaseoProvider;
+              const recoveryEngine = new Engine(
+                recoveryState,
+                recoveryConfig,
+                recoveryProvider,
+                undefined,
+                undefined,
+                () => true,
+              );
+              const predecessorId = `${p1.key}/3`,
+                recoveryId = `${p1.key}/4`;
+              const seeded = seedVerification(p1.key, predecessorId, recoveryState, recoveryEngine);
+              recoveryState.db
+                .prepare(
+                  "UPDATE attempts SET sequence=3,status='FAILED',fence=3,agent_id='recovery-worker' WHERE id=?",
+                )
+                .run(predecessorId);
+              seedVerification(p1.key, recoveryId, recoveryState, recoveryEngine);
+              recoveryState.db
+                .prepare(
+                  "UPDATE attempts SET sequence=4,status='FAILED',fence=4,agent_id='recovery-worker',run_accepted=1,result_hash=? WHERE id=?",
+                )
+                .run(seeded.diffHash, recoveryId);
+              recoveryState.db
+                .prepare("UPDATE tasks SET state='BLOCKED',rework=4 WHERE key=?")
+                .run(p1.key);
+              recoveryState.db
+                .prepare("UPDATE leases SET state='RELEASED',fence=4 WHERE attempt_id=?")
+                .run(recoveryId);
+              recoveryState.db
+                .prepare("UPDATE review_runs SET agent_id='recovery-reviewer' WHERE attempt_id=?")
+                .run(recoveryId);
+              const task = recoveryState.task(p1.key)!;
+              const grant = {
+                predecessorAttemptId: predecessorId,
+                predecessorFence: 3,
+                agentId: "recovery-worker",
+                nativeSessionId: "worker-native",
+                taskKey: p1.key,
+                contractHash: task.contract_hash,
+                configHash: task.config_hash,
+                diffHash: seeded.diffHash,
+                approvedScopeRevision: recoveryState.scopeRevision(p1.contract),
+                approvedCheckRevision: recoveryState.checkRevision(p1.contract),
+                checks: p1.contract.checks,
+                reason: "one old approved repair",
+              };
+              recoveryState.event(`TERMINAL_REPAIR_SUCCESSOR:${JSON.stringify(grant)}`, recoveryId);
+              recoveryState.event(
+                `OPERATOR_TERMINAL_REPAIR:${JSON.stringify(grant)}`,
+                predecessorId,
+              );
+              recoveryState.event(`TERMINAL_REPAIR_CONSUMED:${hash(grant)}`, predecessorId);
+              const oldVerdict = JSON.stringify({
+                reasons: ["approval-required"],
+                cohortFailure: { sourceAttemptId: recoveryId, round: 4 },
+              });
+              recoveryState.db
+                .prepare("INSERT INTO reviews VALUES(?,?,?)")
+                .run(recoveryId, seeded.diffHash, oldVerdict);
+              const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+              const checkRow = recoveryState.db
+                .prepare("SELECT * FROM turn_checks WHERE attempt_id=?")
+                .get(recoveryId)!;
+              const reviewRow = recoveryState.db
+                .prepare("SELECT * FROM review_runs WHERE attempt_id=?")
+                .get(recoveryId)!;
+              const request = {
+                attemptId: recoveryId,
+                fence: 4,
+                rework: 4,
+                agentId: "recovery-worker",
+                nativeSessionId: "worker-native",
+                reviewerId: "recovery-reviewer",
+                reviewerNativeSessionId: "reviewer-native",
+                contractHash: task.contract_hash,
+                configHash: task.config_hash,
+                diffHash: seeded.diffHash,
+                checkEvidenceSha256: sha(String(checkRow.result_json)),
+                reviewRunSha256: sha(JSON.stringify(reviewRow)),
+                finalEvidenceSha256: sha(oldVerdict),
+                scopeRevision: recoveryState.scopeRevision(p1.contract),
+                checkRevision: recoveryState.checkRevision(p1.contract),
+                checkBindingHash: hash(recoveryState.checkCommandBinding(p1.contract)),
+                origin: {
+                  mainAgentId: agentId,
+                  sessionId: providerSessionId,
+                  receiptId: historicalWake.id,
+                  nativeMessageId: historicalWake.nativeId,
+                  assessmentId: oldClaim.id,
+                  factsHash: oldClaim.factsHash,
+                  textHash: hash(historicalWake.text),
+                  directory: repo,
+                  workIntakeId: String(beforeWork),
+                },
+              };
+              const operator = {
+                reason: "exactly one approved verification recovery",
+                paseo: fakeProvider.client,
+              };
+              const countsBefore = recoveryState.db
+                .prepare("SELECT count(*) AS n FROM events")
+                .get()!.n;
+              for (const scenario of [
+                "uncaptured-stop",
+                "foreign-client-receipt",
+                "last-timeline-session",
+              ] as const) {
+                await wakeTest.test(scenario, async () => {
+                  const isolatedDatabase = path.join(root, `${scenario}.sqlite`);
+                  await recoveryState.backupTo(isolatedDatabase);
+                  const isolated = new Store(isolatedDatabase);
+                  const isolatedEngine = new Engine(
+                    isolated,
+                    recoveryConfig,
+                    recoveryProvider,
+                    undefined,
+                    undefined,
+                    () => true,
+                  );
+                  const projection = () => ({
+                    task: isolated.task(p1.key),
+                    attempt: isolated.attempt(recoveryId),
+                    events: isolated.db.prepare("SELECT * FROM events ORDER BY sequence").all(),
+                    lease: isolated.db
+                      .prepare("SELECT * FROM leases WHERE attempt_id=?")
+                      .get(recoveryId),
+                    review: isolated.db
+                      .prepare("SELECT * FROM reviews WHERE attempt_id=?")
+                      .get(recoveryId),
+                  });
+                  const messageCount = messages.length;
+                  try {
+                    if (scenario === "uncaptured-stop") {
+                      // The input arrives in the last worker/reviewer preflight,
+                      // while Main is idle and capture has not seen it yet.
+                      duringReviewer = () => {
+                        if (messages.length !== messageCount) return;
+                        messages.push({
+                          id: "fresh-uncaptured-stop",
+                          text: "Stop the implementation now",
+                          timestamp: new Date().toISOString(),
+                        });
+                      };
+                    } else if (scenario === "foreign-client-receipt") {
+                      const originalInput = isolated.db
+                        .prepare("SELECT facts_json FROM assessments WHERE id=?")
+                        .get(String(beforeWork))!;
+                      historicalWake.replayedClientId = JSON.parse(
+                        String(originalInput.facts_json),
+                      ).messageId;
+                      assert.match(
+                        String(
+                          isolated.db
+                            .prepare(
+                              "SELECT kind FROM internal_messages WHERE agent_id=? AND message_id=?",
+                            )
+                            .get(agentId, historicalWake.replayedClientId!)!.kind,
+                        ),
+                        /^human:/,
+                      );
+                    } else {
+                      finalTimelineSessionChange = true;
+                      recoveryHistoryReads = 0;
+                    }
+                    const before = projection();
+                    let expectedError = /VERIFICATION_RECOVERY_MAIN_CHANGED/;
+                    if (scenario === "uncaptured-stop")
+                      expectedError = /VERIFICATION_RECOVERY_UNCAPTURED_INPUT/;
+                    else if (scenario === "foreign-client-receipt")
+                      expectedError = /INTAKE_MESSAGE_IDENTITY_AMBIGUOUS/;
+                    await assert.rejects(
+                      isolatedEngine.recoverVerification(p1.key, request, operator),
+                      expectedError,
+                    );
+                    if (scenario === "last-timeline-session") assert.equal(recoveryHistoryReads, 2);
+                    assert.deepEqual(projection(), before, "rejected origin must have no effects");
+                    assert.equal(starts, 0);
+                  } finally {
+                    duringReviewer = undefined;
+                    messages.splice(messageCount);
+                    historicalWake.replayedClientId = undefined;
+                    finalTimelineSessionChange = false;
+                    recoveryHistoryReads = 0;
+                    isolated.close();
+                  }
+                });
+              }
+              recoveryState.db.exec(
+                "CREATE TRIGGER reject_recovery_marker BEFORE INSERT ON events WHEN NEW.kind LIKE 'OPERATOR_VERIFICATION_RECOVERY:%' BEGIN SELECT RAISE(ABORT,'fixture-recovery-rollback'); END",
+              );
+              await assert.rejects(
+                () => recoveryEngine.recoverVerification(p1.key, request, operator),
+                /fixture-recovery-rollback/,
+              );
+              recoveryState.db.exec("DROP TRIGGER reject_recovery_marker");
+              assert.equal(
+                recoveryState.db.prepare("SELECT count(*) AS n FROM events").get()!.n,
+                countsBefore,
+              );
+              assert.equal(recoveryState.attempt(recoveryId).status, "FAILED");
+              assert.equal(
+                recoveryState.db
+                  .prepare("SELECT evidence_json FROM reviews WHERE attempt_id=?")
+                  .get(recoveryId)!.evidence_json,
+                oldVerdict,
+              );
+              assert.equal(
+                recoveryState.db
+                  .prepare("SELECT state FROM leases WHERE attempt_id=?")
+                  .get(recoveryId)!.state,
+                "RELEASED",
+              );
+              const reentry = await recoveryEngine.recoverVerification(p1.key, request, operator);
+              assert.equal(reentry.replayed, false);
+              assert.equal(recoveryState.attempt(recoveryId).status, "VERIFY");
+              assert.equal(recoveryState.task(p1.key)!.rework, 4);
+              const afterReentry = recoveryState.db
+                .prepare("SELECT count(*) AS n FROM events")
+                .get()!.n;
+              assert.equal(
+                (await recoveryEngine.recoverVerification(p1.key, request, operator)).replayed,
+                true,
+              );
+              assert.equal(
+                recoveryState.db.prepare("SELECT count(*) AS n FROM events").get()!.n,
+                afterReentry,
+              );
+              await assert.rejects(
+                () =>
+                  recoveryEngine.recoverVerification(
+                    p1.key,
+                    { ...request, diffHash: "a".repeat(64) },
+                    operator,
+                  ),
+                /REPLAY_CONFLICT/,
+              );
+              let negativeFinishBlocked = false;
+              try {
+                recoveryState.finish(recoveryId, false, seeded.diffHash, {}, 2);
+              } catch (error) {
+                assert.match(String(error), /VERIFICATION_RECOVERY_WAIT/);
+                negativeFinishBlocked = true;
+              }
+              assert.equal(
+                recoveryState.task(p1.key)!.rework,
+                4,
+                "verification-only recovery must never spend a fifth repair round",
+              );
+              assert.equal(recoveryState.attempt(recoveryId).status, "VERIFY");
+              assert.equal(negativeFinishBlocked, true);
+              recoveryState.db
+                .prepare("UPDATE turn_checks SET result_json=? WHERE attempt_id=?")
+                .run(
+                  JSON.stringify({ ...JSON.parse(String(checkRow.result_json)), changed: true }),
+                  recoveryId,
+                );
+              await assert.rejects(
+                () => recoveryEngine.advance(recoveryId),
+                /VERIFICATION_RECOVERY_EVIDENCE_CHANGED/,
+              );
+              recoveryState.db
+                .prepare("UPDATE turn_checks SET result_json=? WHERE attempt_id=?")
+                .run(checkRow.result_json, recoveryId);
+              driftDuringReviewer = true;
+              await assert.rejects(
+                () => recoveryEngine.advance(recoveryId),
+                /VERIFICATION_RECOVERY_SESSION_CHANGED/,
+              );
+              driftDuringReviewer = false;
+              nativeIds.set("recovery-worker", "worker-native");
+              assert.equal(recoveryState.task(p1.key)!.rework, 4);
+              await recoveryEngine.advance(recoveryId);
+              assert.equal(recoveryState.attempt(recoveryId).status, "COMPLETE");
+              assert.equal(recoveryState.task(p1.key)!.rework, 4);
+              assert.equal(starts, 0);
+              assert.equal(
+                recoveryState.db
+                  .prepare("SELECT result_json FROM turn_checks WHERE attempt_id=?")
+                  .get(recoveryId)!.result_json,
+                checkRow.result_json,
+              );
+              assert.deepEqual(
+                recoveryState.db
+                  .prepare("SELECT * FROM review_runs WHERE attempt_id=?")
+                  .get(recoveryId),
+                reviewRow,
+              );
+              const archived = recoveryState.db
+                .prepare(
+                  "SELECT kind FROM events WHERE attempt_id=? AND kind LIKE 'VERIFICATION_RECOVERY_ARCHIVE:%'",
+                )
+                .get(recoveryId)!.kind;
+              assert.equal(
+                JSON.parse(String(archived).slice("VERIFICATION_RECOVERY_ARCHIVE:".length))
+                  .evidenceJson,
+                oldVerdict,
+              );
+              assert.deepEqual(
+                {
+                  ...recoveryState.db
+                    .prepare("SELECT * FROM assessments WHERE id=?")
+                    .get(oldClaim.id)!,
+                },
+                claimBefore,
+              );
+              assert.deepEqual(
+                recoveryState.db
+                  .prepare("SELECT kind FROM events WHERE kind LIKE 'INTAKE_MESSAGE_IDENTITY:%'")
+                  .all(),
+                nativeRowsBefore,
+              );
+              assert.equal(currentIntake(recoveryState, agentId, true).id, beforeWork);
+              await readInput();
+              assert.deepEqual(
+                recoveryState.db
+                  .prepare("SELECT kind FROM events WHERE kind LIKE 'INTAKE_MESSAGE_IDENTITY:%'")
+                  .all(),
+                nativeRowsBefore,
+                "operator association must not synthesize a durable native echo during later capture",
+              );
+              assert.equal(
+                recoveryState.db
+                  .prepare("SELECT work_intake_id FROM main_checkpoints WHERE agent_id=?")
+                  .get(agentId)!.work_intake_id,
+                beforeWork,
+              );
+            } finally {
+              recoveryState.close();
+              savedSessionId = savedMainSession;
+            }
             await registerInput(
               "wake-followed-by-human-stop",
               "Stop the unchanged implementation",
