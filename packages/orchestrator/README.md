@@ -136,7 +136,10 @@ node <installed-controller>/dist/src/cli.js terminal-repair-approve <task-key> <
 Use the intended installation's explicit code/data roots and daemon home. The request
 contains `predecessorAttemptId`, `predecessorFence`, `agentId`, `nativeSessionId`,
 `contractHash`, `configHash`, `diffHash`, `checkEvidenceSha256`, `scopeRevision`,
-`checkRevision` and exactly one `additionalAllowedPath` naming an existing file.
+`checkRevision`. Optional `additionalAllowedPath` names exactly one existing file
+outside the effective scope. Omit it for a repair entirely within the existing
+scope; omission preserves that scope and its revision without a scope-extension
+audit event. Null, empty and invalid paths are rejected.
 `checkEvidenceSha256` hashes the unchanged raw `turn_checks.result_json` bytes.
 Scope/check revisions use the controller's existing stable `hash` convention:
 `{contractHash, paths: sortedEffectivePaths}` and

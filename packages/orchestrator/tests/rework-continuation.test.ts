@@ -885,6 +885,91 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
           additionalAllowedPath: "tests/manifest.ts",
           checks: contract.checks,
         };
+        const noExtensionFile = path.join(root, "terminal-repair-existing-scope.sqlite");
+        await state.backupTo(noExtensionFile);
+        const noExtension = new Store(noExtensionFile);
+        try {
+          const { additionalAllowedPath: _additionalPath, ...existingScopeRequest } = request;
+          let existingScopeSends = 0;
+          const existingScopeEngine = new Engine(noExtension, repairConfig, {
+            ...repairProvider,
+            run: async (id, prompt) => {
+              assert.equal(id, originalAttempt.agent_id);
+              assert.match(prompt, /src\/in-progress.ts/);
+              assert.match(prompt, /Finish the objective/);
+              existingScopeSends++;
+              return {
+                ...snapshot,
+                status: "running",
+                foregroundActive: true,
+                turnComplete: false,
+              };
+            },
+          });
+          for (const invalidPath of [null, ""]) {
+            assert.throws(() =>
+              noExtension.approveTerminalRepair(
+                taskKey,
+                { ...existingScopeRequest, additionalAllowedPath: invalidPath },
+                "repair within existing scope",
+              ),
+            );
+          }
+          noExtension.approveTerminalRepair(
+            taskKey,
+            existingScopeRequest,
+            "one repair within existing scope",
+          );
+          assert.equal(
+            noExtension.terminalRepairGrant(taskKey)!.approvedScopeRevision,
+            request.scopeRevision,
+          );
+          await assert.rejects(
+            () => existingScopeEngine.continueExisting(taskKey, repair),
+            /CONTINUATION_REVIEW_BINDING_MISMATCH/,
+            "omitting an extension cannot authorize the external manifest finding",
+          );
+          const result = await existingScopeEngine.continueExisting(taskKey, {
+            diffHash: originalDiff.diffHash,
+            findings: [{ ...reviewerFinding, file: "src/in-progress.ts" }],
+          });
+          assert.deepEqual(result, {
+            agentId: originalAttempt.agent_id,
+            continued: false,
+            delivery: "pending",
+            attemptId: `${taskKey}/4`,
+          });
+          const next = noExtension.latest(taskKey)!;
+          assert.equal(next.fence, originalAttempt.fence + 1);
+          assert.equal(next.agent_id, originalAttempt.agent_id);
+          assert.equal(next.session_key, originalAttempt.session_key);
+          assert.equal(noExtension.scopeRevision(repairContract), request.scopeRevision);
+          assert.deepEqual(noExtension.scopePaths(repairContract), repairContract.allowedPaths);
+          assert.equal(
+            noExtension.db
+              .prepare(
+                "SELECT count(*) AS n FROM events WHERE kind LIKE 'OPERATOR_SCOPE_EXTENSION:%'",
+              )
+              .get()!.n,
+            0,
+          );
+          await existingScopeEngine.tick();
+          assert.equal(existingScopeSends, 1, "normal delivery uses the same approved scope");
+          assert.equal(noExtension.latest(taskKey)!.run_accepted, 1);
+          assert.deepEqual(noExtension.attempt(oldId), originalAttempt);
+          assert.deepEqual(
+            noExtension.db.prepare("SELECT * FROM reviews WHERE attempt_id=?").get(oldId),
+            originalReview,
+          );
+          assert.equal(noExtension.task(taskKey)!.rework, 3);
+          await assert.rejects(
+            () => existingScopeEngine.continueExisting(taskKey, repair),
+            /ALREADY_CONSUMED/,
+          );
+          assert.equal(noExtension.db.prepare("SELECT count(*) AS n FROM attempts").get()!.n, 2);
+        } finally {
+          noExtension.close();
+        }
         assert.throws(
           () =>
             state.approveTerminalRepair(taskKey, { ...request, predecessorFence: 2 }, "one repair"),

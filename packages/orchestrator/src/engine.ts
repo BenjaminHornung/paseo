@@ -340,16 +340,13 @@ export class Engine {
     const grant = this.store.terminalRepairGrant(predecessor.task_key);
     if (!grant || grant.predecessorAttemptId !== predecessor.id)
       throw Error("TERMINAL_REPAIR_GRANT_REQUIRED");
+    const repairPaths = this.store.scopePaths(contract);
+    if (grant.additionalAllowedPath !== undefined) repairPaths.push(grant.additionalAllowedPath);
     if (
       !repair ||
       repair.diffHash !== grant.diffHash ||
       !findings.length ||
-      findings.some(
-        (finding) =>
-          ![...this.store.scopePaths(contract), grant.additionalAllowedPath].some((allowed) =>
-            pathInScope(finding.file, allowed),
-          ),
-      )
+      findings.some((finding) => !repairPaths.some((allowed) => pathInScope(finding.file, allowed)))
     )
       throw Error("CONTINUATION_REVIEW_BINDING_MISMATCH");
     const route: RuntimeRoute = JSON.parse(predecessor.route_json);

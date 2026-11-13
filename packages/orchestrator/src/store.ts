@@ -718,17 +718,21 @@ export class Store {
       if (previous) throw Error("TERMINAL_REPAIR_ALREADY_GRANTED");
       const predecessor = this.terminalRepairPredecessor(key, request),
         c = predecessor.contract;
-      const additional = contractSchema.parse({
-        ...c,
-        allowedPaths: [request.additionalAllowedPath],
-      }).allowedPaths[0];
-      const file = path.resolve(c.worktree, additional);
-      if (
-        this.scopePaths(c).some((allowed) => pathInScope(additional, allowed)) ||
-        !lstatSync(file).isFile() ||
-        canonicalPath(file) !== (process.platform === "win32" ? file.toLowerCase() : file)
-      )
-        throw Error("TERMINAL_REPAIR_ADDITIONAL_FILE_REQUIRED");
+      const approvedPaths = this.scopePaths(c);
+      if (request.additionalAllowedPath !== undefined) {
+        const additional = contractSchema.parse({
+          ...c,
+          allowedPaths: [request.additionalAllowedPath],
+        }).allowedPaths[0];
+        const file = path.resolve(c.worktree, additional);
+        if (
+          approvedPaths.some((allowed) => pathInScope(additional, allowed)) ||
+          !lstatSync(file).isFile() ||
+          canonicalPath(file) !== (process.platform === "win32" ? file.toLowerCase() : file)
+        )
+          throw Error("TERMINAL_REPAIR_ADDITIONAL_FILE_REQUIRED");
+        approvedPaths.push(additional);
+      }
       const binding = this.checkCommandBinding(c, request.checks ?? this.checkCommands(c));
       for (const command of [binding.checks.build, binding.checks.test]) {
         if (!path.isAbsolute(command[0])) throw Error("CHECK_COMMAND_ABSOLUTE_EXECUTABLE_REQUIRED");
@@ -742,7 +746,7 @@ export class Store {
         approvedCheckRevision: hash({ contractHash: hash(c), ...binding }),
         approvedScopeRevision: hash({
           contractHash: hash(c),
-          paths: [...this.scopePaths(c), additional].sort(),
+          paths: approvedPaths.sort(),
         }),
         reason,
       };
@@ -769,10 +773,11 @@ export class Store {
         binding = this.checkCommandBinding(c, grant.checks);
       if (hash({ contractHash: hash(c), ...binding }) !== grant.approvedCheckRevision)
         throw Error("CHECK_COMMAND_SCRIPT_CHANGED");
-      this.event(
-        `OPERATOR_SCOPE_EXTENSION:${JSON.stringify({ contractHash: hash(c), paths: [grant.additionalAllowedPath], reason: grant.reason })}`,
-        predecessor.attempt.id,
-      );
+      if (grant.additionalAllowedPath !== undefined)
+        this.event(
+          `OPERATOR_SCOPE_EXTENSION:${JSON.stringify({ contractHash: hash(c), paths: [grant.additionalAllowedPath], reason: grant.reason })}`,
+          predecessor.attempt.id,
+        );
       this.event(
         `OPERATOR_CHECK_COMMANDS:${JSON.stringify({ contractHash: hash(c), ...binding, reason: grant.reason })}`,
         predecessor.attempt.id,

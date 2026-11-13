@@ -13,7 +13,7 @@ export const terminalRepairRequestSchema = z.strictObject({
   checkEvidenceSha256: digest,
   scopeRevision: digest,
   checkRevision: digest,
-  additionalAllowedPath: contractSchema.shape.allowedPaths.element,
+  additionalAllowedPath: contractSchema.shape.allowedPaths.element.optional(),
   checks: contractSchema.shape.checks.optional(),
 });
 export type TerminalRepairRequest = z.infer<typeof terminalRepairRequestSchema>;
