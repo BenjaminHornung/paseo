@@ -76,6 +76,7 @@ export function assertSeparateClaudeConfiguration(
 type ProviderDiscoveryFilter = NonNullable<PaseoProviderWaitOptions["providers"]>;
 export interface Snapshot {
   id: string;
+  nativeSessionId?: string;
   cwd: string;
   workspaceId?: string;
   provider: string;
@@ -101,6 +102,7 @@ export interface Snapshot {
   retryAfterMs?: number;
 }
 export interface Provider {
+  nativeSessionId?(agentId: string): string | null;
   freezeApiBudget?(requestKey: string): { limit: number; debited: number };
   readonly url?: string;
   resume?(agentId: string): Promise<void>;
@@ -135,6 +137,21 @@ export interface Provider {
 export class PaseoProvider implements Provider {
   readonly client: PaseoClient;
   readonly url: string;
+  private agentHandles?: Map<string, PaseoAgentHandle>;
+  private agentHandle(agentId: string): PaseoAgentHandle {
+    this.agentHandles ??= new Map();
+    let handle = this.agentHandles.get(agentId);
+    if (!handle) {
+      handle = this.client.agents.ref(agentId);
+      this.agentHandles.set(agentId, handle);
+    }
+    return handle;
+  }
+  nativeSessionId(agentId: string): string | null {
+    // Read the same SDK handle refreshed by refresh/wait and foreground's
+    // timeline RPCs. ref(string) itself always creates an unloaded handle.
+    return this.agentHandles?.get(agentId)?.runtimeInfo?.sessionId ?? null;
+  }
   constructor(url: string) {
     this.url = url;
     this.client = createPaseoClient({
@@ -301,10 +318,14 @@ export class PaseoProvider implements Provider {
     await this.client.connect();
   }
   async close(): Promise<void> {
-    await this.client.close();
+    try {
+      await this.client.close();
+    } finally {
+      this.agentHandles?.clear();
+    }
   }
   async resume(id: string): Promise<void> {
-    await this.client.agents.ref(id).reload();
+    await this.agentHandle(id).reload();
   }
   prepareBudget(requestKey: string): string {
     const directory = path.join(appRoot, "state/pi-budgets");
@@ -377,7 +398,7 @@ export class PaseoProvider implements Provider {
     id: string,
     expectedNative?: NativeCompletionEvidence,
   ): Promise<{ complete: boolean; traceHash: string; toolCount: number }> {
-    const h = this.client.agents.ref(id);
+    const h = this.agentHandle(id);
     await h.refresh();
     const t = await observedTimeline(h, "projected");
     const snapshot = h.current();
@@ -732,6 +753,7 @@ export class PaseoProvider implements Provider {
         : null;
     return {
       id: h.id,
+      nativeSessionId: h.runtimeInfo?.sessionId ?? undefined,
       cwd: a.cwd,
       workspaceId: a.workspaceId ?? undefined,
       provider: a.provider,
@@ -765,7 +787,7 @@ export class PaseoProvider implements Provider {
     };
   }
   async refresh(id: string): Promise<Snapshot | null> {
-    const h = this.client.agents.ref(id);
+    const h = this.agentHandle(id);
     const r = await h.refresh();
     const s = await this.snapshot(h, r?.agent ?? null);
     // New daemons can project Running for background work after foreground settlement.
@@ -780,7 +802,7 @@ export class PaseoProvider implements Provider {
     return s;
   }
   async run(id: string, prompt: string): Promise<Snapshot> {
-    const h = this.client.agents.ref(id);
+    const h = this.agentHandle(id);
     const r = await h.run(prompt, { timeoutMs: 30000, activeTurnBehavior: "steer" });
     let s = await this.snapshot(h, r.final);
     if (!s) throw Error("Provider outcome unknown");
@@ -799,7 +821,7 @@ export class PaseoProvider implements Provider {
     return s;
   }
   async wait(id: string): Promise<Snapshot> {
-    const h = this.client.agents.ref(id);
+    const h = this.agentHandle(id);
     const r = await h.waitForFinish(30000);
     let s = await this.snapshot(h, r.final);
     if (!s) throw Error("Provider outcome unknown");

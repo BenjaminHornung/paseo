@@ -16,7 +16,8 @@
     "advisoryAuthority": "Nine inherited fingerprints only: capture 92 (was 91), currentIntake 23 (25), task assessment 51 (53), settingsOperation 238 (224), workflowStatus 29 (28), its task projection 38 unchanged, decisionHistory 34 unchanged, DecisionsHistory 30 (31). The existing five-deep worktree preflight only adds Main as an accepted read-only planning source; its previous exact block hash was matched to the immutable P1 snapshot. All new interpretation/schema/observation helpers and tests meet ordinary thresholds. No new entries, disabled rules or broad exceptions; raw accounting and effective authority stay separate.",
     "workCategories": "Phase B renews only three existing function fingerprints: OrchestratorSettings 87 to 85 after extracting the existing priority editor and adding category validation; Engine.plan 49 to 46 with the shared category preference isolated from the existing dispatch/reuse policy; settingsOperation 238 to 247 for frozen package catalogs, pre-advice Main proposal validation and caller catalog readback. New category schemas, editor components and routing helper meet ordinary lint thresholds. No new baseline entries or rule changes. Phase-A counts above describe the immutable predecessor.",
     "reviewRepair": "Two inherited Engine fingerprints only: continueExisting 39 to 40 for the exact rejected-review admission and pre/post-await repair binding; review remains 65 after reusing the same read-only reviewer-contract constructor. All new binding, audit/projection replacement and prompt/test helpers meet ordinary thresholds; Store.claimContinuation remains below the threshold after isolating its atomic review archival invariant. No new entries, disabled rules or broad exceptions. Rejected responses remain invalid; no model answer or process evidence is normalized.",
-    "restartTransport": "Three existing fingerprints only: captureHumanIntake 92 to 95 for bounded complete-history recovery, same-entry checkpoint aliases, native-session recheck before identity/audit writes and preservation of proven internal pending claims; currentIntake 23 to 24 for exact audited controller-transport exclusion; workflowStatus remains 29 and uses the same current-input reader. V2 keeps capture at 95 and narrows unresolved internal alias selection to the checkpoint, unverified/open pending bindings and later messages before both pagination and full-history resolution. New selection helpers remain within ordinary thresholds; direct aliases and human identities retain existing strict checks. No new baseline entries, disabled rules or broad exceptions. Historical assessment facts, financial state and human/operator collision gates remain intact."
+    "restartTransport": "Three existing fingerprints only: captureHumanIntake 92 to 95 for bounded complete-history recovery, same-entry checkpoint aliases, native-session recheck before identity/audit writes and preservation of proven internal pending claims; currentIntake 23 to 24 for exact audited controller-transport exclusion; workflowStatus remains 29 and uses the same current-input reader. V2 keeps capture at 95 and narrows unresolved internal alias selection to the checkpoint, unverified/open pending bindings and later messages before both pagination and full-history resolution. New selection helpers remain within ordinary thresholds; direct aliases and human identities retain existing strict checks. No new baseline entries, disabled rules or broad exceptions. Historical assessment facts, financial state and human/operator collision gates remain intact.",
+    "terminalRepair": "Only two existing fingerprints are renewed: continueExisting 40 to 44 for the separately authorized terminal successor and consumed-extra-attempt veto, snapshot 48 to 50 for the additive native session identity. Both original spans were verified against HEAD before renewal. All new grant/evidence/capacity/claim/delivery helpers and the regression meet normal thresholds. No new baseline entries, disabled rules or broad allowances; ordinary dispatch uses the same extracted capacity and claim implementation."
   },
   "entries": [
     {
@@ -1128,8 +1129,8 @@
     {
       "file": "packages/orchestrator/src/engine.ts",
       "rule": "eslint(complexity)",
-      "message": "async method `continueExisting` has a complexity of 40. Maximum allowed is 20.",
-      "sourceSha256": "1ee970344577b0e0adfa693349fc3d162ae4d3ade277bf3795deebc805e6c529",
+      "message": "async method `continueExisting` has a complexity of 44. Maximum allowed is 20.",
+      "sourceSha256": "794fa906ad95b5d339194b606d6aee476c11de7b9c3edd252d81aa8b82369132",
       "count": 1
     },
     {
@@ -1310,8 +1311,8 @@
     {
       "file": "packages/orchestrator/src/provider.ts",
       "rule": "eslint(complexity)",
-      "message": "private async method `snapshot` has a complexity of 48. Maximum allowed is 20.",
-      "sourceSha256": "6b05142a7bc661b60343f9cac42e5734ff974762cd9e4070d3e0535157392239",
+      "message": "private async method `snapshot` has a complexity of 50. Maximum allowed is 20.",
+      "sourceSha256": "976091223d99ba7b0b45c5baa44e7e0bf3ebb2f00dac85116561ca5dd651ce14",
       "count": 1
     },
     {

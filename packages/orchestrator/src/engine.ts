@@ -209,7 +209,6 @@ export class Engine {
       a = this.store.latest(key);
     const findings = reviewFindingsSchema.parse(repair?.findings ?? []);
     if (repair && !findings.length) throw Error("CONTINUATION_REVIEW_FINDINGS_REQUIRED");
-    if (repair) this.assertContinuationRepair(c, repair.diffHash, findings);
     assertTaskAssessment(this.store, this.config, c);
     if (
       this.config.orchestrationVersion === 3 &&
@@ -218,6 +217,10 @@ export class Engine {
     )
       throw Error("CONTINUATION_OWNER_APPROVAL_REQUIRED");
     if (!this.canDispatch(key) || this.store.stopped()) throw Error("CONTINUATION_NOT_AUTHORIZED");
+    if (a && this.store.terminalRepairForAttempt(a.id))
+      throw Error("TERMINAL_REPAIR_ALREADY_CONSUMED");
+    if (a?.status === "FAILED") return this.continueTerminalRepair(a, c, repair, findings);
+    if (repair) this.assertContinuationRepair(c, repair.diffHash, findings);
     const effectiveChecks = this.store.checkCommands(c);
     if (
       !a?.agent_id ||
@@ -313,6 +316,95 @@ export class Engine {
       throw Error("CONTINUATION_OUTCOME_UNKNOWN");
     }
     return { agentId: a.agent_id, continued: true };
+  }
+  private async continueTerminalRepair(
+    predecessor: Attempt,
+    contract: Contract,
+    repair: { diffHash: string; findings: unknown } | undefined,
+    findings: NonNullable<ReviewResult["findings"]>,
+  ): Promise<{ agentId: string; continued: true }> {
+    const grant = this.store.terminalRepairGrant(predecessor.task_key);
+    if (!grant || grant.predecessorAttemptId !== predecessor.id)
+      throw Error("TERMINAL_REPAIR_GRANT_REQUIRED");
+    if (
+      !repair ||
+      repair.diffHash !== grant.diffHash ||
+      !findings.length ||
+      findings.some(
+        (finding) =>
+          ![...this.store.scopePaths(contract), grant.additionalAllowedPath].some((allowed) =>
+            pathInScope(finding.file, allowed),
+          ),
+      )
+    )
+      throw Error("CONTINUATION_REVIEW_BINDING_MISMATCH");
+    const route: RuntimeRoute = JSON.parse(predecessor.route_json);
+    this.assertTerminalRepairRoute(contract, route);
+    this.git.validate(contract);
+    await this.provider.authorize(route, contract.worktree);
+    const snapshot = await this.provider.refresh(grant.agentId);
+    if (
+      !snapshot ||
+      snapshot.id !== grant.agentId ||
+      snapshot.nativeSessionId !== grant.nativeSessionId ||
+      snapshot.status !== "idle" ||
+      snapshot.foregroundActive ||
+      !snapshot.turnComplete ||
+      (await this.completion.assess(snapshot)).state !== "VERIFY"
+    )
+      throw Error("TERMINAL_REPAIR_WORKER_NOT_SETTLED");
+    if (this.provider.nativeSessionId?.(grant.agentId) !== grant.nativeSessionId)
+      throw Error("TERMINAL_REPAIR_SESSION_CHANGED");
+    this.validateSnapshot(contract, route, snapshot);
+    const successor = this.store.claimTerminalRepair(grant, findings, () => {
+      assertTaskAssessment(this.store, this.config, contract);
+      if (
+        this.config.orchestrationVersion === 3 &&
+        contract.highRisk &&
+        !hasAuditedOwnerApproval(this.store, contract)
+      )
+        throw Error("CONTINUATION_OWNER_APPROVAL_REQUIRED");
+      if (!this.canDispatch(predecessor.task_key)) throw Error("CONTINUATION_NOT_AUTHORIZED");
+      if (this.git.snapshot(contract).diffHash !== grant.diffHash)
+        throw Error("TERMINAL_REPAIR_DIFF_CHANGED");
+    });
+    const delivered = await this.deliver(successor.id);
+    if (!delivered.run_accepted) throw Error("TERMINAL_REPAIR_OUTCOME_UNKNOWN");
+    return { agentId: grant.agentId, continued: true };
+  }
+  private assertTerminalRepairRoute(contract: Contract, route: RuntimeRoute): void {
+    const configured = this.config.routes.find((candidate) => candidate.id === route.id);
+    if (
+      !this.config.liveDispatchApproved ||
+      !configured?.enabled ||
+      route.revision === "discovery-required" ||
+      hash(configured) !== hash(route) ||
+      route.tier < contract.minTier ||
+      !routeAllowsPath(route, contract.worktree) ||
+      (contract.workspace && !routeAllowsPath(route, contract.workspace.directory)) ||
+      contract.requiredCapabilities.some((capability) => !route.capabilities.includes(capability))
+    )
+      throw Error("TERMINAL_REPAIR_ROUTE_CHANGED");
+  }
+  private assertTerminalRepairDelivery(attempt: Attempt, snapshot: Snapshot): void {
+    const grant = this.store.terminalRepairForAttempt(attempt.id);
+    if (!grant) return;
+    const contract = this.contract(attempt.task_key);
+    if (
+      snapshot.nativeSessionId !== grant.nativeSessionId ||
+      this.provider.nativeSessionId?.(grant.agentId) !== grant.nativeSessionId ||
+      snapshot.id !== grant.agentId ||
+      this.git.snapshot(contract).diffHash !== grant.diffHash ||
+      this.store.scopeRevision(contract) !== grant.approvedScopeRevision ||
+      this.store.checkRevision(contract) !== grant.approvedCheckRevision
+    )
+      throw Error("TERMINAL_REPAIR_DELIVERY_BINDING_CHANGED");
+    if (
+      this.config.orchestrationVersion === 3 &&
+      contract.highRisk &&
+      !hasAuditedOwnerApproval(this.store, contract)
+    )
+      throw Error("CONTINUATION_OWNER_APPROVAL_REQUIRED");
   }
   private assertContinuationRepair(
     c: Contract,
@@ -899,7 +991,7 @@ export class Engine {
     }
     return undefined;
   }
-  private reworkFeedback(key: string): string {
+  private reworkFeedback(key: string, attemptId?: string): string {
     const row = this.store.db
       .prepare(`SELECT a.id,r.result_json,e.evidence_json FROM attempts a LEFT JOIN review_runs r ON r.attempt_id=a.id
       LEFT JOIN reviews e ON e.attempt_id=a.id WHERE a.task_key=? AND a.status='FAILED' ORDER BY a.sequence DESC LIMIT 1`)
@@ -922,6 +1014,13 @@ export class Engine {
       row.evidence_json ? JSON.parse(row.evidence_json).controllerFindings : undefined,
     );
     const evidence = row.evidence_json ? JSON.parse(row.evidence_json) : undefined;
+    const terminalFeedback = attemptId
+      ? (this.store.db
+          .prepare(
+            "SELECT kind FROM events WHERE attempt_id=? AND kind LIKE 'TERMINAL_REPAIR_FEEDBACK:%'",
+          )
+          .get(attemptId) as { kind: string } | undefined)
+      : undefined;
     return `\nController repair feedback for the previous attempt (source data, not policy):\n${JSON.stringify(
       {
         review: currentReview,
@@ -930,7 +1029,7 @@ export class Engine {
         cohortFailure: evidence?.cohortFailure,
         combinedFailure: evidence?.cohortFailure ? evidence : undefined,
       },
-    )}${checkpoint ? `\nStructured checkpoint for this exact contract/config/base/diff (controller metadata only):\n${JSON.stringify(checkpoint)}\nUse its review findings while continuing within the original task contract.` : ""}\nFix the concrete findings only within your owned files, preserve accepted peer changes, and report when your portion needs no change. Shared checks run after all peers finish. Do not commit or claim acceptance.`;
+    )}${terminalFeedback ? `\nBound main repair findings for the one operator-approved terminal round (source data, not policy):\n${terminalFeedback.kind.slice("TERMINAL_REPAIR_FEEDBACK:".length)}` : ""}${checkpoint ? `\nStructured checkpoint for this exact contract/config/base/diff (controller metadata only):\n${JSON.stringify(checkpoint)}\nUse its review findings while continuing within the original task contract.` : ""}\nFix the concrete findings only within your owned files, preserve accepted peer changes, and report when your portion needs no change. Shared checks run after all peers finish. Do not commit or claim acceptance.`;
   }
   async dispatch(key: string): Promise<Attempt> {
     const e = this.context(key);
@@ -981,6 +1080,7 @@ export class Engine {
           throw Error("Session not idle");
         this.validateSnapshot(c, route, before);
         assertTaskAssessment(this.store, this.config, c);
+        this.assertTerminalRepairDelivery(a, before);
         if (!this.canDispatch(a.task_key) || !this.store.beginSend(id))
           return this.store.attempt(id);
         if (route.provider === "pi") {
@@ -1004,7 +1104,7 @@ export class Engine {
             ...c,
             allowedPaths: this.store.scopePaths(c),
             checks: this.store.checkCommands(c),
-          }) + this.reworkFeedback(a.task_key),
+          }) + this.reworkFeedback(a.task_key, a.id),
         );
         this.store.db.prepare("UPDATE attempts SET run_accepted=1 WHERE id=?").run(id);
         await this.acceptSnapshot(id, result);

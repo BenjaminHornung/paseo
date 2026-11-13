@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
@@ -14,7 +15,8 @@ import {
   type Contract,
 } from "../src/contracts.ts";
 import { Git } from "../src/git.ts";
-import type { Provider, Snapshot } from "../src/provider.ts";
+import { PaseoProvider, type Provider, type Snapshot } from "../src/provider.ts";
+import { createPaseoApi } from "@getpaseo/client";
 import { Store } from "../src/store.ts";
 
 function gitExecutable(): string {
@@ -43,6 +45,8 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
     worktreePath = path.join(root, "worktree");
   mkdirSync(path.join(repository, "src"), { recursive: true });
   writeFileSync(path.join(repository, "src", "base.ts"), "export const base = true;\n");
+  mkdirSync(path.join(repository, "tests"));
+  writeFileSync(path.join(repository, "tests", "manifest.ts"), "export const inventory = 9;\n");
   runGit(git, ["init", "-b", "main"], repository);
   runGit(git, ["config", "user.name", "Paseo test"], repository);
   runGit(git, ["config", "user.email", "paseo-test@example.invalid"], repository);
@@ -690,6 +694,285 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
             .get()!.count,
           1,
         );
+      } finally {
+        state.close();
+      }
+    },
+  );
+  await t.test(
+    "one operator grant repairs an exhausted task in the same worker without replacing terminal evidence",
+    async (terminalTest) => {
+      const state = new Store(path.join(root, "terminal-repair.sqlite"));
+      try {
+        const repairConfig = configSchema.parse({ ...config, maxRework: 2 });
+        const repairContract = contractSchema.parse({
+          ...contract,
+          uiChanged: false,
+          checks: { ...contract.checks, build: [process.execPath, "-e", "process.exit(9)"] },
+        });
+        const oldId = `${taskKey}/3`,
+          nativeSessionId = "native-writer-session";
+        const originalDiff = new Git(git).snapshot(repairContract);
+        const failedChecks = {
+          ...reviewCheckpoint,
+          diffHash: originalDiff.diffHash,
+          build: {
+            exit: 124,
+            quiescent: true,
+            logHash: hash("timeout"),
+            diagnostic: { timedOut: true },
+          },
+        };
+        const checkJson = JSON.stringify(failedChecks);
+        state.db
+          .prepare("INSERT INTO workflows VALUES(?,?,?,?)")
+          .run(contract.workflowId, repoPath, "", hash(repairConfig));
+        state.db
+          .prepare("INSERT INTO tasks VALUES(?,?,?,?,?,?,?,3)")
+          .run(
+            taskKey,
+            contract.workflowId,
+            JSON.stringify(repairContract),
+            hash(repairContract),
+            hash(repairConfig),
+            JSON.stringify(repairConfig),
+            "BLOCKED",
+          );
+        state.db
+          .prepare(
+            "INSERT INTO attempts(id,task_key,sequence,status,route_json,agent_id,fence,session_key,created_ms,result_hash) VALUES(?,?,3,'FAILED',?, 'writer-old',3,'terminal-writer-session',?,?)",
+          )
+          .run(oldId, taskKey, JSON.stringify(writerRoute), Date.now(), originalDiff.diffHash);
+        state.db
+          .prepare("INSERT INTO turn_checks VALUES(?,?,?)")
+          .run(oldId, originalDiff.diffHash, checkJson);
+        state.db
+          .prepare("INSERT INTO reviews VALUES(?,?,?)")
+          .run(
+            oldId,
+            originalDiff.diffHash,
+            JSON.stringify({ phase: "pre-review", ...failedChecks }),
+          );
+        const originalAttempt = state.attempt(oldId);
+        const originalReview = state.db
+          .prepare("SELECT * FROM reviews WHERE attempt_id=?")
+          .get(oldId);
+        let sent = 0,
+          race = false,
+          changedSession = false;
+        let observedSession = nativeSessionId;
+        const sdkAgent = () => ({
+          id: "writer-old",
+          cwd: worktree,
+          provider: "codex",
+          model: writerRoute.model,
+          status: "idle",
+          activeTurn: null,
+          pendingPermissions: [],
+          runtimeInfo: {
+            provider: "codex",
+            sessionId: observedSession,
+            thinkingOptionId: "high",
+            modeId: null,
+          },
+        });
+        // Only the daemon transport is synthetic. ref(), its per-handle state,
+        // refresh/wait/timeline updates and all identity getters are the real SDK.
+        const api = createPaseoApi({
+          getLastServerInfoMessage: () => ({ serverId: "fixture-server" }),
+          fetchAgent: async () => ({ agent: sdkAgent() }),
+          waitForFinish: async () => ({ status: "idle", final: sdkAgent() }),
+          fetchAgentTimeline: async () => {
+            await Promise.resolve();
+            if (changedSession) observedSession = "different-native-session";
+            return {
+              agent: sdkAgent(),
+              entries: [],
+              error: null,
+              gap: false,
+              hasOlder: false,
+              hasNewer: false,
+            };
+          },
+          refreshAgentBackgroundWork: async () => ({
+            agentId: "writer-old",
+            providerSessionId: observedSession,
+            observationId: "fresh-public-sdk",
+            coverage: "codex_background_terminals",
+            queriedProviderSessionIds: [observedSession],
+            items: [],
+            providerSubagents: [],
+          }),
+        } as unknown as Parameters<typeof createPaseoApi>[0]);
+        const sdkProvider = new PaseoProvider("ws://fixture.invalid/ws");
+        Object.assign(sdkProvider, { client: { ...api, close: () => api.dispose() } });
+        terminalTest.after(() => sdkProvider.close());
+        const snapshot = (await sdkProvider.refresh("writer-old"))!;
+        assert.equal(
+          sdkProvider.nativeSessionId("writer-old"),
+          nativeSessionId,
+          "the production identity reader must use the loaded public SDK handle",
+        );
+        const reviews: { key: string; diff: string }[] = [];
+        const repairProvider: Provider = {
+          ...provider,
+          nativeSessionId: (id) => sdkProvider.nativeSessionId(id),
+          refresh: (id) => sdkProvider.refresh(id),
+          foregroundEvidence: async (id) => {
+            if (race)
+              state.db
+                .prepare("UPDATE turn_checks SET result_json=? WHERE attempt_id=?")
+                .run(JSON.stringify({ ...failedChecks, changed: true }), oldId);
+            return sdkProvider.foregroundEvidence(id);
+          },
+          run: async (id, prompt) => {
+            assert.equal(id, "writer-old");
+            assert.match(prompt, /tests\/manifest.ts/);
+            assert.match(prompt, /Finish the objective/);
+            assert.match(prompt, /Finish the reported behavior before acceptance/);
+            sent++;
+            writeFileSync(
+              path.join(worktreePath, "tests", "manifest.ts"),
+              "export const inventory = 10;\n",
+            );
+            return { ...snapshot, status: "running", foregroundActive: true, turnComplete: false };
+          },
+          create: async (route, reviewContract, requestKey) => {
+            assert.equal(route.id, "reviewer", "no replacement implementation worker is created");
+            reviews.push({ key: requestKey, diff: reviewContract.reviewDiffHash! });
+            return "terminal-reviewer";
+          },
+          wait: async () => ({
+            ...snapshot,
+            id: "terminal-reviewer",
+            model: reviewerRoute.model,
+            reviewResult: {
+              diffHash: new Git(git).snapshot(repairContract).diffHash,
+              pass: false,
+              unresolvedIssues: 1,
+              findings: [{ ...reviewerFinding, file: "tests/manifest.ts" }],
+            },
+          }),
+        };
+        const repairEngine = new Engine(state, repairConfig, repairProvider);
+        const repair = {
+          diffHash: originalDiff.diffHash,
+          findings: [{ ...reviewerFinding, file: "tests/manifest.ts" }],
+        };
+        await assert.rejects(
+          () => repairEngine.continueExisting(taskKey, repair),
+          /TERMINAL_REPAIR_GRANT_REQUIRED/,
+        );
+        const request = {
+          predecessorAttemptId: oldId,
+          predecessorFence: 3,
+          agentId: "writer-old",
+          nativeSessionId,
+          contractHash: hash(repairContract),
+          configHash: hash(repairConfig),
+          diffHash: originalDiff.diffHash,
+          checkEvidenceSha256: createHash("sha256").update(checkJson).digest("hex"),
+          scopeRevision: state.scopeRevision(repairContract),
+          checkRevision: state.checkRevision(repairContract),
+          additionalAllowedPath: "tests/manifest.ts",
+          checks: contract.checks,
+        };
+        assert.throws(
+          () =>
+            state.approveTerminalRepair(taskKey, { ...request, predecessorFence: 2 }, "one repair"),
+          /BINDING_CHANGED/,
+        );
+        state.approveTerminalRepair(taskKey, request, "one explicitly approved repair");
+        changedSession = true;
+        await assert.rejects(
+          () => repairEngine.continueExisting(taskKey, repair),
+          /TERMINAL_REPAIR_SESSION_CHANGED/,
+        );
+        changedSession = false;
+        observedSession = nativeSessionId;
+        race = true;
+        await assert.rejects(
+          () => repairEngine.continueExisting(taskKey, repair),
+          /CHECK_EVIDENCE_CHANGED/,
+        );
+        race = false;
+        state.db
+          .prepare("UPDATE turn_checks SET result_json=? WHERE attempt_id=?")
+          .run(checkJson, oldId);
+        state.db.exec(
+          "CREATE TRIGGER reject_terminal_outbox BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT,'fixture-claim-failed'); END",
+        );
+        await assert.rejects(
+          () => repairEngine.continueExisting(taskKey, repair),
+          /fixture-claim-failed/,
+        );
+        state.db.exec("DROP TRIGGER reject_terminal_outbox");
+        assert.equal(state.latest(taskKey)?.id, oldId);
+        assert.equal(state.db.prepare("SELECT count(*) AS n FROM leases").get()!.n, 0);
+        assert.equal(
+          state.db
+            .prepare(
+              "SELECT count(*) AS n FROM events WHERE kind LIKE 'TERMINAL_REPAIR_CONSUMED:%' OR kind LIKE 'OPERATOR_SCOPE_EXTENSION:%' OR kind LIKE 'OPERATOR_CHECK_COMMANDS:%'",
+            )
+            .get()!.n,
+          0,
+          "failed claims roll back grant consumption and scope/check projections",
+        );
+        assert.equal(sent, 0);
+        assert.deepEqual(await repairEngine.continueExisting(taskKey, repair), {
+          agentId: "writer-old",
+          continued: true,
+        });
+        const successor = state.latest(taskKey)!;
+        assert.equal(successor.id, `${taskKey}/4`);
+        assert.equal(successor.agent_id, originalAttempt.agent_id);
+        assert.equal(successor.fence, 4, "a missing lease must not reset the predecessor fence");
+        assert.equal(successor.session_key, originalAttempt.session_key);
+        assert.equal(state.task(taskKey)?.rework, 3);
+        assert.deepEqual(state.scopePaths(repairContract), [
+          ...repairContract.allowedPaths,
+          "tests/manifest.ts",
+        ]);
+        assert.deepEqual(state.checkCommands(repairContract), contract.checks);
+        assert.deepEqual(state.attempt(oldId), originalAttempt);
+        assert.deepEqual(
+          state.db.prepare("SELECT * FROM reviews WHERE attempt_id=?").get(oldId),
+          originalReview,
+        );
+        assert.equal(
+          state.db.prepare("SELECT result_json FROM turn_checks WHERE attempt_id=?").get(oldId)!
+            .result_json,
+          checkJson,
+        );
+        await assert.rejects(
+          () => repairEngine.continueExisting(taskKey, repair),
+          /ALREADY_CONSUMED/,
+        );
+        await repairEngine.acceptSnapshot(successor.id, snapshot);
+        await repairEngine.advance(successor.id);
+        const fresh = state.db
+          .prepare("SELECT diff_hash,result_json FROM turn_checks WHERE attempt_id=?")
+          .get(successor.id)!;
+        assert.notEqual(fresh.diff_hash, originalDiff.diffHash);
+        assert.equal(
+          JSON.parse(String(fresh.result_json)).build.exit,
+          0,
+          "the successor actually runs fresh supervised checks",
+        );
+        assert.deepEqual(reviews, [{ key: `${successor.id}/review`, diff: fresh.diff_hash }]);
+        assert.equal(
+          state.task(taskKey)?.state,
+          "BLOCKED",
+          "another failure grants no automatic repair round",
+        );
+        assert.equal(state.task(taskKey)?.rework, 4);
+        assert.equal(sent, 1);
+        assert.throws(
+          () => state.approveTerminalRepair(taskKey, request, "again"),
+          /ALREADY_GRANTED/,
+        );
+        await repairEngine.tick();
+        assert.equal(sent, 1);
       } finally {
         state.close();
       }

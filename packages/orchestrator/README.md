@@ -96,6 +96,43 @@ Observe-only recovery waits when an implementation is not VERIFY; it does not re
 a closed worker, attest its processes or accept its review. Reopening the same existing
 agent uses the normal public reload path with fresh identity and safety checks.
 
+An exhausted task (`BLOCKED`, latest attempt `FAILED`) cannot be resumed by an agent.
+After explicit authorization for one additional repair, an operator may run:
+
+```text
+node <installed-controller>/dist/src/cli.js terminal-repair-approve <task-key> <request.json> "Reason for the authorized extra round"
+```
+
+Use the intended installation's explicit code/data roots and daemon home. The request
+contains `predecessorAttemptId`, `predecessorFence`, `agentId`, `nativeSessionId`,
+`contractHash`, `configHash`, `diffHash`, `checkEvidenceSha256`, `scopeRevision`,
+`checkRevision` and exactly one `additionalAllowedPath` naming an existing file.
+`checkEvidenceSha256` hashes the unchanged raw `turn_checks.result_json` bytes.
+Scope/check revisions use the controller's existing stable `hash` convention:
+`{contractHash, paths: sortedEffectivePaths}` and
+`{contractHash, checks: effectiveCommands, scriptHashes: externalScriptHashes}`.
+Optional `checks` uses the normal build/test command arrays. The operator must retain
+compilation and the original test assertions; diagnostic `--no-build` runs are not
+final checks. Existing script/worktree validation remains mandatory.
+
+Approval is CLI-only, not a human intake receipt or a main tool. It freezes the exact
+terminal predecessor, old evidence and approved scope/check revisions. The usual
+`orchestrator_continue_task` then supplies exact-diff, scoped findings. After fresh
+identity, process, authority and ownership checks, its atomic claim consumes the grant
+and creates a new attempt in the same task, Codex worker and native session. Its fence
+exceeds the predecessor even if the old lease row is absent. Scope/check audit events
+remain bound to the unchanged original contract. Failed claims leave no partial
+consumption, scope, command, lease or outbox projection.
+
+The old failed attempt, checks, review evidence and rework count remain unchanged.
+The successor receives fresh checks and a distinct independent review request. There
+is no second grant for that task or generic continuation of this extra attempt; an
+unknown send is reconciled through the existing outbox/run acknowledgement gates.
+Another failure blocks without resetting `maxRework`, counters, budgets or history.
+This path does not reload closed agents, change check timeouts, ignore job children,
+or reinterpret exit 124 as success. An operator must first reopen the same existing
+agent through the supported lifecycle when necessary.
+
 Under **Rollen & Modelle → Reihenfolge je Rolle & Arbeitsart → UI-Implementierung**,
 choose existing routes and order their priority, including routes created from Advanced
 profiles. The optional `roleRoutes.ui` list applies to mutating implementation packages

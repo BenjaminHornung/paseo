@@ -1,9 +1,9 @@
 import { DatabaseSync, backup } from "node:sqlite";
 import lockfile from "proper-lockfile";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, lstatSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import type { Config, Contract, RuntimeRoute } from "./contracts.ts";
+import type { Config, Contract, RuntimeRoute, ReviewResult } from "./contracts.ts";
 import {
   hash,
   apiTaskReservation,
@@ -11,6 +11,11 @@ import {
   pathInScope,
   canonicalPath,
 } from "./contracts.ts";
+import {
+  terminalRepairRequestSchema,
+  type TerminalRepairGrant,
+  type TerminalRepairRequest,
+} from "./terminal-repair.ts";
 
 export type AttemptState =
   | "INTENT"
@@ -77,6 +82,14 @@ interface CheckApproval {
   contractHash: string;
   checks: Contract["checks"];
   scriptHashes?: Record<string, string>;
+}
+interface AttemptClaim {
+  key: string;
+  route: RuntimeRoute;
+  config: Config;
+  sessionKey: string;
+  agentId?: string;
+  predecessor?: Attempt;
 }
 const activeReviewStates =
   "'INTENT','SENDING','UNKNOWN','RUNNING','PERMISSION','NEEDS_CONFIRMATION','WAITING_PROCESSES'";
@@ -545,36 +558,8 @@ export class Store {
       const c: Contract = JSON.parse(task.contract_json);
       if (task.contract_hash !== hash(c) || !c.mutation || !c.role.startsWith("implement-"))
         throw Error("CHECK_COMMAND_CONTRACT_INVALID");
-      const validated = contractSchema.parse({ ...c, checks }).checks;
-      for (const command of [validated.build, validated.test]) {
-        const worktreeIndex = command.findIndex(
-          (argument) => argument.toLowerCase() === "-worktree",
-        );
-        if (
-          worktreeIndex >= 0 &&
-          (!command[worktreeIndex + 1] ||
-            canonicalPath(command[worktreeIndex + 1]) !== canonicalPath(c.worktree))
-        )
-          throw Error("CHECK_COMMAND_WORKTREE_MISMATCH");
-        const resultsIndex = command.findIndex(
-          (argument) => argument.toLowerCase() === "-resultsroot",
-        );
-        if (resultsIndex >= 0) {
-          const relative = path.relative(
-            canonicalPath(c.worktree),
-            canonicalPath(command[resultsIndex + 1]),
-          );
-          if (
-            relative === "" ||
-            (relative !== ".." &&
-              !relative.startsWith(`..${path.sep}`) &&
-              !path.isAbsolute(relative))
-          )
-            throw Error("CHECK_COMMAND_RESULTS_INSIDE_WORKTREE");
-        }
-      }
-      const scriptHashes = this.checkScriptHashes(c, validated),
-        previous = this.checkApproval(c);
+      const { checks: validated, scriptHashes } = this.checkCommandBinding(c, checks);
+      const previous = this.checkApproval(c);
       if (
         !this.db
           .prepare(
@@ -598,6 +583,210 @@ export class Store {
           attempt.id,
         );
       return hash({ contractHash: hash(c), checks: validated, scriptHashes });
+    });
+  }
+  checkCommandBinding(c: Contract, checks: Contract["checks"] = this.checkCommands(c)) {
+    const validated = contractSchema.parse({ ...c, checks }).checks;
+    for (const command of [validated.build, validated.test]) {
+      const worktreeIndex = command.findIndex((argument) => argument.toLowerCase() === "-worktree");
+      if (
+        worktreeIndex >= 0 &&
+        (!command[worktreeIndex + 1] ||
+          canonicalPath(command[worktreeIndex + 1]) !== canonicalPath(c.worktree))
+      )
+        throw Error("CHECK_COMMAND_WORKTREE_MISMATCH");
+      const resultsIndex = command.findIndex(
+        (argument) => argument.toLowerCase() === "-resultsroot",
+      );
+      if (resultsIndex >= 0) {
+        const relative = path.relative(
+          canonicalPath(c.worktree),
+          canonicalPath(command[resultsIndex + 1]),
+        );
+        if (
+          relative === "" ||
+          (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+        )
+          throw Error("CHECK_COMMAND_RESULTS_INSIDE_WORKTREE");
+      }
+    }
+    return { checks: validated, scriptHashes: this.checkScriptHashes(c, validated) };
+  }
+  checkRevision(c: Contract): string {
+    return hash({ contractHash: hash(c), ...this.checkCommandBinding(c) });
+  }
+  terminalRepairGrant(key: string): TerminalRepairGrant | undefined {
+    const row = this.db
+      .prepare(`SELECT e.kind FROM events e JOIN attempts a ON a.id=e.attempt_id
+      WHERE a.task_key=? AND e.kind LIKE 'OPERATOR_TERMINAL_REPAIR:%' ORDER BY e.sequence DESC LIMIT 1`)
+      .get(key) as { kind: string } | undefined;
+    return row ? JSON.parse(row.kind.slice("OPERATOR_TERMINAL_REPAIR:".length)) : undefined;
+  }
+  terminalRepairForAttempt(id: string): TerminalRepairGrant | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT kind FROM events WHERE attempt_id=? AND kind LIKE 'TERMINAL_REPAIR_SUCCESSOR:%'",
+      )
+      .get(id) as { kind: string } | undefined;
+    return row ? JSON.parse(row.kind.slice("TERMINAL_REPAIR_SUCCESSOR:".length)) : undefined;
+  }
+  private terminalRepairPredecessor(key: string, request: TerminalRepairRequest) {
+    const task = this.task(key),
+      attempt = this.latest(key);
+    if (
+      !task ||
+      !attempt ||
+      task.state !== "BLOCKED" ||
+      attempt.status !== "FAILED" ||
+      attempt.id !== request.predecessorAttemptId ||
+      attempt.fence !== request.predecessorFence ||
+      attempt.agent_id !== request.agentId ||
+      task.contract_hash !== request.contractHash ||
+      task.config_hash !== request.configHash
+    )
+      throw Error("TERMINAL_REPAIR_BINDING_CHANGED");
+    const contract: Contract = JSON.parse(task.contract_json),
+      config: Config = JSON.parse(task.config_json);
+    const route: RuntimeRoute = JSON.parse(attempt.route_json);
+    if (
+      hash(contract) !== task.contract_hash ||
+      hash(config) !== task.config_hash ||
+      task.rework <= config.maxRework ||
+      !contract.mutation ||
+      !contract.role.startsWith("implement-") ||
+      route.provider !== "codex" ||
+      route.access !== "codex-pro200"
+    )
+      throw Error("TERMINAL_REPAIR_NOT_ELIGIBLE");
+    const { checks, review } = this.terminalRepairCheckEvidence(attempt, request);
+    if (
+      this.scopeRevision(contract) !== request.scopeRevision ||
+      this.checkRevision(contract) !== request.checkRevision
+    )
+      throw Error("TERMINAL_REPAIR_REVISION_CHANGED");
+    this.assertTerminalRepairAvailable(contract, attempt);
+    return { task, attempt, contract, checks, review };
+  }
+  private terminalRepairCheckEvidence(attempt: Attempt, request: TerminalRepairRequest) {
+    const checks = this.db.prepare("SELECT * FROM turn_checks WHERE attempt_id=?").get(attempt.id);
+    const review = this.db.prepare("SELECT * FROM reviews WHERE attempt_id=?").get(attempt.id);
+    if (
+      !checks ||
+      !review ||
+      checks.diff_hash !== request.diffHash ||
+      createHash("sha256").update(String(checks.result_json)).digest("hex") !==
+        request.checkEvidenceSha256
+    )
+      throw Error("TERMINAL_REPAIR_CHECK_EVIDENCE_CHANGED");
+    const result = JSON.parse(String(checks.result_json));
+    const evidence = JSON.parse(String(review.evidence_json));
+    if (
+      evidence.phase !== "pre-review" ||
+      !Number.isInteger(result.build.exit) ||
+      !Number.isInteger(result.test.exit) ||
+      (!result.build.exit && !result.test.exit) ||
+      result.build.quiescent !== true ||
+      result.test.quiescent !== true ||
+      result.changed !== false ||
+      result.scopeViolations !== 0 ||
+      result.diffCheckExit !== 0 ||
+      result.diffHash !== request.diffHash ||
+      attempt.result_hash !== request.diffHash
+    )
+      throw Error("TERMINAL_REPAIR_CHECK_FAILURE_REQUIRED");
+    return { checks, review };
+  }
+  private assertTerminalRepairAvailable(contract: Contract, attempt: Attempt): void {
+    if (
+      this.db.prepare("SELECT 1 FROM check_locks WHERE worktree=?").get(contract.worktree) ||
+      this.db.prepare("SELECT 1 FROM review_runs WHERE attempt_id=?").get(attempt.id) ||
+      this.reviewInWorktree(contract) ||
+      this.active().some((a) => a.task_key === attempt.task_key || a.agent_id === attempt.agent_id)
+    )
+      throw Error("TERMINAL_REPAIR_WORK_IN_PROGRESS");
+  }
+  approveTerminalRepair(key: string, input: unknown, reason: string): string {
+    const request = terminalRepairRequestSchema.parse(input);
+    return this.transaction(() => {
+      if (!reason.trim() || reason.length > 500) throw Error("TERMINAL_REPAIR_REASON_REQUIRED");
+      const previous = this.terminalRepairGrant(key);
+      if (previous) throw Error("TERMINAL_REPAIR_ALREADY_GRANTED");
+      const predecessor = this.terminalRepairPredecessor(key, request),
+        c = predecessor.contract;
+      const additional = contractSchema.parse({
+        ...c,
+        allowedPaths: [request.additionalAllowedPath],
+      }).allowedPaths[0];
+      const file = path.resolve(c.worktree, additional);
+      if (
+        this.scopePaths(c).some((allowed) => pathInScope(additional, allowed)) ||
+        !lstatSync(file).isFile() ||
+        canonicalPath(file) !== (process.platform === "win32" ? file.toLowerCase() : file)
+      )
+        throw Error("TERMINAL_REPAIR_ADDITIONAL_FILE_REQUIRED");
+      const binding = this.checkCommandBinding(c, request.checks ?? this.checkCommands(c));
+      for (const command of [binding.checks.build, binding.checks.test]) {
+        if (!path.isAbsolute(command[0])) throw Error("CHECK_COMMAND_ABSOLUTE_EXECUTABLE_REQUIRED");
+        canonicalPath(command[0]);
+      }
+      const grant: TerminalRepairGrant = {
+        ...request,
+        taskKey: key,
+        checks: binding.checks,
+        predecessorHash: hash(predecessor),
+        approvedCheckRevision: hash({ contractHash: hash(c), ...binding }),
+        approvedScopeRevision: hash({
+          contractHash: hash(c),
+          paths: [...this.scopePaths(c), additional].sort(),
+        }),
+        reason,
+      };
+      this.event(`OPERATOR_TERMINAL_REPAIR:${JSON.stringify(grant)}`, predecessor.attempt.id);
+      return hash(grant);
+    });
+  }
+  claimTerminalRepair(
+    grant: TerminalRepairGrant,
+    findings: NonNullable<ReviewResult["findings"]>,
+    authorize: () => void,
+  ): Attempt {
+    return this.transaction(() => {
+      authorize();
+      if (hash(this.terminalRepairGrant(grant.taskKey)) !== hash(grant))
+        throw Error("TERMINAL_REPAIR_GRANT_CHANGED");
+      const predecessor = this.terminalRepairPredecessor(grant.taskKey, grant);
+      if (hash(predecessor) !== grant.predecessorHash)
+        throw Error("TERMINAL_REPAIR_BINDING_CHANGED");
+      const consumed = `TERMINAL_REPAIR_CONSUMED:${hash(grant)}`;
+      if (this.db.prepare("SELECT 1 FROM events WHERE kind=?").get(consumed))
+        throw Error("TERMINAL_REPAIR_ALREADY_CONSUMED");
+      const c = predecessor.contract,
+        binding = this.checkCommandBinding(c, grant.checks);
+      if (hash({ contractHash: hash(c), ...binding }) !== grant.approvedCheckRevision)
+        throw Error("CHECK_COMMAND_SCRIPT_CHANGED");
+      this.event(
+        `OPERATOR_SCOPE_EXTENSION:${JSON.stringify({ contractHash: hash(c), paths: [grant.additionalAllowedPath], reason: grant.reason })}`,
+        predecessor.attempt.id,
+      );
+      this.event(
+        `OPERATOR_CHECK_COMMANDS:${JSON.stringify({ contractHash: hash(c), ...binding, reason: grant.reason })}`,
+        predecessor.attempt.id,
+      );
+      this.event(consumed, predecessor.attempt.id);
+      const successor = this.claimAttempt({
+        key: grant.taskKey,
+        route: JSON.parse(predecessor.attempt.route_json),
+        config: JSON.parse(predecessor.task.config_json),
+        sessionKey: predecessor.attempt.session_key,
+        agentId: grant.agentId,
+        predecessor: predecessor.attempt,
+      });
+      this.event(`TERMINAL_REPAIR_SUCCESSOR:${JSON.stringify(grant)}`, successor.id);
+      this.event(
+        `TERMINAL_REPAIR_FEEDBACK:${JSON.stringify({ diffHash: grant.diffHash, findings })}`,
+        successor.id,
+      );
+      return successor;
     });
   }
   approveScopeExtension(key: string, paths: string[], reason: string): string {
@@ -985,71 +1174,77 @@ export class Store {
     sessionKey: string,
     agentId?: string,
   ): Attempt {
-    return this.transaction(() => {
-      if (this.stopped()) throw Error("Dispatch stopped");
-      const row = this.task(key);
-      if (!row || !["READY", "REWORK"].includes(row.state)) throw Error("Task not dispatchable");
-      if (row.config_hash !== hash(config)) throw Error("Configuration fingerprint changed");
-      const c: Contract = JSON.parse(row.contract_json);
-      if (this.active().some((a) => a.task_key === key)) throw Error("Task already active");
-      const active = this.active();
-      const owned = active.filter(
-        (attempt) =>
-          this.routeOwner(JSON.parse(this.task(attempt.task_key)!.contract_json)) ===
-          this.routeOwner(c),
-      );
-      if (
-        new Set(owned.map((a) => a.task_key.split("/")[0])).size >= config.maxWorkflows &&
-        !owned.some((a) => a.task_key.startsWith(`${c.workflowId}/`))
+    return this.transaction(() => this.claimAttempt({ key, route, config, sessionKey, agentId }));
+  }
+  private claimAttempt(input: AttemptClaim): Attempt {
+    const { key, route, config, sessionKey, agentId, predecessor } = input;
+    if (this.stopped()) throw Error("Dispatch stopped");
+    const row = this.task(key);
+    if (!row || (predecessor ? row.state !== "BLOCKED" : !["READY", "REWORK"].includes(row.state)))
+      throw Error("Task not dispatchable");
+    if (row.config_hash !== hash(config)) throw Error("Configuration fingerprint changed");
+    const c: Contract = JSON.parse(row.contract_json);
+    if (this.active().some((a) => a.task_key === key)) throw Error("Task already active");
+    this.assertAttemptCapacity(c, config, route);
+    const resource = c.workspace ? `scope:${hash({ worktree: c.worktree, key })}` : c.worktree;
+    const lease = this.db.prepare("SELECT * FROM leases WHERE worktree=?").get(resource) as
+      | { fence: number; state: string }
+      | undefined;
+    if (lease && lease.state !== "RELEASED") throw Error("Worktree lease held or suspect");
+    const fence = Math.max(lease?.fence ?? 0, predecessor?.fence ?? 0) + 1;
+    const sequence = (this.latest(key)?.sequence ?? 0) + 1;
+    const id = `${key}/${sequence}`;
+    this.db
+      .prepare(
+        "INSERT INTO attempts(id,task_key,sequence,status,route_json,agent_id,fence,session_key,created_ms,reused) VALUES(?,?,?,?,?,?,?,?,?,?)",
       )
-        throw Error("Workflow concurrency limit for main");
-      if (this.routeOccupied(route, undefined, c)) throw Error("Route slot limit");
-      if (this.circuitOpen(route.access, Date.now())) throw Error("Account circuit open");
-      if (this.circuitOpen(`route:${route.id}`, Date.now())) throw Error("Route circuit open");
-      const blocked = this.coordinationBlock(c);
-      if (blocked) throw Error(`Worktree coordination blocked: ${blocked}`);
-      const resource = c.workspace ? `scope:${hash({ worktree: c.worktree, key })}` : c.worktree;
-      const lease = this.db.prepare("SELECT * FROM leases WHERE worktree=?").get(resource) as
-        | { fence: number; state: string }
-        | undefined;
-      if (lease && lease.state !== "RELEASED") throw Error("Worktree lease held or suspect");
-      const fence = (lease?.fence ?? 0) + 1;
-      const sequence = (this.latest(key)?.sequence ?? 0) + 1;
-      const id = `${key}/${sequence}`;
-      this.db
-        .prepare(
-          "INSERT INTO attempts(id,task_key,sequence,status,route_json,agent_id,fence,session_key,created_ms,reused) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        )
-        .run(
-          id,
-          key,
-          sequence,
-          "INTENT",
-          JSON.stringify(route),
-          agentId ?? null,
-          fence,
-          sessionKey,
-          Date.now(),
-          Number(!!agentId),
-        );
-      if (route.access === "openai-api" && route.bucket)
-        this.reserveBudget(
-          id,
-          route.bucket,
-          this.apiReservation(c, route, config),
-          config,
-          Date.now(),
-        );
-      this.db
-        .prepare(
-          "INSERT INTO leases VALUES(?,?,?,?,?) ON CONFLICT(worktree) DO UPDATE SET attempt_id=excluded.attempt_id,fence=excluded.fence,state=excluded.state,heartbeat_ms=excluded.heartbeat_ms",
-        )
-        .run(resource, id, fence, "HELD", Date.now());
-      this.db.prepare("INSERT INTO outbox VALUES(?,?)").run(id, "PENDING");
-      this.db.prepare("UPDATE tasks SET state='ACTIVE' WHERE key=?").run(key);
-      this.event("SPAWN_INTENT", id);
-      return this.attempt(id);
-    });
+      .run(
+        id,
+        key,
+        sequence,
+        "INTENT",
+        JSON.stringify(route),
+        agentId ?? null,
+        fence,
+        sessionKey,
+        Date.now(),
+        Number(!!agentId),
+      );
+    if (route.access === "openai-api" && route.bucket)
+      this.reserveBudget(
+        id,
+        route.bucket,
+        this.apiReservation(c, route, config),
+        config,
+        Date.now(),
+      );
+    this.db
+      .prepare(
+        "INSERT INTO leases VALUES(?,?,?,?,?) ON CONFLICT(worktree) DO UPDATE SET attempt_id=excluded.attempt_id,fence=excluded.fence,state=excluded.state,heartbeat_ms=excluded.heartbeat_ms",
+      )
+      .run(resource, id, fence, "HELD", Date.now());
+    this.db.prepare("INSERT INTO outbox VALUES(?,?)").run(id, "PENDING");
+    this.db.prepare("UPDATE tasks SET state='ACTIVE' WHERE key=?").run(key);
+    this.event("SPAWN_INTENT", id);
+    return this.attempt(id);
+  }
+  private assertAttemptCapacity(c: Contract, config: Config, route: RuntimeRoute): void {
+    const active = this.active();
+    const owned = active.filter(
+      (attempt) =>
+        this.routeOwner(JSON.parse(this.task(attempt.task_key)!.contract_json)) ===
+        this.routeOwner(c),
+    );
+    if (
+      new Set(owned.map((a) => a.task_key.split("/")[0])).size >= config.maxWorkflows &&
+      !owned.some((a) => a.task_key.startsWith(`${c.workflowId}/`))
+    )
+      throw Error("Workflow concurrency limit for main");
+    if (this.routeOccupied(route, undefined, c)) throw Error("Route slot limit");
+    if (this.circuitOpen(route.access, Date.now())) throw Error("Account circuit open");
+    if (this.circuitOpen(`route:${route.id}`, Date.now())) throw Error("Route circuit open");
+    const blocked = this.coordinationBlock(c);
+    if (blocked) throw Error(`Worktree coordination blocked: ${blocked}`);
   }
   beginSend(id: string): boolean {
     return this.transaction(() => {
@@ -1224,7 +1419,10 @@ export class Store {
         .run(id, a.fence);
       this.db
         .prepare("UPDATE tasks SET state=? WHERE key=?")
-        .run(retryable && a.sequence < 6 ? "READY" : "BLOCKED", a.task_key);
+        .run(
+          retryable && a.sequence < 6 && !this.terminalRepairForAttempt(id) ? "READY" : "BLOCKED",
+          a.task_key,
+        );
       this.db.prepare("UPDATE sessions SET status='ended' WHERE agent_id=?").run(a.agent_id);
       this.event("CONFIRMED_PROVIDER_FAILURE", id);
     });

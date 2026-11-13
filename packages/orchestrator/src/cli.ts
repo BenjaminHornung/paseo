@@ -19,6 +19,48 @@ import { intakeConfirmationSchema } from "../paseo-plugin/shared/intake-confirma
 import { assertTaskAssessment, approveIntakeModelAnswer } from "./intake.ts";
 import { bindLegacyIntakeIdentity, rebaseLegacyIntakeCursor } from "./intake-identity.ts";
 import { readAutomation } from "./automation.ts";
+import { terminalRepairRequestSchema } from "./terminal-repair.ts";
+import { CurrentPaseoCompletion } from "./completion.ts";
+
+async function approveTerminalRepair(
+  store: Store,
+  provider: PaseoProvider,
+  key: string,
+  file: string,
+  reason: string,
+) {
+  const request = terminalRepairRequestSchema.parse(
+    JSON.parse(readFileSync(localPath(file), "utf8")),
+  );
+  const task = store.task(key);
+  if (!task) throw Error("TERMINAL_REPAIR_TASK_REQUIRED");
+  const contract = contractSchema.parse(JSON.parse(task.contract_json));
+  const config = configSchema.parse(JSON.parse(task.config_json));
+  assertTaskAssessment(store, config, contract);
+  if (provider.url !== config.daemonUrl) throw Error("Provider differs from pinned daemon");
+  const snapshot = await provider.refresh(request.agentId);
+  if (
+    !snapshot ||
+    snapshot.id !== request.agentId ||
+    snapshot.nativeSessionId !== request.nativeSessionId ||
+    snapshot.status !== "idle" ||
+    snapshot.foregroundActive ||
+    !snapshot.turnComplete ||
+    (await new CurrentPaseoCompletion(provider).assess(snapshot)).state !== "VERIFY"
+  )
+    throw Error("TERMINAL_REPAIR_WORKER_NOT_SETTLED");
+  if (provider.nativeSessionId(request.agentId) !== request.nativeSessionId)
+    throw Error("TERMINAL_REPAIR_SESSION_CHANGED");
+  const engine = new Engine(store, config, provider);
+  engine.validateSnapshot(
+    contract,
+    JSON.parse(store.attempt(request.predecessorAttemptId).route_json),
+    snapshot,
+  );
+  if (engine.git.snapshot(contract).diffHash !== request.diffHash)
+    throw Error("TERMINAL_REPAIR_DIFF_CHANGED");
+  return store.approveTerminalRepair(key, request, reason);
+}
 
 const root = appRoot;
 const configFile =
@@ -189,7 +231,9 @@ try {
     print(await e.plan(key));
   } else {
     const mutating =
-      ["intake-bind", "scope-approve", "checks-approve"].includes(command) ||
+      ["intake-bind", "scope-approve", "checks-approve", "terminal-repair-approve"].includes(
+        command,
+      ) ||
       (command === "workflow" &&
         [
           "add",
@@ -207,7 +251,18 @@ try {
       print({ state: "not-initialized", entries: [] });
     } else {
       store = new Store(stateFile);
-      if (
+      if (command === "terminal-repair-approve" && subcommand && argument && process.argv[5]) {
+        print({
+          approved: true,
+          grantId: await approveTerminalRepair(
+            store,
+            await connection(),
+            subcommand,
+            argument,
+            process.argv[5],
+          ),
+        });
+      } else if (
         command === "intake-approve" &&
         subcommand &&
         argument &&
@@ -409,7 +464,7 @@ try {
         else throw Error("Unknown workflow command");
       } else
         throw Error(
-          "Use doctor, worktree create <repo> <destination> <slug>, workflow add|dry-run <contract>, workflow list|show|dispatch|deliver|review|reconcile|verify, agents active, budget show, events tail, recover, watch, stop, resume, backup <file>",
+          "Use doctor, worktree create <repo> <destination> <slug>, workflow add|dry-run <contract>, workflow list|show|dispatch|deliver|review|reconcile|verify, terminal-repair-approve <task-key> <request.json> <reason>, agents active, budget show, events tail, recover, watch, stop, resume, backup <file>",
         );
     }
   }
