@@ -975,6 +975,7 @@ export function completedNonExecutingMcp(tool: unknown): boolean {
       "devtoolbox.profiles.status",
       "devtoolbox.profiles.validate",
       "devtoolbox.profiles.plan_runtime",
+      "atlassian_x_tention.confluence_search",
     ].includes(name)
   )
     return true;

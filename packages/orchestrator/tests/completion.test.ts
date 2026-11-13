@@ -212,7 +212,7 @@ test("recovery reconciles a completed turn through public waitForFinish despite 
 
 // Upstream retry rows persist across turns. An old failed/canceled informational
 // row must not poison a later settled turn, or impersonate process completion.
-test("native Codex retry history settles only terminal rows with exact provenance", async () => {
+test("native Codex foreground settles only exact terminal retry and read-only search rows", async () => {
   const agent = {
     cwd: process.cwd(),
     provider: "codex",
@@ -284,6 +284,31 @@ test("native Codex retry history settles only terminal rows with exact provenanc
     assert.equal((await assess()).state, "VERIFY", `historical ${status} native retry is settled`);
   }
   assert.equal((await provider.foregroundEvidence(handle.id)).toolCount, 2);
+  const search = {
+    type: "tool_call",
+    callId: "read-only-search",
+    name: "atlassian_x_tention.confluence_search",
+    status: "completed",
+    detail: {
+      type: "unknown",
+      input: { query: "fixture documentation", limit: 1 },
+      output: { content: [] },
+    },
+  };
+  row = search;
+  assert.equal(
+    (await provider.foregroundEvidence(handle.id)).complete,
+    true,
+    "a completed exact Confluence search does not leave unobserved process work",
+  );
+  assert.equal((await assess()).state, "VERIFY");
+  for (const invalid of [
+    { ...search, status: "running" },
+    { ...search, name: "atlassian_x_tention.confluence_update_page" },
+  ]) {
+    row = invalid;
+    assert.equal((await assess()).state, "NEEDS_CONFIRMATION");
+  }
   for (const invalid of [
     { ...retry, status: "running" },
     { ...retry, metadata: undefined },
