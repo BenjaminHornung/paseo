@@ -969,6 +969,31 @@ export function completedNonExecutingMcp(tool: unknown): boolean {
     .safeParse(tool);
   if (!parsed.success) return false;
   const { name, detail } = parsed.data;
+  if (name === "paseo.get_agent_activity") {
+    const activity = z
+      .object({
+        error: z.null().optional(),
+        detail: z.object({
+          input: z.object({ agentId: z.string().min(1), limit: z.number().optional() }),
+          output: z.object({
+            isError: z.literal(false).optional(),
+            structuredContent: z.object({
+              agentId: z.string().min(1),
+              updateCount: z.number().int().nonnegative(),
+              currentModeId: z.string().nullable(),
+              content: z.string(),
+            }),
+          }),
+        }),
+      })
+      .safeParse(tool);
+    // The query may load its target runtime. Its successful return settles only
+    // this caller's observation, never the target's model work or process state.
+    return (
+      activity.success &&
+      activity.data.detail.input.agentId === activity.data.detail.output.structuredContent.agentId
+    );
+  }
   if (
     [
       "devtoolbox.workspace_discover",

@@ -212,7 +212,7 @@ test("recovery reconciles a completed turn through public waitForFinish despite 
 
 // Upstream retry rows persist across turns. An old failed/canceled informational
 // row must not poison a later settled turn, or impersonate process completion.
-test("native Codex foreground settles only exact terminal retry and read-only search rows", async () => {
+test("native Codex foreground settles only exact terminal retries and bound read-only observations", async () => {
   const agent = {
     cwd: process.cwd(),
     provider: "codex",
@@ -305,6 +305,78 @@ test("native Codex foreground settles only exact terminal retry and read-only se
   for (const invalid of [
     { ...search, status: "running" },
     { ...search, name: "atlassian_x_tention.confluence_update_page" },
+  ]) {
+    row = invalid;
+    assert.equal((await assess()).state, "NEEDS_CONFIRMATION");
+  }
+  // A returned activity query settles only the caller's observation. It does
+  // not attest the observed agent's work or any runtime loaded by that query.
+  const activity = {
+    type: "tool_call",
+    callId: "activity-query",
+    name: "paseo.get_agent_activity",
+    status: "completed",
+    error: null,
+    detail: {
+      type: "unknown",
+      input: { agentId: "observed-agent", limit: 2 },
+      output: {
+        content: [],
+        _meta: null,
+        structuredContent: {
+          agentId: "observed-agent",
+          updateCount: 2,
+          currentModeId: "default",
+          content: "Synthetic activity summary",
+          serverId: "fixture-server",
+        },
+      },
+    },
+  };
+  row = activity;
+  assert.equal(
+    (await provider.foregroundEvidence(handle.id)).complete,
+    true,
+    "a successful target-bound Paseo activity query is a settled caller observation",
+  );
+  assert.equal((await assess()).state, "VERIFY");
+  for (const invalid of [
+    { ...activity, status: "running" },
+    { ...activity, status: "failed" },
+    { ...activity, error: "reader-failed" },
+    { ...activity, name: "paseo.send_agent_prompt" },
+    {
+      ...activity,
+      detail: { ...activity.detail, input: { agentId: "observed-agent", limit: "2" } },
+    },
+    {
+      ...activity,
+      detail: { ...activity.detail, output: { ...activity.detail.output, isError: true } },
+    },
+    { ...activity, detail: { ...activity.detail, output: { content: [] } } },
+    {
+      ...activity,
+      detail: {
+        ...activity.detail,
+        output: {
+          ...activity.detail.output,
+          structuredContent: {
+            ...activity.detail.output.structuredContent,
+            agentId: "another-agent",
+          },
+        },
+      },
+    },
+    {
+      ...activity,
+      detail: {
+        ...activity.detail,
+        output: {
+          ...activity.detail.output,
+          structuredContent: { ...activity.detail.output.structuredContent, updateCount: "2" },
+        },
+      },
+    },
   ]) {
     row = invalid;
     assert.equal((await assess()).state, "NEEDS_CONFIRMATION");
