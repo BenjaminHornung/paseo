@@ -854,7 +854,15 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
             },
           }),
         };
-        const repairEngine = new Engine(state, repairConfig, repairProvider);
+        let dispatchAllowed = true;
+        const repairEngine = new Engine(
+          state,
+          repairConfig,
+          repairProvider,
+          undefined,
+          undefined,
+          () => dispatchAllowed,
+        );
         const repair = {
           diffHash: originalDiff.diffHash,
           findings: [{ ...reviewerFinding, file: "tests/manifest.ts" }],
@@ -921,9 +929,18 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
         assert.equal(sent, 0);
         assert.deepEqual(await repairEngine.continueExisting(taskKey, repair), {
           agentId: "writer-old",
-          continued: true,
+          continued: false,
+          delivery: "pending",
+          attemptId: `${taskKey}/4`,
         });
         const successor = state.latest(taskKey)!;
+        assert.equal(sent, 0, "the main RPC returns before delivery starts");
+        assert.equal(successor.status, "INTENT");
+        assert.equal(successor.run_accepted, 0);
+        assert.equal(
+          state.db.prepare("SELECT state FROM outbox WHERE attempt_id=?").get(successor.id)!.state,
+          "PENDING",
+        );
         assert.equal(successor.id, `${taskKey}/4`);
         assert.equal(successor.agent_id, originalAttempt.agent_id);
         assert.equal(successor.fence, 4, "a missing lease must not reset the predecessor fence");
@@ -948,6 +965,17 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
           () => repairEngine.continueExisting(taskKey, repair),
           /ALREADY_CONSUMED/,
         );
+        dispatchAllowed = false;
+        await repairEngine.tick();
+        assert.equal(sent, 0, "revoked dispatch authority blocks the pending delivery");
+        assert.equal(state.attempt(successor.id).status, "INTENT");
+        dispatchAllowed = true;
+        await repairEngine.tick();
+        assert.equal(sent, 1, "the normal tick delivers the already claimed successor once");
+        assert.equal(state.latest(taskKey)!.id, successor.id);
+        assert.equal(state.attempt(successor.id).run_accepted, 1);
+        assert.equal(state.db.prepare("SELECT count(*) AS n FROM attempts").get()!.n, 2);
+        assert.equal(state.db.prepare("SELECT count(*) AS n FROM leases").get()!.n, 1);
         await repairEngine.acceptSnapshot(successor.id, snapshot);
         await repairEngine.advance(successor.id);
         const fresh = state.db

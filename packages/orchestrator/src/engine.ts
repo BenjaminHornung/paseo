@@ -30,6 +30,7 @@ import { taskDispatchAllowed } from "./automation.ts";
 import { appRoot } from "./settings-files.ts";
 import { z } from "zod";
 import { isClaudeProvider } from "../paseo-plugin/shared/providers.ts";
+import type { ContinuationResult } from "../paseo-plugin/shared/continuation.ts";
 
 type AmendmentAdmissionResult =
   | { state: "READY"; key: string }
@@ -202,7 +203,7 @@ export class Engine {
   async continueExisting(
     key: string,
     repair?: { diffHash: string; findings: unknown },
-  ): Promise<{ agentId: string; continued: true }> {
+  ): Promise<ContinuationResult> {
     const context = this.context(key);
     if (context !== this) return context.continueExisting(key, repair);
     const c = this.contract(key),
@@ -322,7 +323,7 @@ export class Engine {
     contract: Contract,
     repair: { diffHash: string; findings: unknown } | undefined,
     findings: NonNullable<ReviewResult["findings"]>,
-  ): Promise<{ agentId: string; continued: true }> {
+  ): Promise<ContinuationResult> {
     const grant = this.store.terminalRepairGrant(predecessor.task_key);
     if (!grant || grant.predecessorAttemptId !== predecessor.id)
       throw Error("TERMINAL_REPAIR_GRANT_REQUIRED");
@@ -368,9 +369,12 @@ export class Engine {
       if (this.git.snapshot(contract).diffHash !== grant.diffHash)
         throw Error("TERMINAL_REPAIR_DIFF_CHANGED");
     });
-    const delivered = await this.deliver(successor.id);
-    if (!delivered.run_accepted) throw Error("TERMINAL_REPAIR_OUTCOME_UNKNOWN");
-    return { agentId: grant.agentId, continued: true };
+    return {
+      agentId: grant.agentId,
+      continued: false,
+      delivery: "pending",
+      attemptId: successor.id,
+    };
   }
   private assertTerminalRepairRoute(contract: Contract, route: RuntimeRoute): void {
     const configured = this.config.routes.find((candidate) => candidate.id === route.id);

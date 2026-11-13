@@ -124,6 +124,15 @@ exceeds the predecessor even if the old lease row is absent. Scope/check audit e
 remain bound to the unchanged original contract. Failed claims leave no partial
 consumption, scope, command, lease or outbox projection.
 
+The terminal repair claim returns immediately as
+`{agentId, continued:false, delivery:"pending", attemptId}`. It is durably accepted,
+not confirmed started. The existing normal tick delivers that exact outbox intent
+after repeating all delivery gates. The main ends its turn and waits for status or
+actual controller/child notifications; it must not repeat continuation, approval or
+registration because delivery is pending. Report an actual failed runner or concrete
+delivery blocker. Non-terminal continuations that executed retain
+`{agentId, continued:true}`. Neither result attests task completion.
+
 The old failed attempt, checks, review evidence and rework count remain unchanged.
 The successor receives fresh checks and a distinct independent review request. There
 is no second grant for that task or generic continuation of this extra attempt; an

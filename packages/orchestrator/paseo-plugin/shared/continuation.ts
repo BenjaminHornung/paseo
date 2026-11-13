@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+export type ContinuationResult =
+  | { agentId: string; continued: true }
+  | { agentId: string; continued: false; delivery: "pending"; attemptId: string };
+
 export const reviewFindingsSchema = z
   .array(
     z.strictObject({
