@@ -14,11 +14,13 @@ import {
   parseAgentJson,
   reviewResultSchema,
   type Contract,
+  type RuntimeRoute,
 } from "../src/contracts.ts";
 import { Git, runCheck } from "../src/git.ts";
 import { PaseoProvider, type Provider, type Snapshot } from "../src/provider.ts";
 import { createPaseoApi } from "@getpaseo/client";
 import { Store } from "../src/store.ts";
+import { verificationPeersHash } from "../src/verification-recovery.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { codeRoot, powershellExecutable } from "../src/settings-files.ts";
 
@@ -210,6 +212,89 @@ function runGit(executable: string, args: string[], cwd: string): string {
   }
 }
 
+test("CRLF checks preserve existing byte conventions and real whitespace policy", (t) => {
+  const root = mkdtempSync(path.join(process.cwd(), ".crlf-check-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const git = gitExecutable();
+  runGit(git, ["init", "-b", "feature/crlf-check"], root);
+  runGit(git, ["config", "user.name", "Paseo test"], root);
+  runGit(git, ["config", "user.email", "paseo-test@example.invalid"], root);
+  runGit(git, ["config", "core.autocrlf", "false"], root);
+  const file = path.join(root, "existing.cs");
+  writeFileSync(file, "class Original {}\r\n");
+  const lfFile = path.join(root, "existing-lf.cs");
+  writeFileSync(lfFile, "class OriginalLf {}\n");
+  runGit(git, ["add", "."], root);
+  runGit(git, ["commit", "-m", "existing CRLF"], root);
+  const contract = contractSchema.parse({
+    workflowId: "crlf",
+    taskId: "check",
+    repository: canonicalPath(root),
+    worktree: canonicalPath(root),
+    baseCommit: runGit(git, ["rev-parse", "HEAD"], root),
+    dataScope: "public",
+    role: "implement-normal",
+    prompt: "Keep existing line endings",
+    acceptance: ["Preserve CRLF"],
+    allowedPaths: ["existing.cs", "existing-lf.cs"],
+    requiredCapabilities: ["code"],
+    minTier: 2,
+    mutation: true,
+    highRisk: false,
+    uiChanged: false,
+    ownerApproved: false,
+    estimatedMicroUsd: 0,
+    checks: { build: [process.execPath, "--version"], test: [process.execPath, "--version"] },
+  });
+  const source = "class Original {}\r\nclass Added {}\r\n";
+  writeFileSync(file, source);
+  const before = readFileSync(file);
+  assert.equal(
+    spawnSync(git, ["diff", "--check", contract.baseCommit, "--"], { cwd: root }).status,
+    2,
+  );
+  assert.equal(
+    new Git(git).snapshot(contract).diffCheckExit,
+    0,
+    "uniform existing CRLF must not be a whitespace quality failure",
+  );
+  assert.deepEqual(readFileSync(file), before);
+  writeFileSync(lfFile, "class OriginalLf {}\nclass AddedCr {}\r\n");
+  assert.notEqual(
+    new Git(git).snapshot(contract).diffCheckExit,
+    0,
+    "an LF base does not qualify for CR compatibility",
+  );
+  writeFileSync(lfFile, "class OriginalLf {}\n");
+  for (const bad of [
+    "class Added {} \r\n",
+    "class Added {}\t\r\n",
+    "<<<<<<< conflict\r\n",
+    "class Added {}\r\n\r\n",
+  ]) {
+    writeFileSync(file, "class Original {}\r\n" + bad);
+    assert.notEqual(new Git(git).snapshot(contract).diffCheckExit, 0);
+  }
+  writeFileSync(file, source);
+  runGit(git, ["config", "core.whitespace", "tab-in-indent"], root);
+  writeFileSync(file, "class Original {}\r\n\tclass Added {}\r\n");
+  assert.notEqual(
+    new Git(git).snapshot(contract).diffCheckExit,
+    0,
+    "configured indentation checks remain effective",
+  );
+  writeFileSync(file, source);
+  runGit(git, ["config", "core.whitespace", "trailing-space,-cr-at-eol"], root);
+  assert.notEqual(
+    new Git(git).snapshot(contract).diffCheckExit,
+    0,
+    "explicit negative CR policy wins",
+  );
+  runGit(git, ["config", "--unset", "core.whitespace"], root);
+  writeFileSync(path.join(root, ".gitattributes"), "existing.cs whitespace=trailing-space\n");
+  assert.notEqual(new Git(git).snapshot(contract).diffCheckExit, 0, "path policy wins");
+});
+
 test("unresolved reviewer findings rework before visual acceptance and checkpoint before same-priority restart", async (t) => {
   const root = mkdtempSync(path.join(process.cwd(), ".rework-checkpoint-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -218,11 +303,13 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
     worktreePath = path.join(root, "worktree");
   mkdirSync(path.join(repository, "src"), { recursive: true });
   writeFileSync(path.join(repository, "src", "base.ts"), "export const base = true;\n");
+  writeFileSync(path.join(repository, "src", "existing.cs"), "class Original {}\r\n");
   mkdirSync(path.join(repository, "tests"));
   writeFileSync(path.join(repository, "tests", "manifest.ts"), "export const inventory = 9;\n");
   runGit(git, ["init", "-b", "main"], repository);
   runGit(git, ["config", "user.name", "Paseo test"], repository);
   runGit(git, ["config", "user.email", "paseo-test@example.invalid"], repository);
+  runGit(git, ["config", "core.autocrlf", "false"], repository);
   runGit(git, ["add", "."], repository);
   runGit(git, ["commit", "-m", "fixture"], repository);
   runGit(
@@ -584,7 +671,7 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
           ...reviewerRoute,
           provider: "claude" as const,
           access: "claude-company-pro" as const,
-          modeId: "plan",
+          modeId: "auto",
           repositoryRoots: [root],
         };
         const repairConfig = configSchema.parse({
@@ -661,6 +748,11 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
           ],
           create: async (route, reviewContract, requestKey) => {
             assert.equal(route.provider, "claude");
+            assert.equal(
+              route.modeId,
+              "plan",
+              "Claude reviewers use the effective read-only route",
+            );
             assert.equal(reviewContract.mutation, false);
             assert.equal(reviewContract.role, "reviewer");
             requests.push({ key: requestKey, diffHash: reviewContract.reviewDiffHash! });
@@ -869,6 +961,595 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
         );
       } finally {
         state.close();
+      }
+    },
+  );
+  await t.test(
+    "bound CRLF recheck refreshes stale checks and permits the first normal review without a writer",
+    async (recheckTest) => {
+      const sourceFile = path.join(worktree, "src/existing.cs");
+      const originalBytes = readFileSync(sourceFile);
+      writeFileSync(sourceFile, "class Original {}\r\nclass Added {}\r\n");
+      try {
+        const scenarios = [
+          "pinned-drift",
+          "intent-drift",
+          "catch-wait",
+          "settled-review-drift",
+          "running-review-drift",
+          "pass",
+          "review-fail",
+          "raw-drift",
+          "check-drift",
+        ] as const;
+        interface ReviewerFixtureRoutes {
+          configured: RuntimeRoute;
+          recorded: RuntimeRoute;
+        }
+        async function runScenario(
+          scenario: (typeof scenarios)[number],
+          reviewer: ReviewerFixtureRoutes,
+        ) {
+          const pass = scenario === "pass";
+          const drift = scenario !== "pass" && scenario !== "review-fail";
+          const beforeChecksDrift = drift && scenario !== "check-drift";
+          const claudeReview = scenario === "settled-review-drift";
+          const { configured: configuredReviewer, recorded: recordedReviewer } = reviewer;
+          writeFileSync(sourceFile, "class Original {}\r\nclass Added {}\r\n");
+          const state = new Store(path.join(root, `crlf-recheck-${scenario}.sqlite`));
+          const buildMarker = path.join(root, `recheck-build-${scenario}.json`);
+          const c = contractSchema.parse({
+            ...contract,
+            uiChanged: false,
+            workspace: { id: "recheck-workspace", directory: worktree, mainAgentId: "main" },
+            checks: {
+              ...contract.checks,
+              build: [
+                process.execPath,
+                "-e",
+                `require('node:fs').writeFileSync(${JSON.stringify(buildMarker)},'fresh');${
+                  scenario === "check-drift"
+                    ? `require('node:fs').appendFileSync(${JSON.stringify(sourceFile)},'class ChangedDuringCheck {}\\r\\n')`
+                    : ""
+                }`,
+              ],
+            },
+          });
+          const cfg = configSchema.parse({
+            ...config,
+            maxRework: scenario === "pinned-drift" ? 1 : 2,
+            routes: [writerRoute, configuredReviewer],
+          });
+          const id = `${taskKey}/4`,
+            agentId = "recheck-writer",
+            nativeSessionId = "recheck-native";
+          const snapshot = new Git(git).snapshot(c);
+          const checksJson = JSON.stringify({
+            ...reviewCheckpoint,
+            diffHash: snapshot.diffHash,
+            diffCheckExit: 2,
+          });
+          const failureJson = JSON.stringify({ phase: "pre-review", ...JSON.parse(checksJson) });
+          state.db
+            .prepare("INSERT INTO workflows VALUES(?,?,?,?)")
+            .run(c.workflowId, repoPath, "", hash(cfg));
+          const seeds = [
+            { key: taskKey, contract: c, taskState: "BLOCKED", rework: 4, sequence: 4, agentId },
+            {
+              key: "workflow/complete-peer/implement-normal",
+              contract: { ...c, taskId: "complete-peer", allowedPaths: ["peer"] },
+              taskState: "COMPLETE",
+              rework: 0,
+              sequence: 1,
+              agentId: "complete-peer",
+            },
+          ];
+          for (const seed of seeds) {
+            state.db
+              .prepare("INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?)")
+              .run(
+                seed.key,
+                c.workflowId,
+                JSON.stringify(seed.contract),
+                hash(seed.contract),
+                hash(cfg),
+                JSON.stringify(cfg),
+                seed.taskState,
+                seed.rework,
+              );
+            state.db
+              .prepare(
+                "INSERT INTO attempts(id,task_key,sequence,status,route_json,agent_id,fence,session_key,created_ms,result_hash,run_accepted) VALUES(?,?,?,?,?,?,?,?,?,?,1)",
+              )
+              .run(
+                `${seed.key}/${seed.sequence}`,
+                seed.key,
+                seed.sequence,
+                seed.taskState === "BLOCKED" ? "FAILED" : "COMPLETE",
+                JSON.stringify(writerRoute),
+                seed.agentId,
+                seed.sequence,
+                `session-${seed.key}`,
+                Date.now(),
+                snapshot.diffHash,
+              );
+          }
+          state.db
+            .prepare("INSERT INTO turn_checks VALUES(?,?,?)")
+            .run(id, snapshot.diffHash, checksJson);
+          state.db
+            .prepare("INSERT INTO reviews VALUES(?,?,?)")
+            .run(id, snapshot.diffHash, failureJson);
+          state.db
+            .prepare("INSERT INTO leases VALUES(?,?,4,'RELEASED',?)")
+            .run(`scope:${hash({ worktree, key: taskKey })}`, id, Date.now());
+          const grant = {
+            agentId,
+            nativeSessionId,
+            contractHash: hash(c),
+            configHash: hash(cfg),
+            approvedScopeRevision: state.scopeRevision(c),
+            approvedCheckRevision: state.checkRevision(c),
+          };
+          state.event(`TERMINAL_REPAIR_SUCCESSOR:${JSON.stringify(grant)}`, id);
+          state.event(`OPERATOR_TERMINAL_REPAIR:${JSON.stringify(grant)}`, id);
+          state.event(`TERMINAL_REPAIR_CONSUMED:${hash(grant)}`, id);
+          let writerCalls = 0,
+            reviewerCalls = 0;
+          let workerStatus: "idle" | "error" = "idle";
+          let completionDrift = false;
+          let reviewerRunning = false;
+          let failDriftRefresh = false;
+          let workerRefreshes = 0;
+          const reviewerNativeSessionId = "recheck-review-native";
+          const sdkAgent = (agent = agentId) => ({
+            id: agent,
+            cwd: worktree,
+            workspaceId: "recheck-workspace",
+            provider: agent === "recheck-reviewer" ? configuredReviewer.provider : "codex",
+            model: agent === "recheck-reviewer" ? reviewerRoute.model : writerRoute.model,
+            status: agent === "recheck-reviewer" && reviewerRunning ? "running" : workerStatus,
+            activeTurn: null,
+            pendingPermissions: [],
+            runtimeInfo: {
+              provider: agent === "recheck-reviewer" ? configuredReviewer.provider : "codex",
+              sessionId: agent === "recheck-reviewer" ? reviewerNativeSessionId : nativeSessionId,
+              thinkingOptionId: "high",
+              modeId: agent === "recheck-reviewer" && claudeReview ? "plan" : null,
+              extra: { backgroundWorkGeneration: "recheck-review-generation" },
+            },
+          });
+          const api = createPaseoApi({
+            getLastServerInfoMessage: () => ({ serverId: "recheck-fixture" }),
+            waitForFinish: async (agent: string) => ({ status: "idle", final: sdkAgent(agent) }),
+            fetchAgent: async ({ agentId: agent }: { agentId: string }) => ({
+              agent: sdkAgent(agent),
+            }),
+            fetchAgentTimeline: async (agent: string) => {
+              if (completionDrift) workerStatus = "error";
+              return {
+                agent: sdkAgent(agent),
+                entries: [],
+                error: null,
+                gap: false,
+                hasOlder: false,
+                hasNewer: false,
+              };
+            },
+            refreshAgentBackgroundWork: async (agent: string) => ({
+              agentId: agent,
+              providerSessionId:
+                agent === "recheck-reviewer" ? reviewerNativeSessionId : nativeSessionId,
+              observationId: "fresh-recheck",
+              coverage:
+                agent === "recheck-reviewer" && claudeReview
+                  ? "claude_background_tasks"
+                  : "codex_background_terminals",
+              queryGeneration: "recheck-review-generation",
+              foregroundActive: false,
+              queriedProviderSessionIds: [
+                agent === "recheck-reviewer" ? reviewerNativeSessionId : nativeSessionId,
+              ],
+              items: [],
+              providerSubagents: [],
+            }),
+          } as unknown as Parameters<typeof createPaseoApi>[0]);
+          const sdkProvider = new PaseoProvider("ws://fixture.invalid/ws");
+          Object.assign(sdkProvider, { client: { ...api, close: () => api.dispose() } });
+          let connectedDaemonUrl: string | undefined;
+          const recheckProvider: Provider = {
+            ...provider,
+            get url() {
+              return connectedDaemonUrl;
+            },
+            refresh: async (agent) => {
+              if (agent === agentId && failDriftRefresh && ++workerRefreshes > 1)
+                throw Error("fixture-provider-observation-wait");
+              return sdkProvider.refresh(agent);
+            },
+            foregroundEvidence: (agent) => sdkProvider.foregroundEvidence(agent),
+            nativeSessionId: (agent) => sdkProvider.nativeSessionId(agent),
+            loadedAgent: (agent) => sdkProvider.loadedAgent(agent),
+            run: async () => {
+              writerCalls++;
+              throw Error("unexpected writer");
+            },
+            create: async (route) => {
+              assert.equal(route.id, "reviewer");
+              reviewerCalls++;
+              return "recheck-reviewer";
+            },
+            wait: async () =>
+              ({
+                ...(await provider.refresh(agentId)),
+                id: "recheck-reviewer",
+                workspaceId: "recheck-workspace",
+                model: reviewerRoute.model,
+                reviewResult: {
+                  diffHash: snapshot.diffHash,
+                  pass,
+                  unresolvedIssues: pass ? 0 : 1,
+                  findings: pass ? [] : [reviewerFinding],
+                },
+              }) as Snapshot,
+          };
+          const recheckEngine = new Engine(
+            state,
+            cfg,
+            recheckProvider,
+            undefined,
+            undefined,
+            () => true,
+          );
+          const request = {
+            attemptId: id,
+            fence: 4,
+            rework: 4,
+            agentId,
+            nativeSessionId,
+            contractHash: hash(c),
+            configHash: hash(cfg),
+            diffHash: snapshot.diffHash,
+            checkEvidenceSha256: createHash("sha256").update(checksJson).digest("hex"),
+            failureEvidenceSha256: createHash("sha256").update(failureJson).digest("hex"),
+            scopeRevision: state.scopeRevision(c),
+            checkRevision: state.checkRevision(c),
+            peersHash: verificationPeersHash(state, taskKey),
+            crlfProofSha256: hash(recheckEngine.git.crlfRecheckProof(c)),
+          };
+          try {
+            if (pass) {
+              const paused = state.attempt(id);
+              const eventCount = state.db.prepare("SELECT count(*) AS n FROM events").get()!.n;
+              completionDrift = true;
+              await assert.rejects(
+                () =>
+                  recheckEngine.recheckVerification(
+                    taskKey,
+                    request,
+                    "explicit unchanged-tree recheck",
+                  ),
+                /WORKER_/,
+              );
+              assert.deepEqual(state.attempt(id), paused);
+              assert.equal(
+                state.db.prepare("SELECT result_json FROM turn_checks WHERE attempt_id=?").get(id)!
+                  .result_json,
+                checksJson,
+              );
+              assert.equal(
+                state.db.prepare("SELECT count(*) AS n FROM events").get()!.n,
+                eventCount,
+              );
+              assert.equal(
+                state.db.prepare("SELECT state FROM leases WHERE attempt_id=?").get(id)!.state,
+                "RELEASED",
+              );
+              completionDrift = false;
+              workerStatus = "idle";
+            }
+            const result = await recheckEngine.recheckVerification(
+              taskKey,
+              request,
+              "explicit unchanged-tree recheck",
+            );
+            assert.equal(result.replayed, false);
+            assert.equal(state.attempt(id).status, "VERIFY");
+            assert.equal(
+              (
+                await recheckEngine.recheckVerification(
+                  taskKey,
+                  request,
+                  "explicit unchanged-tree recheck",
+                )
+              ).replayed,
+              true,
+            );
+            await assert.rejects(
+              () =>
+                recheckEngine.continueExisting(taskKey, {
+                  diffHash: snapshot.diffHash,
+                  findings: [reviewerFinding],
+                }),
+              /NO_WRITER|ALREADY_CONSUMED/,
+            );
+            if (pass) {
+              recheckEngine.add({
+                ...c,
+                taskId: "new-peer",
+                allowedPaths: ["future"],
+                amendsTaskKey: undefined,
+                amendsContractHash: undefined,
+                amendsDiffHash: undefined,
+              });
+            }
+            const activeReview =
+              scenario === "intent-drift" ||
+              scenario === "settled-review-drift" ||
+              scenario === "running-review-drift";
+            const watcher =
+              scenario === "pinned-drift"
+                ? new Engine(
+                    state,
+                    configSchema.parse({ ...cfg, maxRework: 2 }),
+                    recheckProvider,
+                    undefined,
+                    undefined,
+                    () => true,
+                  )
+                : recheckEngine;
+            async function prepareDriftFinalization() {
+              if (activeReview) {
+                state.db
+                  .prepare("INSERT INTO review_runs VALUES(?,?,?,?,?,?,?)")
+                  .run(
+                    id,
+                    `${id}/review`,
+                    JSON.stringify(recordedReviewer),
+                    scenario === "intent-drift" ? null : "recheck-reviewer",
+                    scenario === "intent-drift" ? "INTENT" : "UNKNOWN",
+                    snapshot.diffHash,
+                    scenario === "intent-drift" ? null : "invalid historical review JSON",
+                  );
+                assert.equal(state.coordinationBlock(c), "combined-review-in-progress");
+                assert.equal(
+                  state.routeOccupied({ ...reviewerRoute, maxConcurrent: 1 }, undefined, c),
+                  true,
+                );
+              }
+              const reviewBefore = state.db
+                .prepare("SELECT * FROM review_runs WHERE attempt_id=?")
+                .get(id);
+              if (beforeChecksDrift)
+                writeFileSync(sourceFile, "class Original {}\r\nclass ReplacedAfterClaim {}\r\n");
+              if (claudeReview) {
+                for (const changedRoute of [
+                  { ...recordedReviewer, modeId: "auto" },
+                  { ...recordedReviewer, maxConcurrent: recordedReviewer.maxConcurrent + 1 },
+                ]) {
+                  state.db
+                    .prepare("UPDATE review_runs SET route_json=? WHERE attempt_id=?")
+                    .run(JSON.stringify(changedRoute), id);
+                  await watcher.tick([taskKey]);
+                  assert.equal(
+                    state.attempt(id).status,
+                    "VERIFY",
+                    "non-plan or changed route must remain waiting",
+                  );
+                  assert.equal(state.task(taskKey)!.rework, 4);
+                  assert.equal(
+                    state.db.prepare("SELECT state FROM leases WHERE attempt_id=?").get(id)!.state,
+                    "HELD",
+                  );
+                  assert.equal(
+                    state.db
+                      .prepare(
+                        "SELECT count(*) AS n FROM events WHERE kind LIKE 'VERIFICATION_RECHECK_REVIEW_ARCHIVED:%'",
+                      )
+                      .get()!.n,
+                    0,
+                  );
+                }
+                state.db
+                  .prepare("UPDATE review_runs SET route_json=? WHERE attempt_id=?")
+                  .run(JSON.stringify(recordedReviewer), id);
+              }
+              if (scenario === "pinned-drift") {
+                connectedDaemonUrl = "ws://127.0.0.1:3999/ws";
+                await watcher.tick([taskKey]);
+                assert.equal(
+                  state.attempt(id).status,
+                  "VERIFY",
+                  "the outer watcher must respect the pinned daemon binding before drift finalization",
+                );
+                assert.equal(state.task(taskKey)!.rework, 4);
+                assert.equal(
+                  state.db.prepare("SELECT state FROM leases WHERE attempt_id=?").get(id)!.state,
+                  "HELD",
+                );
+                connectedDaemonUrl = cfg.daemonUrl;
+              }
+              if (scenario === "catch-wait") {
+                state.observe(id, "NEEDS_CONFIRMATION");
+                failDriftRefresh = true;
+                await assert.doesNotReject(
+                  () => watcher.recover(),
+                  "a provider wait in the reconcile catch must not terminate recovery",
+                );
+                assert.equal(state.attempt(id).status, "NEEDS_CONFIRMATION");
+                assert.equal(state.task(taskKey)!.rework, 4);
+                assert.notEqual(
+                  state.db.prepare("SELECT state FROM leases WHERE attempt_id=?").get(id)!.state,
+                  "RELEASED",
+                );
+                failDriftRefresh = false;
+              }
+              if (scenario === "running-review-drift" || scenario === "intent-drift") {
+                reviewerRunning = scenario === "running-review-drift";
+                if (scenario === "intent-drift")
+                  state.db.exec(
+                    "CREATE TRIGGER deny_drift_finish BEFORE UPDATE OF status ON attempts WHEN NEW.status='FAILED' BEGIN SELECT RAISE(ABORT,'fixture-finalization-denied'); END",
+                  );
+                await watcher.tick([taskKey]);
+                assert.deepEqual(
+                  state.db.prepare("SELECT * FROM review_runs WHERE attempt_id=?").get(id),
+                  reviewBefore,
+                );
+                assert.equal(state.attempt(id).status, "VERIFY");
+                assert.equal(state.task(taskKey)!.rework, 4);
+                assert.equal(
+                  state.db.prepare("SELECT state FROM leases WHERE attempt_id=?").get(id)!.state,
+                  "HELD",
+                );
+                assert.equal(
+                  state.db
+                    .prepare(
+                      "SELECT count(*) AS n FROM events WHERE kind LIKE 'VERIFICATION_RECHECK_REVIEW_ARCHIVED:%'",
+                    )
+                    .get()!.n,
+                  0,
+                );
+                assert.equal(state.coordinationBlock(c), "combined-review-in-progress");
+                reviewerRunning = false;
+                if (scenario === "intent-drift") state.db.exec("DROP TRIGGER deny_drift_finish");
+              }
+              return reviewBefore;
+            }
+            const reviewBefore = await prepareDriftFinalization();
+            await watcher.tick([taskKey]);
+            assert.equal(
+              existsSync(buildMarker),
+              !beforeChecksDrift,
+              "recheck must execute the full fresh build instead of the historical cache",
+            );
+            assert.equal(
+              state.task(taskKey)!.state,
+              pass ? "COMPLETE" : "BLOCKED",
+              "fresh checks and the first independent verdict must finalize normally",
+            );
+            assert.equal(state.task(taskKey)!.rework, pass ? 4 : 5);
+            assert.equal(state.task("workflow/complete-peer/implement-normal")!.state, "COMPLETE");
+            if (pass)
+              assert.equal(state.task("workflow/new-peer/implement-normal")!.state, "READY");
+            assert.equal(writerCalls, 0);
+            assert.equal(reviewerCalls, drift ? 0 : 1);
+            assert.equal(state.db.prepare("SELECT count(*) AS n FROM attempts").get()!.n, 2);
+            assert.equal(state.attempt(id).fence, 4);
+            assert.equal(
+              state.db.prepare("SELECT state FROM leases WHERE attempt_id=?").get(id)!.state,
+              "RELEASED",
+              "a known verdict or revision drift must release the same scoped lease",
+            );
+            const fresh = state.db.prepare("SELECT * FROM turn_checks WHERE attempt_id=?").get(id);
+            if (activeReview) {
+              assert.equal(
+                state.db.prepare("SELECT * FROM review_runs WHERE attempt_id=?").get(id),
+                undefined,
+                "negative drift must retire only the proven safe review projection",
+              );
+              const archives = state.db
+                .prepare(
+                  "SELECT kind FROM events WHERE kind LIKE 'VERIFICATION_RECHECK_REVIEW_ARCHIVED:%'",
+                )
+                .all();
+              assert.equal(archives.length, 1);
+              assert.deepEqual(
+                JSON.parse(
+                  String(archives[0].kind).slice("VERIFICATION_RECHECK_REVIEW_ARCHIVED:".length),
+                ).review,
+                { ...reviewBefore },
+              );
+              assert.equal(
+                state.routeOccupied({ ...reviewerRoute, maxConcurrent: 1 }, undefined, c),
+                false,
+              );
+              assert.equal(state.coordinationBlock(c), undefined);
+            }
+            if (beforeChecksDrift) {
+              assert.equal(fresh, undefined, "a changed revision must not launch new checks");
+              const verdict = JSON.parse(
+                String(
+                  state.db.prepare("SELECT evidence_json FROM reviews WHERE attempt_id=?").get(id)!
+                    .evidence_json,
+                ),
+              );
+              assert.equal(verdict.reason, "verification-recheck-revision-changed");
+              assert.equal(verdict.authorizedDiffHash, snapshot.diffHash);
+              assert.notEqual(verdict.observedDiffHash, snapshot.diffHash);
+            } else {
+              assert.equal(JSON.parse(String(fresh!.result_json)).diffCheckExit, 0);
+              assert.equal(
+                JSON.parse(String(fresh!.result_json)).changed,
+                scenario === "check-drift",
+              );
+              assert.notEqual(fresh!.result_json, checksJson);
+            }
+            const archiveRow = state.db
+              .prepare("SELECT kind FROM events WHERE kind LIKE 'VERIFICATION_RECHECK_ARCHIVE:%'")
+              .get()!;
+            const archive = JSON.parse(
+              String(archiveRow.kind).slice("VERIFICATION_RECHECK_ARCHIVE:".length),
+            );
+            assert.equal(archive.checks.result_json, checksJson);
+            assert.equal(archive.failure.evidence_json, failureJson);
+            if (drift) {
+              await assert.rejects(
+                () =>
+                  recheckEngine.recheckVerification(
+                    taskKey,
+                    request,
+                    "explicit unchanged-tree recheck",
+                  ),
+                /VERIFICATION_RECHECK_DIFF_CHANGED/,
+              );
+              await recheckEngine.tick([taskKey]);
+              assert.equal(
+                state.task(taskKey)!.rework,
+                5,
+                "a blocked revision must not fail again every tick",
+              );
+            } else
+              await recheckEngine.recheckVerification(
+                taskKey,
+                request,
+                "explicit unchanged-tree recheck",
+              );
+            assert.deepEqual(
+              state.db.prepare("SELECT * FROM turn_checks WHERE attempt_id=?").get(id),
+              fresh,
+            );
+            assert.equal(reviewerCalls, drift ? 0 : 1);
+            await assert.rejects(
+              () =>
+                recheckEngine.recheckVerification(
+                  taskKey,
+                  { ...request, fence: 5 },
+                  "explicit unchanged-tree recheck",
+                ),
+              /REPLAY_CONFLICT/,
+            );
+          } finally {
+            await sdkProvider.close();
+            state.close();
+          }
+        }
+        for (const scenario of scenarios) {
+          let configured: RuntimeRoute = reviewerRoute;
+          let recorded: RuntimeRoute = reviewerRoute;
+          if (scenario === "settled-review-drift") {
+            configured = {
+              ...reviewerRoute,
+              provider: "claude",
+              access: "claude-company-pro",
+              modeId: "auto",
+              repositoryRoots: [root],
+            };
+            recorded = { ...configured, modeId: "plan" };
+          }
+          await recheckTest.test(scenario, () => runScenario(scenario, { configured, recorded }));
+        }
+      } finally {
+        writeFileSync(sourceFile, originalBytes);
       }
     },
   );

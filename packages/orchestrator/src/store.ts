@@ -22,6 +22,7 @@ import {
   type TerminalRepairGrant,
   type TerminalRepairRequest,
 } from "./terminal-repair.ts";
+import { verificationRecheck } from "./verification-recheck.ts";
 
 export type AttemptState =
   | "INTENT"
@@ -1474,6 +1475,7 @@ export class Store {
   ): void {
     this.transaction(() => {
       assertNoVerificationWork(this, id);
+      if (verificationRecheck(this, id)) throw Error("VERIFICATION_RECHECK_NO_WRITER");
       const humanCheckpoint = authorize();
       const a = this.attempt(id),
         c: Contract = JSON.parse(this.task(a.task_key)!.contract_json);

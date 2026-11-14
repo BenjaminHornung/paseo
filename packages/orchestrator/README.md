@@ -107,6 +107,28 @@ changing its verdict, repair counter or lease. After legitimate clarification, t
 same revision can finish normally; this does not reopen previously failed attempts.
 
 An exhausted task (`BLOCKED`, latest attempt `FAILED`) cannot be resumed by an agent.
+
+An unchanged pre-review failure caused solely by the old CRLF checker can use the
+separate operator-only command `verification-recheck <task-key> <request.json> <reason>`.
+Its strict request is defined in `src/verification-recheck.ts`: attempt/fence/rework,
+worker/native session, contract/config, raw check and failure JSON SHA-256 digests,
+diff, scope/check revisions, peers hash and `crlfProofSha256`. The latter is the
+existing stable `hash` of `Git.crlfRecheckProof` on the effective owned scope; a
+supplied hash alone is never cause evidence. The controller must freshly prove
+original check2 and corrected check0 on identical bytes, solely from existing
+uniform-CRLF files. Explicit whitespace policies and genuine errors still block.
+
+After separate explicit operator authorization, one atomic reentry archives the
+original check/verdict rows byte-for-byte, retires that exact stale cache and rearms
+the same attempt and fence in VERIFY. Rework is unchanged by reentry. The CLI
+returns without dispatching work; the normal watcher runs fresh full checks and
+the first independent review. No writer prompt or new attempt is permitted by this
+marker. A normal review rejection still fails and blocks under the pinned exhausted
+limit; later implementation repairs require their own explicit successor grant.
+Exact replay preserves any newly produced evidence without rerunning or retiring it.
+Changed bindings reject. This command does not invent intake/wake provenance, change
+customer bytes or stored Git configuration, and is not a completion result.
+
 An explicitly authorized historical approval-only finalization failure can instead use
 the operator-only command `verification-recover <task-key> <request.json> <reason>`.
 The strict request schema is `src/verification-recovery.ts`. It binds the attempt/fence,

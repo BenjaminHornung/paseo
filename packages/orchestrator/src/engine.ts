@@ -44,6 +44,16 @@ import {
 import { recordOperatorWakeOrigin } from "./intake-identity.ts";
 import type { PaseoApi } from "@getpaseo/client";
 import type { VerificationRecoveryResult } from "./verification-recovery.ts";
+import {
+  verificationRecheckRequestSchema,
+  verificationRecheck,
+  prepareVerificationRecheck,
+  assertRecheckBindings,
+  assertRecheckArchive,
+  recordVerificationRecheck,
+  type VerificationRecheckMarker,
+  type VerificationRecheckResult,
+} from "./verification-recheck.ts";
 
 type AmendmentAdmissionResult =
   | { state: "READY"; key: string }
@@ -390,7 +400,9 @@ export class Engine {
     };
   }
   private assertTerminalRepairRoute(contract: Contract, route: RuntimeRoute): void {
-    const configured = this.config.routes.find((candidate) => candidate.id === route.id);
+    let configured = this.config.routes.find((candidate) => candidate.id === route.id);
+    if (configured && contract.role === "reviewer" && isClaudeProvider(configured.provider))
+      configured = { ...configured, modeId: "plan" };
     if (
       !this.config.liveDispatchApproved ||
       !configured?.enabled ||
@@ -438,7 +450,10 @@ export class Engine {
   private assertTerminalRepairReviewerCurrent(
     contract: Contract,
     route: RuntimeRoute,
-    binding: NonNullable<TerminalRepairRequest["rejectedReview"]>,
+    binding: Pick<
+      NonNullable<TerminalRepairRequest["rejectedReview"]>,
+      "reviewerAgentId" | "reviewerNativeSessionId"
+    >,
   ): void {
     const current = this.provider.loadedAgent?.(binding.reviewerAgentId);
     if (
@@ -1342,7 +1357,15 @@ export class Engine {
           await this.acceptSnapshot(id, found[0]);
         } else this.store.observe(id, "NEEDS_CONFIRMATION");
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message === "VERIFICATION_RECHECK_DIFF_CHANGED") {
+        try {
+          const rejected = await this.rejectChangedRecheck(id);
+          if (rejected) return this.store.attempt(id);
+        } catch {
+          this.store.event("VERIFICATION_RECHECK_WAIT", id);
+        }
+      }
       this.store.observe(id, "NEEDS_CONFIRMATION");
     }
     return this.store.attempt(id);
@@ -1360,6 +1383,14 @@ export class Engine {
       // A closed or otherwise unsettled implementation is still a blocked
       // rework boundary, not a valid input to observe-only review processing.
       if (this.store.attempt(r.attempt_id).status !== "VERIFY") continue;
+      const recheck = verificationRecheck(this.store, r.attempt_id);
+      // A known changed revision belongs to the normal tick/finalization path.
+      // Do not process the old review or bypass a waiting worker observation here.
+      if (
+        recheck &&
+        this.git.snapshot(this.contract(recheck.taskKey)).diffHash !== recheck.request.diffHash
+      )
+        continue;
       await this.review(r.attempt_id, true);
     }
     return result;
@@ -1374,6 +1405,7 @@ export class Engine {
       .all() as { id: string }[];
     for (const a of verify.filter((a) => included(this.store.attempt(a.id).task_key))) {
       try {
+        if (await this.rejectChangedRecheck(a.id)) continue;
         await this.advance(a.id);
       } catch {
         this.store.event("ADVANCE_BLOCKED", a.id);
@@ -1400,10 +1432,14 @@ export class Engine {
     }
   }
   private runVerification(id: string, fresh = false) {
+    this.recheckBindings(id);
     const recovery = this.recoveryBindings(id);
     const a = this.store.attempt(id),
       c = this.contract(a.task_key),
       before = this.git.snapshot(c);
+    const recheck = verificationRecheck(this.store, id);
+    if (recheck && before.diffHash !== recheck.request.diffHash)
+      throw Error("VERIFICATION_RECHECK_DIFF_CHANGED");
     const cached = this.store.db
       .prepare("SELECT diff_hash,result_json FROM turn_checks WHERE attempt_id=?")
       .get(id) as { diff_hash: string; result_json: string } | undefined;
@@ -1411,6 +1447,7 @@ export class Engine {
       ? (JSON.parse(cached.result_json) as ReturnType<Engine["checkTree"]>)
       : undefined;
     const claimed = this.store.transaction(() => {
+      this.recheckBindings(id);
       if (recovery) this.recoveryBindings(id);
       const current = this.store.attempt(id);
       if (
@@ -1664,6 +1701,250 @@ export class Engine {
     if (this.git.snapshot(c).diffHash !== r.diffHash)
       throw Error("VERIFICATION_RECOVERY_DIFF_CHANGED");
   }
+  private assertRecheckWorkerCurrent(marker: VerificationRecheckMarker): void {
+    const r = marker.request,
+      current = this.provider.loadedAgent?.(r.agentId);
+    if (
+      !current ||
+      current.id !== r.agentId ||
+      current.status !== "idle" ||
+      current.activeTurn ||
+      !Array.isArray(current.pendingPermissions) ||
+      current.pendingPermissions.length ||
+      current.runtimeInfo?.sessionId !== r.nativeSessionId
+    )
+      throw Error("VERIFICATION_RECHECK_WORKER_CHANGED");
+    this.validateSnapshot(
+      this.contract(marker.taskKey),
+      JSON.parse(this.store.attempt(r.attemptId).route_json),
+      {
+        id: current.id,
+        cwd: current.cwd,
+        workspaceId: current.workspaceId ?? undefined,
+        provider: current.provider,
+        model: current.model ?? "",
+        reasoning:
+          current.runtimeInfo?.thinkingOptionId ?? current.effectiveThinkingOptionId ?? null,
+        modeId: current.runtimeInfo?.modeId ?? current.currentModeId ?? null,
+      },
+    );
+  }
+
+  private recheckBindings(id: string): void {
+    const marker = verificationRecheck(this.store, id);
+    if (!marker) return;
+    assertRecheckBindings(this.store, marker);
+    assertRecheckArchive(this.store, marker);
+    this.assertRecheckWorkerCurrent(marker);
+  }
+
+  private async rejectChangedRecheck(id: string): Promise<boolean> {
+    const context = this.context(this.store.attempt(id).task_key);
+    if (context !== this) return context.rejectChangedRecheck(id);
+    const marker = verificationRecheck(this.store, id);
+    if (!marker) return false;
+    const c = this.contract(marker.taskKey);
+    if (this.git.snapshot(c).diffHash === marker.request.diffHash) return false;
+    const retireReview = await this.prepareRecheckReviewRetirement(marker);
+    const worker = await this.observed(await this.provider.refresh(marker.request.agentId));
+    if (!worker || (await this.completion.assess(worker)).state !== "VERIFY")
+      throw Error("VERIFICATION_RECHECK_WORKER_NOT_SETTLED");
+    this.recheckBindings(id);
+    if (this.store.verificationBlocked(c, id)) throw Error("PEER_WORK_IN_PROGRESS");
+    const current = this.git.snapshot(c);
+    if (current.diffHash === marker.request.diffHash) return false;
+    this.store.finish(
+      id,
+      false,
+      current.diffHash,
+      {
+        phase: "pre-review",
+        reason: "verification-recheck-revision-changed",
+        authorizedDiffHash: marker.request.diffHash,
+        observedDiffHash: current.diffHash,
+        scopeViolations: current.scopeViolations,
+        changed: true,
+      },
+      current.scopeViolations ? 0 : this.config.maxRework,
+      true,
+      (contracts) => {
+        this.assertFinalizationAuthority(contracts);
+        retireReview();
+        if (this.store.coordinationBlock(c)) throw Error("VERIFICATION_RECHECK_COORDINATION_WAIT");
+      },
+    );
+    return true;
+  }
+
+  private async prepareRecheckReviewRetirement(
+    marker: VerificationRecheckMarker,
+  ): Promise<() => void> {
+    const id = marker.request.attemptId;
+    const row = this.store.db.prepare("SELECT * FROM review_runs WHERE attempt_id=?").get(id) as
+      | ReviewRunRow
+      | undefined;
+    const assertUnchanged = () => {
+      const current = this.store.db.prepare("SELECT * FROM review_runs WHERE attempt_id=?").get(id);
+      if (hash(current ?? null) !== hash(row ?? null))
+        throw Error("VERIFICATION_RECHECK_REVIEW_CHANGED");
+    };
+    if (!row || row.state === "DONE") return assertUnchanged;
+    if (
+      !row.request_key ||
+      row.diff_hash !== marker.request.diffHash ||
+      ![
+        "INTENT",
+        "SENDING",
+        "UNKNOWN",
+        "RUNNING",
+        "PERMISSION",
+        "NEEDS_CONFIRMATION",
+        "WAITING_PROCESSES",
+      ].includes(row.state)
+    )
+      throw Error("VERIFICATION_RECHECK_REVIEW_WAIT");
+    const c = this.contract(marker.taskKey);
+    const reviewerContract = this.reviewerContract(c, marker.request.agentId, row.diff_hash);
+    const route: RuntimeRoute = JSON.parse(row.route_json);
+    this.assertTerminalRepairRoute(reviewerContract, route);
+    let assertObservedReviewer = () => {};
+    let observedNativeSessionId: string | null = null;
+    const unsent = row.state === "INTENT" && row.agent_id === null && row.result_json === null;
+    if (!unsent) {
+      if (!row.agent_id) throw Error("VERIFICATION_RECHECK_REVIEW_WAIT");
+      const reviewer = await this.observed(await this.provider.refresh(row.agent_id));
+      if (
+        !reviewer ||
+        reviewer.id !== row.agent_id ||
+        !reviewer.nativeSessionId ||
+        reviewer.status !== "idle" ||
+        reviewer.turnComplete !== true ||
+        reviewer.foregroundActive !== false ||
+        reviewer.backgroundActive !== false
+      )
+        throw Error("VERIFICATION_RECHECK_REVIEW_WAIT");
+      if ((await this.completion.assess(reviewer)).state !== "VERIFY")
+        throw Error("VERIFICATION_RECHECK_REVIEW_WAIT");
+      this.validateSnapshot(reviewerContract, route, reviewer);
+      const binding = {
+        reviewerAgentId: row.agent_id,
+        reviewerNativeSessionId: reviewer.nativeSessionId,
+      };
+      observedNativeSessionId = reviewer.nativeSessionId;
+      assertObservedReviewer = () =>
+        this.assertTerminalRepairReviewerCurrent(reviewerContract, route, binding);
+    }
+    return () => {
+      assertUnchanged();
+      this.assertTerminalRepairRoute(reviewerContract, route);
+      assertObservedReviewer();
+      this.store.event(
+        `VERIFICATION_RECHECK_REVIEW_ARCHIVED:${JSON.stringify({ review: row, observedNativeSessionId })}`,
+        id,
+      );
+      const deleted = this.store.db
+        .prepare(
+          "DELETE FROM review_runs WHERE attempt_id=? AND request_key=? AND state=? AND agent_id IS ?",
+        )
+        .run(id, row.request_key, row.state, row.agent_id).changes;
+      if (deleted !== 1) throw Error("VERIFICATION_RECHECK_REVIEW_CHANGED");
+    };
+  }
+
+  async recheckVerification(
+    key: string,
+    input: unknown,
+    reason: string,
+  ): Promise<VerificationRecheckResult> {
+    const context = this.context(key);
+    if (context !== this) return context.recheckVerification(key, input, reason);
+    const request = verificationRecheckRequestSchema.parse(input);
+    if (reason.trim().length < 10 || reason.length > 500)
+      throw Error("VERIFICATION_RECHECK_REASON_REQUIRED");
+    const previous = verificationRecheck(this.store, request.attemptId);
+    if (previous) {
+      if (
+        previous.taskKey !== key ||
+        hash(previous.request) !== hash(request) ||
+        previous.reason !== reason
+      )
+        throw Error("VERIFICATION_RECHECK_REPLAY_CONFLICT");
+      assertRecheckBindings(this.store, previous);
+      assertRecheckArchive(this.store, previous);
+      if (this.git.snapshot(this.contract(key)).diffHash !== request.diffHash)
+        throw Error("VERIFICATION_RECHECK_DIFF_CHANGED");
+      return { recheckId: hash(previous), attemptId: request.attemptId, replayed: true };
+    }
+    const c = this.contract(key),
+      attempt = this.store.attempt(request.attemptId);
+    const leases = this.store.db
+      .prepare("SELECT worktree FROM leases WHERE attempt_id=? AND fence=?")
+      .all(request.attemptId, request.fence);
+    const marker: VerificationRecheckMarker = {
+      request,
+      taskKey: key,
+      reason,
+      leaseResource: String(leases[0]?.worktree ?? ""),
+    };
+    const expected = hash(prepareVerificationRecheck(this.store, marker));
+    const assertAdmission = () => {
+      assertTaskAssessment(this.store, this.config, c);
+      if (this.store.stopped() || !this.config.liveDispatchApproved || !this.canDispatch(key))
+        throw Error("VERIFICATION_RECHECK_AUTHORITY_WAIT");
+      if (
+        this.config.orchestrationVersion === 3 &&
+        c.highRisk &&
+        !hasAuditedOwnerApproval(this.store, c)
+      )
+        throw Error("CONTINUATION_OWNER_APPROVAL_REQUIRED");
+      const proof = this.git.crlfRecheckProof({ ...c, allowedPaths: this.store.scopePaths(c) });
+      if (proof.diffHash !== request.diffHash || hash(proof) !== request.crlfProofSha256)
+        throw Error("VERIFICATION_RECHECK_CAUSE_CHANGED");
+    };
+    assertAdmission();
+    await this.provider.authorize(JSON.parse(attempt.route_json), c.worktree);
+    const snapshot = await this.observed(await this.provider.refresh(request.agentId));
+    if (
+      !snapshot ||
+      snapshot.nativeSessionId !== request.nativeSessionId ||
+      snapshot.status !== "idle" ||
+      !snapshot.turnComplete ||
+      (await this.completion.assess(snapshot)).state !== "VERIFY"
+    )
+      throw Error("VERIFICATION_RECHECK_WORKER_NOT_SETTLED");
+    const replayed = this.store.transaction(() => {
+      this.assertRecheckWorkerCurrent(marker);
+      assertAdmission();
+      const concurrent = verificationRecheck(this.store, request.attemptId);
+      if (concurrent) {
+        if (hash(concurrent) !== hash(marker)) throw Error("VERIFICATION_RECHECK_REPLAY_CONFLICT");
+        return true;
+      }
+      const original = prepareVerificationRecheck(this.store, marker);
+      if (hash(original) !== expected) throw Error("VERIFICATION_RECHECK_CLAIM_CHANGED");
+      this.store.event(
+        `VERIFICATION_RECHECK_ARCHIVE:${JSON.stringify({ checks: original.checks, failure: original.failure })}`,
+        request.attemptId,
+      );
+      this.store.db.prepare("DELETE FROM turn_checks WHERE attempt_id=?").run(request.attemptId);
+      this.store.db.prepare("DELETE FROM reviews WHERE attempt_id=?").run(request.attemptId);
+      this.store.db
+        .prepare("UPDATE attempts SET status='VERIFY' WHERE id=?")
+        .run(request.attemptId);
+      this.store.db.prepare("UPDATE tasks SET state='VERIFY' WHERE key=?").run(key);
+      const held = this.store.db
+        .prepare(
+          "UPDATE leases SET state='HELD',heartbeat_ms=? WHERE worktree=? AND attempt_id=? AND fence=? AND state='RELEASED'",
+        )
+        .run(Date.now(), marker.leaseResource, request.attemptId, request.fence).changes;
+      if (held !== 1 || this.store.verificationBlocked(c, request.attemptId))
+        throw Error("VERIFICATION_RECHECK_COORDINATION_CHANGED");
+      recordVerificationRecheck(this.store, marker);
+      return false;
+    });
+    return { recheckId: hash(marker), attemptId: request.attemptId, replayed };
+  }
+
   async recoverVerification(
     key: string,
     input: unknown,
@@ -1838,6 +2119,7 @@ export class Engine {
     snapshot: ReturnType<Git["snapshot"]>,
   ): Promise<ReviewIntentStart> {
     const selection = await this.reviewerRoutes(c, implementationRouteId);
+    this.recheckBindings(id);
     if (selection.discoveryPending)
       return {
         waiting: {
@@ -2171,6 +2453,7 @@ export class Engine {
       const key = `${contract.workflowId}/${contract.taskId}/${contract.role}`;
       const attempt = this.store.latest(key);
       if (!attempt) continue;
+      this.recheckBindings(attempt.id);
       const marker = this.recoveryBindings(attempt.id);
       if (!marker) continue;
       if (

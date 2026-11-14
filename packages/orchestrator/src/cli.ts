@@ -23,6 +23,19 @@ import { terminalRepairRequestSchema } from "./terminal-repair.ts";
 import { CurrentPaseoCompletion } from "./completion.ts";
 import { verificationRecoveryRequestSchema } from "./verification-recovery.ts";
 
+async function recheckVerificationCommand(
+  store: Store,
+  provider: PaseoProvider,
+  key: string,
+  file: string,
+  reason: string,
+) {
+  const task = store.task(key);
+  if (!task) throw Error("VERIFICATION_RECHECK_TASK_REQUIRED");
+  const engine = new Engine(store, configSchema.parse(JSON.parse(task.config_json)), provider);
+  return engine.recheckVerification(key, readJson(localPath(file)), reason);
+}
+
 async function approveTerminalRepair(
   store: Store,
   provider: PaseoProvider,
@@ -286,6 +299,7 @@ try {
         "checks-approve",
         "terminal-repair-approve",
         "verification-recover",
+        "verification-recheck",
       ].includes(command) ||
       (command === "workflow" &&
         [
@@ -304,7 +318,17 @@ try {
       print({ state: "not-initialized", entries: [] });
     } else {
       store = new Store(stateFile);
-      if (command === "verification-recover" && subcommand && argument && process.argv[5]) {
+      if (command === "verification-recheck" && subcommand && argument && process.argv[5]) {
+        print(
+          await recheckVerificationCommand(
+            store,
+            await connection(),
+            subcommand,
+            argument,
+            process.argv[5],
+          ),
+        );
+      } else if (command === "verification-recover" && subcommand && argument && process.argv[5]) {
         print(
           await recoverVerificationCommand(
             store,

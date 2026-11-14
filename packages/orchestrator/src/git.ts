@@ -54,6 +54,31 @@ interface ReviewFileState {
 const MAX_REVIEW_CONTEXT_BYTES = 512_000;
 const MAX_INLINE_REVIEW_CONTENT_BYTES = 512_000;
 
+interface CrlfPathEvidence {
+  file: string;
+  baseBlob: string;
+  baseSha256: string;
+  currentSha256: string;
+}
+export interface CrlfRecheckProof {
+  version: 1;
+  diffHash: string;
+  originalExit: 2;
+  correctedExit: 0;
+  whitespacePolicy: string | null;
+  paths: CrlfPathEvidence[];
+  diagnostics: { file: string; line: number }[];
+}
+
+function uniformCrlf(bytes: Buffer): boolean {
+  if (bytes.includes(0) || !bytes.includes(10)) return false;
+  for (let index = 0; index < bytes.length; index++) {
+    if (bytes[index] === 13 && bytes[index + 1] !== 10) return false;
+    if (bytes[index] === 10 && bytes[index - 1] !== 13) return false;
+  }
+  return true;
+}
+
 export class Git {
   readonly executable: string;
   private readonly peerAllowedPaths: (contract: Contract) => string[];
@@ -358,12 +383,148 @@ export class Git {
     const scopeViolations = files.filter(
       (file) => !allowed.some((allowedPath) => pathInScope(file, allowedPath)),
     ).length;
-    const diffCheckExit =
-      spawnSync(this.executable, ["diff", "--check", c.baseCommit, "--"], {
-        cwd: c.worktree,
-        stdio: "ignore",
-      }).status ?? -1;
+    const diffCheckExit = this.checkDiff(c, files).exit;
     return { diffHash: h.digest("hex"), files, scopeViolations, diffCheckExit };
+  }
+
+  private whitespacePolicy(c: Contract): string | null {
+    const result = spawnSync(this.executable, ["config", "--get", "core.whitespace"], {
+      cwd: c.worktree,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (result.status === 1 && !result.stdout && !result.stderr) return null;
+    if (result.status !== 0 || result.error || result.stderr)
+      throw Error("CRLF_CHECK_POLICY_UNAVAILABLE");
+    return result.stdout.trim();
+  }
+
+  private qualifiedCrlfPaths(
+    c: Contract,
+    files: string[],
+    policy: string | null,
+  ): CrlfPathEvidence[] {
+    if (policy?.split(",").some((rule) => rule.trim() === "-cr-at-eol")) return [];
+    const qualified: CrlfPathEvidence[] = [];
+    for (const file of files) {
+      const absolute = path.resolve(c.worktree, file);
+      if (!existsSync(absolute)) continue;
+      const current = readFileSync(absolute);
+      if (!uniformCrlf(current)) continue;
+      const base = this.baseFileIdentity(c, file);
+      if (!base || base.bytes > 16 * 1024 * 1024) continue;
+      const original = execFileSync(this.executable, ["cat-file", "blob", base.gitBlobId], {
+        cwd: c.worktree,
+        maxBuffer: 16 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      if (!uniformCrlf(original)) continue;
+      const attributes = execFileSync(
+        this.executable,
+        ["check-attr", "-z", "whitespace", "--", file],
+        {
+          cwd: c.worktree,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      ).split("\0");
+      if (attributes.length !== 4 || attributes[0] !== file || attributes[1] !== "whitespace")
+        throw Error("CRLF_CHECK_ATTRIBUTES_UNAVAILABLE");
+      if (attributes[2] !== "unspecified") continue;
+      qualified.push({
+        file,
+        baseBlob: base.gitBlobId,
+        baseSha256: createHash("sha256").update(original).digest("hex"),
+        currentSha256: createHash("sha256").update(current).digest("hex"),
+      });
+    }
+    return qualified;
+  }
+
+  private checkDiff(c: Contract, files: string[]) {
+    const policy = this.whitespacePolicy(c);
+    const paths = this.qualifiedCrlfPaths(c, files, policy);
+    const compatible = new Set(paths.map((entry) => entry.file));
+    let exit = 0;
+    for (const group of [files.filter((file) => !compatible.has(file)), [...compatible]]) {
+      if (!group.length) continue;
+      const configuration = compatible.has(group[0])
+        ? ["-c", `core.whitespace=${policy ? `${policy},` : ""}cr-at-eol`]
+        : [];
+      const result = spawnSync(
+        this.executable,
+        [
+          ...configuration,
+          "diff",
+          "--check",
+          c.baseCommit,
+          "--",
+          ...group.map((file) => `:(literal)${file}`),
+        ],
+        { cwd: c.worktree, stdio: "ignore" },
+      );
+      if (result.error || result.status === null) return { exit: -1, paths, policy };
+      if (result.status !== 0) exit = result.status;
+    }
+    return { exit, paths, policy };
+  }
+
+  crlfRecheckProof(c: Contract): CrlfRecheckProof {
+    const snapshot = this.snapshot(c);
+    const corrected = this.checkDiff(c, snapshot.files);
+    const original = spawnSync(
+      this.executable,
+      ["-c", "core.quotepath=false", "diff", "--check", c.baseCommit, "--"],
+      {
+        cwd: c.worktree,
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+        env: { ...process.env, LC_ALL: "C", LANG: "C", LANGUAGE: "C" },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    if (
+      snapshot.scopeViolations ||
+      corrected.exit !== 0 ||
+      original.status !== 2 ||
+      original.error ||
+      original.stderr
+    )
+      throw Error("CRLF_RECHECK_CAUSE_UNPROVEN");
+    const diagnostics: CrlfRecheckProof["diagnostics"] = [];
+    const output = original.stdout.split("\n");
+    if (output.at(-1) === "") output.pop();
+    for (let index = 0; index < output.length; index += 2) {
+      const header = /^(.*):(\d+): trailing whitespace\.\r?$/.exec(output[index]);
+      if (!header || !output[index + 1]?.startsWith("+"))
+        throw Error("CRLF_RECHECK_CAUSE_UNPROVEN");
+      const file = header[1],
+        line = Number(header[2]);
+      if (
+        !corrected.paths.some((entry) => entry.file === file) ||
+        !c.allowedPaths.some((allowed) => pathInScope(file, allowed))
+      )
+        throw Error("CRLF_RECHECK_CAUSE_UNPROVEN");
+      const sourceLine = readFileSync(path.resolve(c.worktree, file), "utf8").split("\n")[line - 1];
+      if (
+        sourceLine === undefined ||
+        !sourceLine.endsWith("\r") ||
+        /[\t \r]$/.test(sourceLine.slice(0, -1))
+      )
+        throw Error("CRLF_RECHECK_CAUSE_UNPROVEN");
+      diagnostics.push({ file, line });
+    }
+    if (!diagnostics.length || this.snapshot(c).diffHash !== snapshot.diffHash)
+      throw Error("CRLF_RECHECK_CAUSE_UNPROVEN");
+    return {
+      version: 1,
+      diffHash: snapshot.diffHash,
+      originalExit: 2,
+      correctedExit: 0,
+      whitespacePolicy: corrected.policy,
+      paths: corrected.paths,
+      diagnostics,
+    };
   }
 }
 
