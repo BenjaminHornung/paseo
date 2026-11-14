@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { rm } from "node:fs/promises";
 import { test } from "node:test";
 import { Engine } from "../src/engine.ts";
 import {
@@ -14,10 +15,182 @@ import {
   reviewResultSchema,
   type Contract,
 } from "../src/contracts.ts";
-import { Git } from "../src/git.ts";
+import { Git, runCheck } from "../src/git.ts";
 import { PaseoProvider, type Provider, type Snapshot } from "../src/provider.ts";
 import { createPaseoApi } from "@getpaseo/client";
 import { Store } from "../src/store.ts";
+import { setTimeout as delay } from "node:timers/promises";
+import { codeRoot, powershellExecutable } from "../src/settings-files.ts";
+
+test("owned checks wait without a runtime deadline and bind their real controller lifetime", async () => {
+  const directory = mkdtempSync(path.join(process.cwd(), ".owned-check-test-"));
+  const supervisor = path.join(codeRoot, "scripts/check-job.ps1");
+  const marker = path.join(directory, "must-not-start");
+  const request = Buffer.from(
+    JSON.stringify({
+      command: [
+        process.execPath,
+        "-e",
+        `require('node:fs').writeFileSync(${JSON.stringify(marker)},'started')`,
+      ],
+      cwd: directory,
+      timeoutMs: 2000,
+      controllerPid: process.ppid,
+    }),
+  ).toString("base64");
+  const parseResult = (text: string) => {
+    const result = text.match(/ORCHESTRATOR_CHECK_RESULT:(\{[^\n]+\})/);
+    assert.ok(result, "the owned supervisor must return a structured result");
+    return JSON.parse(result[1]) as { exit: number; quiescent: boolean; timedOut: boolean };
+  };
+  const waitFor = async (condition: () => boolean, timeoutMs = 15000) => {
+    const until = Date.now() + timeoutMs;
+    while (!condition()) {
+      assert.ok(Date.now() < until, "owned fixture did not reach the expected lifecycle state");
+      await delay(20);
+    }
+  };
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+      throw error;
+    }
+  };
+  try {
+    const foreign = spawnSync(
+      powershellExecutable,
+      ["-NoProfile", "-NonInteractive", "-File", supervisor, "-Request", request],
+      { cwd: directory, encoding: "utf8", windowsHide: true, timeout: 20000 },
+    );
+    assert.equal(foreign.status, 0);
+    assert.notEqual(
+      parseResult(foreign.stdout).exit,
+      0,
+      "a different live parent cannot authorize a check child",
+    );
+    assert.equal(existsSync(marker), false, "parent validation precedes child creation/resume");
+
+    const completed = path.join(directory, "completed.json");
+    const childFile = path.join(directory, "late-child.cjs");
+    const rootFile = path.join(directory, "early-root.cjs");
+    writeFileSync(
+      childFile,
+      `setTimeout(() => {
+      require('node:fs').writeFileSync(process.argv[2], JSON.stringify([
+        process.env.MSBUILDDISABLENODEREUSE,
+        process.env.DOTNET_CLI_USE_MSBUILD_SERVER,
+        process.env.UseSharedCompilation
+      ]));
+    }, 300);`,
+    );
+    writeFileSync(
+      rootFile,
+      `const c = require('node:child_process').spawn(
+      process.execPath, [${JSON.stringify(childFile)}, process.argv[2]],
+      {stdio:'ignore', windowsHide:true, detached:true});
+      c.unref(); process.exit(0);`,
+    );
+    const parentEnvironment = [
+      process.env.MSBUILDDISABLENODEREUSE,
+      process.env.DOTNET_CLI_USE_MSBUILD_SERVER,
+      process.env.UseSharedCompilation,
+    ];
+    const natural = runCheck([process.execPath, rootFile, completed], directory);
+    assert.equal(natural.exit, 0);
+    assert.equal(natural.quiescent, true);
+    assert.equal(natural.diagnostic?.timedOut, false);
+    assert.deepEqual(
+      JSON.parse(readFileSync(completed, "utf8")),
+      ["1", "0", "false"],
+      "the real late child completes under process-local buildserver prevention",
+    );
+    assert.deepEqual(
+      [
+        process.env.MSBUILDDISABLENODEREUSE,
+        process.env.DOTNET_CLI_USE_MSBUILD_SERVER,
+        process.env.UseSharedCompilation,
+      ],
+      parentEnvironment,
+    );
+    const bounded = runCheck([process.execPath, "-e", "setInterval(()=>{},1000)"], directory, 100);
+    assert.equal(bounded.exit, 124);
+    assert.equal(bounded.quiescent, true);
+    assert.equal(bounded.diagnostic?.timedOut, true);
+
+    const controllerFile = path.join(directory, "controller.mjs");
+    const supervisorStarted = path.join(directory, "supervisor-started.json");
+    const readyFile = path.join(directory, "ready.json");
+    const outputFile = path.join(directory, "supervisor.out");
+    const wrapperFile = path.join(directory, "observe-supervisor.ps1");
+    writeFileSync(
+      wrapperFile,
+      `param([string]$Request)
+      $ErrorActionPreference='Stop'
+      $result = & '${supervisor.replaceAll("'", "''")}' -Request $Request
+      [IO.File]::WriteAllText('${outputFile.replaceAll("'", "''")}', [string]$result)
+    `,
+    );
+    const busyRootFile = path.join(directory, "busy-root.cjs");
+    writeFileSync(
+      busyRootFile,
+      `const c = require('node:child_process').spawn(
+      process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio:'ignore',windowsHide:true});
+      require('node:fs').writeFileSync(process.argv[2],JSON.stringify({root:process.pid,child:c.pid}));
+      setInterval(()=>{},1000);`,
+    );
+    // The explicit diagnostic deadline is a fixture cleanup fallback. Correct
+    // controller-death cleanup must complete without using that deadline.
+    writeFileSync(
+      controllerFile,
+      `import {spawn} from 'node:child_process';import fs from 'node:fs';
+      const output=fs.openSync(${JSON.stringify(outputFile + ".transport")},'a');
+      const request=Buffer.from(JSON.stringify({command:[process.execPath,${JSON.stringify(busyRootFile)},${JSON.stringify(readyFile)}],
+        cwd:${JSON.stringify(directory)},timeoutMs:5000,controllerPid:process.pid})).toString('base64');
+      const p=spawn(${JSON.stringify(powershellExecutable)},['-NoProfile','-NonInteractive','-File',${JSON.stringify(wrapperFile)},'-Request',request],
+        {stdio:['ignore',output,output],windowsHide:true});
+      fs.closeSync(output);
+      fs.writeFileSync(${JSON.stringify(supervisorStarted)},JSON.stringify({pid:p.pid}));
+      setInterval(()=>{},1000);`,
+    );
+    const controller = spawn(process.execPath, [controllerFile], {
+      cwd: directory,
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    const controllerClosed = new Promise<void>((resolve) =>
+      controller.once("close", () => resolve()),
+    );
+    try {
+      await waitFor(() => existsSync(readyFile));
+      const owned = JSON.parse(readFileSync(readyFile, "utf8")) as { root: number; child: number };
+      const host = JSON.parse(readFileSync(supervisorStarted, "utf8")) as { pid: number };
+      controller.kill();
+      await controllerClosed;
+      // A parent-owned console can also close PowerShell. In that case its
+      // KILL_ON_JOB_CLOSE remains authoritative; a missing result is never success.
+      // This bound is shorter than the explicit fixture diagnostic fallback.
+      await waitFor(() => !alive(owned.root) && !alive(owned.child) && !alive(host.pid), 3000);
+      if (existsSync(outputFile)) {
+        const abandoned = parseResult(readFileSync(outputFile, "utf8"));
+        assert.notEqual(abandoned.exit, 0, "controller death is never a successful check");
+        assert.equal(abandoned.timedOut, false, "cleanup precedes the diagnostic deadline");
+        assert.equal(abandoned.quiescent, true);
+      }
+    } finally {
+      if (controller.exitCode === null && controller.signalCode === null) controller.kill();
+      await controllerClosed;
+      if (existsSync(supervisorStarted)) {
+        const host = JSON.parse(readFileSync(supervisorStarted, "utf8")) as { pid: number };
+        await waitFor(() => !alive(host.pid));
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
 
 function gitExecutable(): string {
   const command =

@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
@@ -370,7 +370,7 @@ export class Git {
 export function runCheck(
   command: string[],
   cwd: string,
-  timeoutMs = 120000,
+  timeoutMs = 0,
 ): {
   exit: number;
   logHash: string;
@@ -383,6 +383,8 @@ export function runCheck(
     counts: { outcome: string; count: number }[];
   };
 } {
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 2147483647)
+    throw Error("Invalid diagnostic check timeout");
   const executable = localPath(command[0]);
   for (const arg of command.slice(1)) {
     const fileArgument = arg.match(/^[-/][^=]+=(.+)$/)?.[1] ?? arg;
@@ -395,7 +397,12 @@ export function runCheck(
   const scratch = path.join(appRoot, "state/check-tmp");
   mkdirSync(scratch, { recursive: true });
   const request = Buffer.from(
-    JSON.stringify({ command: [executable, ...command.slice(1)], cwd, timeoutMs }),
+    JSON.stringify({
+      command: [executable, ...command.slice(1)],
+      cwd,
+      timeoutMs,
+      controllerPid: process.pid,
+    }),
   ).toString("base64");
   const r = spawnSync(
     localPath(powershellExecutable),
@@ -409,13 +416,24 @@ export function runCheck(
     ],
     {
       cwd,
-      env: { ...process.env, TMP: scratch, TEMP: scratch },
+      env: {
+        ...process.env,
+        TMP: scratch,
+        TEMP: scratch,
+        MSBUILDDISABLENODEREUSE: "1",
+        DOTNET_CLI_USE_MSBUILD_SERVER: "0",
+        UseSharedCompilation: "false",
+      },
       shell: false,
       encoding: "utf8",
-      timeout: timeoutMs + 20000,
+      timeout: timeoutMs > 0 ? timeoutMs + 20000 : undefined,
       maxBuffer: 8 * 1024 * 1024,
     },
   );
+  return checkOutcome(r);
+}
+
+function checkOutcome(r: SpawnSyncReturns<string>): ReturnType<typeof runCheck> {
   const match = r.status === 0 && r.stdout?.trim().match(/ORCHESTRATOR_CHECK_RESULT:(\{[^\n]+\})$/);
   const result = match
     ? (JSON.parse(match[1]) as {

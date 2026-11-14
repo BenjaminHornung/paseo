@@ -24,6 +24,31 @@ public static class CheckJob {
   [StructLayout(LayoutKind.Sequential)] struct Accounting {
     public long user,kernel,periodUser,periodKernel; public uint faults,total,active,terminated;
   }
+  [StructLayout(LayoutKind.Sequential)] struct ProcessBasicInformation {
+    public IntPtr exitStatus,peb,affinity,priority,pid,parentPid;
+  }
+  [DllImport("ntdll")] static extern int NtQueryInformationProcess(IntPtr process,int type,out ProcessBasicInformation info,uint size,out uint returned);
+  [DllImport("kernel32")] static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int pid);
+  [DllImport("kernel32",SetLastError=true)] static extern bool GetProcessTimes(IntPtr process,out long created,out long exited,out long kernel,out long user);
+  [DllImport("kernel32",SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
+  static IntPtr OpenController(int expectedPid) {
+    ProcessBasicInformation self;uint returned;
+    if(expectedPid<=0 || NtQueryInformationProcess(GetCurrentProcess(),0,out self,(uint)Marshal.SizeOf<ProcessBasicInformation>(),out returned)!=0 ||
+      returned!=(uint)Marshal.SizeOf<ProcessBasicInformation>() || self.parentPid.ToInt64()!=expectedPid)
+      throw new Exception("controller-parent-mismatch");
+    IntPtr controller=OpenProcess(0x00101000,false,expectedPid); // SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+    if(controller==IntPtr.Zero) throw new Exception("controller-open");
+    try {
+      long parentCreated,parentExited,parentKernel,parentUser,selfCreated,selfExited,selfKernel,selfUser;
+      if(!GetProcessTimes(controller,out parentCreated,out parentExited,out parentKernel,out parentUser) ||
+        !GetProcessTimes(GetCurrentProcess(),out selfCreated,out selfExited,out selfKernel,out selfUser) ||
+        parentCreated>selfCreated || WaitForSingleObject(controller,0)!=258)
+        throw new Exception("controller-lifetime-mismatch");
+      // The handle pins this process object. A later reused PID cannot replace it.
+      return controller;
+    } catch {CloseHandle(controller);throw;}
+  }
   [DllImport("kernel32", SetLastError=true)] static extern IntPtr CreateJobObject(IntPtr attrs,string name);
   [DllImport("kernel32", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job,int type,ref ExtendedLimits limits,uint size);
   [DllImport("kernel32", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job,int type,out Accounting info,uint size,IntPtr returned);
@@ -138,10 +163,12 @@ public static class CheckJob {
       if(p.thread!=IntPtr.Zero) CloseHandle(p.thread);if(p.process!=IntPtr.Zero) CloseHandle(p.process);if(job!=IntPtr.Zero) CloseHandle(job);
     }
   }
-  public static string Run(string[] args,string cwd,int timeoutMs) {
-    IntPtr job=IntPtr.Zero; ProcessInfo p=new ProcessInfo(); bool assigned=false;
-    bool quiescent=false,timedOut=false; uint exit=1,rootExitBeforeCleanup=259,activeAtTimeout=0;
+  public static string Run(string[] args,string cwd,int timeoutMs,int controllerPid) {
+    IntPtr job=IntPtr.Zero,controller=IntPtr.Zero; ProcessInfo p=new ProcessInfo(); bool assigned=false;
+    bool quiescent=false,timedOut=false,controllerExited=false; uint exit=1,rootExitBeforeCleanup=259,activeAtTimeout=0;
     try {
+      if(timeoutMs<0) throw new Exception("diagnostic-timeout-invalid");
+      controller=OpenController(controllerPid);
       job=CreateJobObject(IntPtr.Zero,null); if(job==IntPtr.Zero) throw new Exception("job-create");
       var limits=new ExtendedLimits(); limits.basic.flags=0x2000; // KILL_ON_JOB_CLOSE, no breakaway.
       if(!SetInformationJobObject(job,9,ref limits,(uint)Marshal.SizeOf<ExtendedLimits>())) throw new Exception("job-limit");
@@ -150,18 +177,22 @@ public static class CheckJob {
       var command=new StringBuilder(); foreach(var arg in args) {if(command.Length>0)command.Append(' ');command.Append(Quote(arg));}
       if(!CreateProcess(args[0],command,IntPtr.Zero,IntPtr.Zero,true,0x08000004,IntPtr.Zero,cwd,ref si,out p)) throw new Exception("process-create");
       if(!AssignProcessToJobObject(job,p.process)) throw new Exception("job-assign"); assigned=true;
+      if(WaitForSingleObject(controller,0)!=258) throw new Exception("controller-exited-before-resume");
       if(ResumeThread(p.thread)==uint.MaxValue) throw new Exception("process-resume");
       var clock=Stopwatch.StartNew();
       while(true) {
+        uint ownerState=WaitForSingleObject(controller,0);
+        if(ownerState==0) {controllerExited=true;break;}
+        if(ownerState!=258) throw new Exception("controller-query");
         Accounting info; if(!QueryInformationJobObject(job,1,out info,(uint)Marshal.SizeOf<Accounting>(),IntPtr.Zero)) throw new Exception("job-query");
         if(info.active==0) {quiescent=true;break;}
-        if(clock.ElapsedMilliseconds>=timeoutMs) {
+        if(timeoutMs>0 && clock.ElapsedMilliseconds>=timeoutMs) {
           timedOut=true;activeAtTimeout=info.active;GetExitCodeProcess(p.process,out rootExitBeforeCleanup);break;
         }
         Thread.Sleep(20);
       }
       if(!quiescent) {
-        if(!TerminateJobObject(job,124)) throw new Exception("job-terminate");
+        if(!TerminateJobObject(job,timedOut?124u:1u)) throw new Exception("job-terminate");
         var cleanup=Stopwatch.StartNew();
         while(cleanup.ElapsedMilliseconds<5000) {
           Accounting info; if(!QueryInformationJobObject(job,1,out info,(uint)Marshal.SizeOf<Accounting>(),IntPtr.Zero)) break;
@@ -169,14 +200,16 @@ public static class CheckJob {
         }
       }
       if(!GetExitCodeProcess(p.process,out exit)) exit=1;
+      if(WaitForSingleObject(controller,0)!=258) controllerExited=true;
     } catch { exit=1; }
     finally {
       if(p.process!=IntPtr.Zero && !assigned) TerminateProcess(p.process,1);
       if(job!=IntPtr.Zero) CloseHandle(job);
       if(p.thread!=IntPtr.Zero) CloseHandle(p.thread);
       if(p.process!=IntPtr.Zero) CloseHandle(p.process);
+      if(controller!=IntPtr.Zero) CloseHandle(controller);
     }
-    return "{\"exit\":"+(timedOut?124:exit)+",\"quiescent\":"+(quiescent?"true":"false")+",\"timedOut\":"+(timedOut?"true":"false")+
+    return "{\"exit\":"+(controllerExited?1:timedOut?124:exit)+",\"quiescent\":"+(quiescent?"true":"false")+",\"timedOut\":"+(timedOut?"true":"false")+
       ",\"rootExitBeforeCleanup\":"+rootExitBeforeCleanup+",\"activeAtTimeout\":"+activeAtTimeout+"}";
   }
 }

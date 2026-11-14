@@ -1466,9 +1466,9 @@ export class Engine {
   }
   private checkTree(c: Contract, originalHash: string) {
     const commands = this.store.checkCommands(c);
-    const build = runCheck(commands.build, c.worktree, 600000);
+    const build = runCheck(commands.build, c.worktree);
     const test = build.quiescent
-      ? runCheck(this.store.checkCommands(c).test, c.worktree, 600000)
+      ? runCheck(this.store.checkCommands(c).test, c.worktree)
       : { exit: -1, logHash: hash("not-started"), quiescent: false };
     const after = this.git.snapshot(c);
     return {
