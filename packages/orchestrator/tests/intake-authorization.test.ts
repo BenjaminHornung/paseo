@@ -6,7 +6,12 @@ import { test, type TestContext } from "node:test";
 import { createHash } from "node:crypto";
 import { createPaseoApi, type PaseoAgentTimelineRefetchOptions } from "@getpaseo/client";
 import { AgentTimelineEntryPayloadSchema } from "@getpaseo/protocol/messages";
-import { editAutomation, readAutomation, taskDispatchAllowed } from "../src/automation.ts";
+import {
+  editAutomation,
+  readAutomation,
+  taskDispatchAllowed,
+  workflowStatus,
+} from "../src/automation.ts";
 import {
   intakeIdentity,
   intakeFactsSchema,
@@ -27,7 +32,7 @@ import {
   currentIntake,
   markIntakeClassificationPending,
 } from "../src/intake.ts";
-import { rememberIntakeIdentity } from "../src/intake-identity.ts";
+import { recordInternalMessageOrigins, rememberIntakeIdentity } from "../src/intake-identity.ts";
 import {
   canonicalPath,
   configSchema,
@@ -3797,6 +3802,128 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
                   .prepare("SELECT work_intake_id FROM main_checkpoints WHERE agent_id=?")
                   .get(agentId)!.work_intake_id,
                 beforeWork,
+              );
+              const actualDatabase = recoveryState.db;
+              let eventScans = 0;
+              const countedDatabase = new Proxy(actualDatabase, {
+                get(target, property) {
+                  if (property !== "prepare") {
+                    const value = Reflect.get(target, property);
+                    return typeof value === "function" ? value.bind(target) : value;
+                  }
+                  return (sql: string) => {
+                    const statement = target.prepare(sql);
+                    return new Proxy(statement, {
+                      get(value, method) {
+                        const action = Reflect.get(value, method);
+                        if (method !== "get" && method !== "all")
+                          return typeof action === "function" ? action.bind(value) : action;
+                        return (...args: Parameters<typeof statement.all>) => {
+                          const result = Reflect.apply(action, value, args);
+                          if (/^\s*SELECT\b/i.test(sql)) {
+                            const plan = target.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args);
+                            if (plan.some((row) => /\bSCAN events\b/.test(String(row.detail))))
+                              eventScans++;
+                          }
+                          return result;
+                        };
+                      },
+                    });
+                  };
+                },
+              });
+              Object.defineProperty(recoveryState, "db", { value: countedDatabase });
+              try {
+                const beforeStatus = workflowStatus(recoveryState, repo, agentId, vaultRoot);
+                const beforeScans = eventScans;
+                assert.ok(beforeScans > 0, "the cost proof must observe actual event scans");
+                for (let index = 0; index < 6; index++) {
+                  const messageId = `status-cost-reminder-${index}`;
+                  const nativeMessageId = `10101010-1010-7101-8101-${String(index).padStart(12, "0")}`;
+                  const text = `Synthetic completed controller transport ${index}`;
+                  const timestamp = new Date().toISOString();
+                  recoveryState.db
+                    .prepare("INSERT INTO internal_messages VALUES(?,?,?)")
+                    .run(agentId, messageId, "reminder");
+                  rememberIntakeIdentity(recoveryState, {
+                    agentId,
+                    sessionId: providerSessionId,
+                    messageId,
+                    nativeMessageId,
+                    timestamp,
+                    textHash: hash(text),
+                  });
+                  recordInternalMessageOrigins(
+                    recoveryState,
+                    { agentId, directory: repo },
+                    providerSessionId,
+                    [
+                      {
+                        timestamp,
+                        item: {
+                          type: "user_message",
+                          clientMessageId: messageId,
+                          messageId: nativeMessageId,
+                          text,
+                        },
+                      },
+                    ],
+                  );
+                }
+                recoveryState.transaction(() => {
+                  const insert = recoveryState.db.prepare(
+                    "INSERT INTO events(at_ms,kind,attempt_id) VALUES(?,?,NULL)",
+                  );
+                  for (let index = 0; index < 30000; index++)
+                    insert.run(Date.now(), `UNRELATED_STATUS_COST:${index}`);
+                });
+                eventScans = 0;
+                const profiledStatus = workflowStatus(recoveryState, repo, agentId, vaultRoot);
+                assert.deepEqual({ ...profiledStatus, at: 0 }, { ...beforeStatus, at: 0 });
+                assert.equal(
+                  eventScans,
+                  beforeScans,
+                  "additional proven origins must not multiply status event scans",
+                );
+              } finally {
+                Object.defineProperty(recoveryState, "db", { value: actualDatabase });
+              }
+              // SQL LIKE has case-insensitive/wildcard semantics here. A JS
+              // prefix filter must not silently discard the existing collision.
+              const claim = `operator_intake_approved:${JSON.stringify({ assessmentId: mistaken.id })}`;
+              recoveryState.event(claim);
+              assert.throws(
+                () => currentIntake(recoveryState, agentId, true),
+                /INTAKE_INTERNAL_ORIGIN_CONFLICT/,
+              );
+              recoveryState.db.prepare("DELETE FROM events WHERE kind=?").run(claim);
+              const malformed = "main_input_interpretation:{";
+              recoveryState.event(malformed);
+              assert.throws(() => currentIntake(recoveryState, agentId, true), /JSON/i);
+              recoveryState.db.prepare("DELETE FROM events WHERE kind=?").run(malformed);
+              assert.equal(currentIntake(recoveryState, agentId, true).id, beforeWork);
+              const confirmationBaseline = workflowStatus(recoveryState, repo, agentId, vaultRoot);
+              const unrelatedConfirmationEvent = `OPERATOR_CONFIRMED_EXISTING_WORK:${agentId}:unbound-native-message:fixture`;
+              const matchingConfirmationEvent = `OPERATOR_CONFIRMED_EXISTING_WORK:${agentId}:${wake.nativeId}:fixture`;
+              recoveryState.event(unrelatedConfirmationEvent);
+              assert.deepEqual(
+                { ...workflowStatus(recoveryState, repo, agentId, vaultRoot), at: 0 },
+                { ...confirmationBaseline, at: 0 },
+                "an unrelated confirmation target does not block the normal status",
+              );
+              recoveryState.event(matchingConfirmationEvent);
+              assert.throws(
+                () => workflowStatus(recoveryState, repo, agentId, vaultRoot),
+                /INTAKE_INTERNAL_ORIGIN_CONFLICT/,
+                "confirmed work on a proven native origin must remain a collision",
+              );
+              recoveryState.db
+                .prepare("DELETE FROM events WHERE kind IN (?,?)")
+                .run(matchingConfirmationEvent, unrelatedConfirmationEvent);
+              assert.deepEqual(
+                { ...workflowStatus(recoveryState, repo, agentId, vaultRoot), at: 0 },
+                { ...confirmationBaseline, at: 0 },
+                "removing only the fixture confirmations restores the same normal status",
               );
             } finally {
               recoveryState.close();

@@ -32,6 +32,13 @@ interface InternalMessageOrigin {
   kind: InternalMessageKind;
   provenance?: "operator";
 }
+interface InternalOriginAudit {
+  identityRows: readonly { kind: string }[];
+  identityKinds: ReadonlySet<string>;
+  claims: readonly { kind: string }[];
+  confirmationTargets: ReadonlySet<string>;
+  confirmedPrefixes: ReadonlySet<string>;
+}
 const operatorOriginPrefix = "OPERATOR_INTERNAL_ORIGIN:";
 export async function assertOperatorMainIdle(
   handle: PaseoAgentHandle,
@@ -77,6 +84,14 @@ export function intakeIdentities(
   const rows = store.db
     .prepare("SELECT kind FROM events WHERE kind LIKE 'INTAKE_MESSAGE_IDENTITY:%' ORDER BY rowid")
     .all() as { kind: string }[];
+  return intakeIdentitiesFromRows(rows, agentId, sessionId);
+}
+
+function intakeIdentitiesFromRows(
+  rows: readonly { kind: string }[],
+  agentId: string,
+  sessionId: string,
+): IntakeIdentity[] {
   const latest = new Map<string, IntakeIdentity>();
   for (const row of rows) {
     const identity = JSON.parse(row.kind.slice(prefix.length)) as IntakeIdentity;
@@ -198,7 +213,11 @@ export function needsCompleteInternalHistory(
   );
 }
 
-function assertInternalOrigin(store: Store, origin: InternalMessageOrigin): void {
+function assertInternalOrigin(
+  store: Store,
+  origin: InternalMessageOrigin,
+  audit?: InternalOriginAudit,
+): void {
   const { identity } = origin;
   if (
     !internalReceiptKinds.has(origin.kind) ||
@@ -218,16 +237,19 @@ function assertInternalOrigin(store: Store, origin: InternalMessageOrigin): void
     | undefined;
   if (original?.kind !== origin.kind || (native && native.kind !== origin.kind))
     throw Error("INTAKE_INTERNAL_ORIGIN_CONFLICT");
-  if (
-    !store.db
-      .prepare("SELECT 1 FROM events WHERE kind=?")
-      .get(`${prefix}${JSON.stringify(identity)}`)
-  )
-    throw Error("INTAKE_INTERNAL_ORIGIN_UNPROVEN");
-  assertNoHumanOriginClaim(store, origin);
+  const membership = `${prefix}${JSON.stringify(identity)}`;
+  let proven: boolean;
+  if (audit) proven = audit.identityKinds.has(membership);
+  else proven = !!store.db.prepare("SELECT 1 FROM events WHERE kind=?").get(membership);
+  if (!proven) throw Error("INTAKE_INTERNAL_ORIGIN_UNPROVEN");
+  assertNoHumanOriginClaim(store, origin, audit);
 }
 
-function assertNoHumanOriginClaim(store: Store, origin: InternalMessageOrigin): void {
+function assertNoHumanOriginClaim(
+  store: Store,
+  origin: InternalMessageOrigin,
+  audit?: InternalOriginAudit,
+): void {
   const { identity } = origin;
   const rows = store.db
     .prepare(
@@ -249,11 +271,13 @@ function assertNoHumanOriginClaim(store: Store, origin: InternalMessageOrigin): 
     )
       throw Error("INTAKE_INTERNAL_ORIGIN_CONFLICT");
   }
-  const claims = store.db
-    .prepare(
-      "SELECT kind FROM events WHERE kind LIKE 'MAIN_INPUT_INTERPRETATION:%' OR kind LIKE 'OPERATOR_INTAKE_APPROVED:%'",
-    )
-    .all() as { kind: string }[];
+  const claims =
+    audit?.claims ??
+    (store.db
+      .prepare(
+        "SELECT kind FROM events WHERE kind LIKE 'MAIN_INPUT_INTERPRETATION:%' OR kind LIKE 'OPERATOR_INTAKE_APPROVED:%'",
+      )
+      .all() as { kind: string }[]);
   for (const { kind } of claims) {
     const claim = JSON.parse(kind.slice(kind.indexOf(":") + 1));
     if (
@@ -265,33 +289,93 @@ function assertNoHumanOriginClaim(store: Store, origin: InternalMessageOrigin): 
   }
   for (const messageId of [identity.messageId, identity.nativeMessageId!]) {
     const confirmed = `OPERATOR_CONFIRMED_EXISTING_WORK:${identity.agentId}:${messageId}:`;
-    if (
-      store.db
+    let conflict: boolean;
+    if (audit) {
+      if (!audit.confirmationTargets.has(confirmed)) throw Error("INTAKE_INTERNAL_ORIGIN_UNPROVEN");
+      conflict = audit.confirmedPrefixes.has(confirmed);
+    } else
+      conflict = !!store.db
         .prepare("SELECT 1 FROM events WHERE substr(kind,1,?)=?")
-        .get(confirmed.length, confirmed)
-    )
-      throw Error("INTAKE_INTERNAL_ORIGIN_CONFLICT");
+        .get(confirmed.length, confirmed);
+    if (conflict) throw Error("INTAKE_INTERNAL_ORIGIN_CONFLICT");
   }
+}
+
+// Only one synchronous origin evaluation owns this evidence. Public validation
+// entrypoints never accept it; later transaction/CAS evaluations read afresh.
+function readInternalOriginAudit(
+  store: Store,
+  agentId: string,
+  identities: readonly Pick<IntakeIdentity, "messageId" | "nativeMessageId">[],
+): InternalOriginAudit {
+  const identityRows = store.db
+    .prepare("SELECT kind FROM events WHERE kind LIKE 'INTAKE_MESSAGE_IDENTITY:%' ORDER BY rowid")
+    .all() as { kind: string }[];
+  const claims = store.db
+    .prepare(
+      "SELECT kind FROM events WHERE kind LIKE 'MAIN_INPUT_INTERPRETATION:%' OR kind LIKE 'OPERATOR_INTAKE_APPROVED:%'",
+    )
+    .all() as { kind: string }[];
+  const confirmationPrefix = "OPERATOR_CONFIRMED_EXISTING_WORK:";
+  const targets = new Set<string>();
+  for (const identity of identities)
+    for (const messageId of [identity.messageId, identity.nativeMessageId])
+      targets.add(`${confirmationPrefix}${agentId}:${messageId}:`);
+  // Keep the original SQLite substr/BINARY predicate, including its bound
+  // JS string length. The fixed ASCII prefix only narrows candidate event rows.
+  const confirmed = store.db
+    .prepare(
+      `SELECT DISTINCT json_extract(candidate.value,'$.prefix') AS prefix
+      FROM events CROSS JOIN json_each(?) AS candidate
+      WHERE substr(events.kind,1,?)=?
+        AND substr(events.kind,1,json_extract(candidate.value,'$.length'))=json_extract(candidate.value,'$.prefix')`,
+    )
+    .all(
+      JSON.stringify([...targets].map((value) => ({ prefix: value, length: value.length }))),
+      confirmationPrefix.length,
+      confirmationPrefix,
+    ) as { prefix: string }[];
+  return {
+    identityRows,
+    identityKinds: new Set(identityRows.map((row) => row.kind)),
+    claims,
+    confirmationTargets: targets,
+    confirmedPrefixes: new Set(confirmed.map((row) => row.prefix)),
+  };
 }
 
 export function provenInternalMessages(store: Store, agentId: string): InternalMessageOrigin[] {
   const rows = store.db
     .prepare("SELECT kind FROM events WHERE substr(kind,1,?)=?")
     .all(internalOriginPrefix.length, internalOriginPrefix) as { kind: string }[];
-  const native = rows.flatMap(({ kind }) => {
+  const origins = rows.flatMap(({ kind }) => {
     const origin = JSON.parse(kind.slice(internalOriginPrefix.length)) as InternalMessageOrigin;
     if (origin.identity.agentId !== agentId) return [];
-    assertInternalOrigin(store, origin);
     return [origin];
   });
   const operator = store.db
     .prepare("SELECT kind FROM events WHERE substr(kind,1,?)=?")
     .all(operatorOriginPrefix.length, operatorOriginPrefix) as { kind: string }[];
+  const bindings: OperatorWakeBinding[] = [];
   for (const row of operator) {
     const { binding } = JSON.parse(row.kind.slice(operatorOriginPrefix.length));
     if (binding.mainAgentId !== agentId) continue;
-    native.push(validateOperatorWakeOrigin(store, operatorWakeBindingSchema.parse(binding)));
+    bindings.push(operatorWakeBindingSchema.parse(binding));
   }
+  if (!origins.length && !bindings.length) return [];
+  const audit = readInternalOriginAudit(store, agentId, [
+    ...origins.map((origin) => origin.identity),
+    ...bindings.map((binding) => ({
+      messageId: binding.receiptId,
+      nativeMessageId: binding.nativeMessageId,
+    })),
+  ]);
+  const native: InternalMessageOrigin[] = [];
+  for (const origin of origins) {
+    assertInternalOrigin(store, origin, audit);
+    native.push(origin);
+  }
+  for (const binding of bindings) native.push(operatorWakeOrigin(store, binding, audit));
   const aliases = new Map<string, InternalMessageOrigin>();
   for (const origin of native) {
     const key = hash([origin.identity.sessionId, origin.identity.nativeMessageId]);
@@ -312,9 +396,18 @@ export function validateOperatorWakeOrigin(
   store: Store,
   binding: OperatorWakeBinding,
 ): InternalMessageOrigin {
-  const identity = intakeIdentities(store, binding.mainAgentId, binding.sessionId).find(
-    (item) => item.messageId === binding.receiptId,
-  );
+  return operatorWakeOrigin(store, binding);
+}
+
+function operatorWakeOrigin(
+  store: Store,
+  binding: OperatorWakeBinding,
+  audit?: InternalOriginAudit,
+): InternalMessageOrigin {
+  const identities = audit
+    ? intakeIdentitiesFromRows(audit.identityRows, binding.mainAgentId, binding.sessionId)
+    : intakeIdentities(store, binding.mainAgentId, binding.sessionId);
+  const identity = identities.find((item) => item.messageId === binding.receiptId);
   const row = store.db
     .prepare("SELECT * FROM assessments WHERE id=? AND kind='intake'")
     .get(binding.assessmentId);
@@ -352,7 +445,7 @@ export function validateOperatorWakeOrigin(
     .get(binding.mainAgentId, binding.nativeMessageId);
   if (nativeReceipt && nativeReceipt.kind !== "wake")
     throw Error("INTAKE_INTERNAL_ORIGIN_CONFLICT");
-  assertNoHumanOriginClaim(store, origin);
+  assertNoHumanOriginClaim(store, origin, audit);
   return origin;
 }
 
