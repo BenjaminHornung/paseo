@@ -31,6 +31,7 @@ import { appRoot } from "./settings-files.ts";
 import { z } from "zod";
 import { isClaudeProvider } from "../paseo-plugin/shared/providers.ts";
 import type { ContinuationResult } from "../paseo-plugin/shared/continuation.ts";
+import type { TerminalRepairRequest } from "./terminal-repair.ts";
 import {
   verificationRecoveryRequestSchema,
   verificationRecovery,
@@ -353,6 +354,7 @@ export class Engine {
     this.assertTerminalRepairRoute(contract, route);
     this.git.validate(contract);
     await this.provider.authorize(route, contract.worktree);
+    const assertReviewer = await this.terminalRepairReviewerGuard(contract, grant);
     const snapshot = await this.provider.refresh(grant.agentId);
     if (
       !snapshot ||
@@ -368,6 +370,7 @@ export class Engine {
       throw Error("TERMINAL_REPAIR_SESSION_CHANGED");
     this.validateSnapshot(contract, route, snapshot);
     const successor = this.store.claimTerminalRepair(grant, findings, () => {
+      assertReviewer();
       assertTaskAssessment(this.store, this.config, contract);
       if (
         this.config.orchestrationVersion === 3 &&
@@ -400,9 +403,68 @@ export class Engine {
     )
       throw Error("TERMINAL_REPAIR_ROUTE_CHANGED");
   }
+  async terminalRepairReviewerGuard(
+    contract: Contract,
+    request: TerminalRepairRequest,
+  ): Promise<() => void> {
+    const rejected = this.store.terminalRepairRejectedReview(request);
+    if (!rejected) return () => {};
+    const binding = request.rejectedReview!;
+    const reviewerContract = this.reviewerContract(contract, request.agentId, request.diffHash);
+    const route: RuntimeRoute = JSON.parse(rejected.row.route_json);
+    this.assertTerminalRepairRoute(reviewerContract, route);
+    await this.provider.authorize(route, contract.worktree);
+    const reviewer = await this.observed(await this.provider.refresh(binding.reviewerAgentId));
+    if (
+      !reviewer ||
+      reviewer.id !== binding.reviewerAgentId ||
+      reviewer.nativeSessionId !== binding.reviewerNativeSessionId ||
+      reviewer.status !== "idle" ||
+      reviewer.turnComplete !== true ||
+      (await this.completion.assess(reviewer)).state !== "VERIFY"
+    )
+      throw Error("TERMINAL_REPAIR_REVIEWER_NOT_SETTLED");
+    this.validateSnapshot(reviewerContract, route, reviewer);
+    return () => {
+      this.assertTerminalRepairReviewerCurrent(reviewerContract, route, binding);
+      if (
+        this.provider.nativeSessionId?.(binding.reviewerAgentId) !==
+          binding.reviewerNativeSessionId ||
+        hash(this.store.terminalRepairRejectedReview(request)?.row) !== hash(rejected.row)
+      )
+        throw Error("TERMINAL_REPAIR_REVIEW_CHANGED");
+    };
+  }
+  private assertTerminalRepairReviewerCurrent(
+    contract: Contract,
+    route: RuntimeRoute,
+    binding: NonNullable<TerminalRepairRequest["rejectedReview"]>,
+  ): void {
+    const current = this.provider.loadedAgent?.(binding.reviewerAgentId);
+    if (
+      !current ||
+      current.id !== binding.reviewerAgentId ||
+      current.status !== "idle" ||
+      current.activeTurn ||
+      !Array.isArray(current.pendingPermissions) ||
+      current.pendingPermissions.length ||
+      current.runtimeInfo?.sessionId !== binding.reviewerNativeSessionId
+    )
+      throw Error("TERMINAL_REPAIR_REVIEW_CHANGED");
+    this.validateSnapshot(contract, route, {
+      id: current.id,
+      cwd: current.cwd,
+      workspaceId: current.workspaceId ?? undefined,
+      provider: current.provider,
+      model: current.model ?? "",
+      reasoning: current.runtimeInfo?.thinkingOptionId ?? current.effectiveThinkingOptionId ?? null,
+      modeId: current.runtimeInfo?.modeId ?? current.currentModeId ?? null,
+    });
+  }
   private assertTerminalRepairDelivery(attempt: Attempt, snapshot: Snapshot): void {
     const grant = this.store.terminalRepairForAttempt(attempt.id);
     if (!grant) return;
+    this.store.assertTerminalRepairReviewDelivery(grant);
     const contract = this.contract(attempt.task_key);
     if (
       snapshot.nativeSessionId !== grant.nativeSessionId ||
@@ -1144,7 +1206,11 @@ export class Engine {
     }
     return this.store.attempt(id);
   }
-  validateSnapshot(c: Contract, route: RuntimeRoute, s: Snapshot): void {
+  validateSnapshot(
+    c: Contract,
+    route: RuntimeRoute,
+    s: Pick<Snapshot, "id" | "cwd" | "workspaceId" | "provider" | "model" | "reasoning" | "modeId">,
+  ): void {
     if (
       canonicalPath(s.cwd) !== (c.workspace?.directory ?? c.worktree) ||
       (c.workspace && s.workspaceId !== c.workspace.id) ||

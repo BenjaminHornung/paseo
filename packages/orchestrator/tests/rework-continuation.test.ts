@@ -761,17 +761,21 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
           race = false,
           changedSession = false;
         let observedSession = nativeSessionId;
-        const sdkAgent = () => ({
-          id: "writer-old",
+        let reviewerSession = "native-rejected-reviewer";
+        let reviewerStatus: "idle" | "error" = "idle";
+        let reviewerErrorDuringForeground = false;
+        let duringReviewerForeground = false;
+        const sdkAgent = (id = "writer-old") => ({
+          id,
           cwd: worktree,
           provider: "codex",
-          model: writerRoute.model,
-          status: "idle",
+          model: id === "rejected-reviewer" ? reviewerRoute.model : writerRoute.model,
+          status: id === "rejected-reviewer" ? reviewerStatus : "idle",
           activeTurn: null,
           pendingPermissions: [],
           runtimeInfo: {
             provider: "codex",
-            sessionId: observedSession,
+            sessionId: id === "rejected-reviewer" ? reviewerSession : observedSession,
             thinkingOptionId: "high",
             modeId: null,
           },
@@ -780,13 +784,19 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
         // refresh/wait/timeline updates and all identity getters are the real SDK.
         const api = createPaseoApi({
           getLastServerInfoMessage: () => ({ serverId: "fixture-server" }),
-          fetchAgent: async () => ({ agent: sdkAgent() }),
-          waitForFinish: async () => ({ status: "idle", final: sdkAgent() }),
-          fetchAgentTimeline: async () => {
+          fetchAgent: async ({ agentId }: { agentId: string }) => ({ agent: sdkAgent(agentId) }),
+          waitForFinish: async (id: string) => ({ status: "idle", final: sdkAgent(id) }),
+          fetchAgentTimeline: async (id: string) => {
             await Promise.resolve();
-            if (changedSession) observedSession = "different-native-session";
+            if (changedSession && id === "writer-old") observedSession = "different-native-session";
+            if (
+              id === "rejected-reviewer" &&
+              duringReviewerForeground &&
+              reviewerErrorDuringForeground
+            )
+              reviewerStatus = "error";
             return {
-              agent: sdkAgent(),
+              agent: sdkAgent(id),
               entries: [],
               error: null,
               gap: false,
@@ -794,12 +804,12 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
               hasNewer: false,
             };
           },
-          refreshAgentBackgroundWork: async () => ({
-            agentId: "writer-old",
-            providerSessionId: observedSession,
+          refreshAgentBackgroundWork: async (id: string) => ({
+            agentId: id,
+            providerSessionId: sdkAgent(id).runtimeInfo.sessionId,
             observationId: "fresh-public-sdk",
             coverage: "codex_background_terminals",
-            queriedProviderSessionIds: [observedSession],
+            queriedProviderSessionIds: [sdkAgent(id).runtimeInfo.sessionId],
             items: [],
             providerSubagents: [],
           }),
@@ -886,6 +896,222 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
           checks: contract.checks,
         };
         const noExtensionFile = path.join(root, "terminal-repair-existing-scope.sqlite");
+        const rejectedFile = path.join(root, "terminal-repair-rejected-review.sqlite");
+        await state.backupTo(rejectedFile);
+        const rejected = new Store(rejectedFile);
+        try {
+          const rejectedResult = {
+            diffHash: originalDiff.diffHash,
+            pass: false,
+            unresolvedIssues: 1,
+            findings: [reviewerFinding],
+          };
+          const resultJson = JSON.stringify(rejectedResult);
+          const greenJson = JSON.stringify({
+            ...reviewCheckpoint,
+            diffHash: originalDiff.diffHash,
+          });
+          rejected.db
+            .prepare("UPDATE turn_checks SET result_json=? WHERE attempt_id=?")
+            .run(greenJson, oldId);
+          rejected.db.prepare("UPDATE reviews SET evidence_json=? WHERE attempt_id=?").run(
+            JSON.stringify({
+              stage: "independent-review",
+              reviewResult: rejectedResult,
+              controllerFindings: rejectedResult.findings,
+            }),
+            oldId,
+          );
+          rejected.db
+            .prepare("INSERT INTO review_runs VALUES(?,?,?,?,?,?,?)")
+            .run(
+              oldId,
+              `${oldId}/review`,
+              JSON.stringify(reviewerRoute),
+              "rejected-reviewer",
+              "DONE",
+              originalDiff.diffHash,
+              resultJson,
+            );
+          const { additionalAllowedPath: _additionalPath, ...baseRequest } = request;
+          const rejectedRequest = {
+            ...baseRequest,
+            checkEvidenceSha256: createHash("sha256").update(greenJson).digest("hex"),
+            rejectedReview: {
+              requestKey: `${oldId}/review`,
+              reviewerAgentId: "rejected-reviewer",
+              reviewerNativeSessionId: "native-rejected-reviewer",
+              resultSha256: createHash("sha256").update(resultJson).digest("hex"),
+            },
+          };
+          const passingJson = JSON.stringify({
+            ...rejectedResult,
+            pass: true,
+            unresolvedIssues: 0,
+          });
+          rejected.db
+            .prepare("UPDATE review_runs SET result_json=? WHERE attempt_id=?")
+            .run(passingJson, oldId);
+          assert.throws(
+            () =>
+              rejected.approveTerminalRepair(
+                taskKey,
+                {
+                  ...rejectedRequest,
+                  rejectedReview: {
+                    ...rejectedRequest.rejectedReview,
+                    resultSha256: createHash("sha256").update(passingJson).digest("hex"),
+                  },
+                },
+                "A PASS cannot authorize repair",
+              ),
+            /TERMINAL_REPAIR_REJECTED_REVIEW_REQUIRED/,
+          );
+          assert.equal(rejected.terminalRepairGrant(taskKey), undefined);
+          rejected.db
+            .prepare("UPDATE review_runs SET result_json=? WHERE attempt_id=?")
+            .run(resultJson, oldId);
+          rejected.approveTerminalRepair(
+            taskKey,
+            rejectedRequest,
+            "Authorized rejected review repair",
+          );
+          let reviewerDrift = false;
+          const rejectedEngine = new Engine(rejected, repairConfig, {
+            ...repairProvider,
+            nativeSessionId: (id) => sdkProvider.nativeSessionId(id),
+            loadedAgent: (id) => sdkProvider.loadedAgent(id),
+            refresh: async (id) => {
+              if (id === "writer-old" && reviewerDrift) {
+                reviewerSession = "changed-reviewer-native-session";
+                await sdkProvider.refresh("rejected-reviewer");
+              }
+              return sdkProvider.refresh(id);
+            },
+            foregroundEvidence: async (id) => {
+              duringReviewerForeground = id === "rejected-reviewer";
+              try {
+                return await sdkProvider.foregroundEvidence(id);
+              } finally {
+                duringReviewerForeground = false;
+              }
+            },
+            run: async (id, prompt) => {
+              assert.equal(id, "writer-old");
+              assert.match(prompt, /Finish the reported behavior/);
+              sent++;
+              return {
+                ...snapshot,
+                status: "running",
+                foregroundActive: true,
+                turnComplete: false,
+              };
+            },
+          });
+          const oldReview = rejected.db
+            .prepare("SELECT * FROM review_runs WHERE attempt_id=?")
+            .get(oldId);
+          const oldFinalization = rejected.db
+            .prepare("SELECT * FROM reviews WHERE attempt_id=?")
+            .get(oldId);
+          const oldChecks = rejected.db
+            .prepare("SELECT * FROM turn_checks WHERE attempt_id=?")
+            .get(oldId);
+          const rejectedRepair = { diffHash: originalDiff.diffHash, findings: [reviewerFinding] };
+          reviewerErrorDuringForeground = true;
+          await assert.rejects(
+            () => rejectedEngine.continueExisting(taskKey, rejectedRepair),
+            /TERMINAL_REPAIR_REVIEW_CHANGED/,
+          );
+          assert.equal(rejected.latest(taskKey)!.id, oldId);
+          assert.equal(rejected.db.prepare("SELECT 1 FROM outbox").get(), undefined);
+          assert.equal(
+            rejected.db
+              .prepare("SELECT 1 FROM events WHERE kind LIKE 'TERMINAL_REPAIR_CONSUMED:%'")
+              .get(),
+            undefined,
+          );
+          reviewerErrorDuringForeground = false;
+          reviewerStatus = "idle";
+          reviewerDrift = true;
+          await assert.rejects(
+            () => rejectedEngine.continueExisting(taskKey, rejectedRepair),
+            /TERMINAL_REPAIR_REVIEW_CHANGED/,
+          );
+          assert.equal(rejected.latest(taskKey)!.id, oldId);
+          assert.equal(rejected.db.prepare("SELECT 1 FROM outbox").get(), undefined);
+          reviewerDrift = false;
+          reviewerSession = rejectedRequest.rejectedReview.reviewerNativeSessionId;
+          await assert.rejects(
+            () =>
+              rejectedEngine.continueExisting(taskKey, {
+                ...rejectedRepair,
+                findings: [{ ...reviewerFinding, problem: "Unbound replacement" }],
+              }),
+            /TERMINAL_REPAIR_FINDINGS_CHANGED/,
+          );
+          assert.equal(rejected.latest(taskKey)!.id, oldId);
+          assert.equal(
+            rejected.db
+              .prepare("SELECT 1 FROM events WHERE kind LIKE 'TERMINAL_REPAIR_CONSUMED:%'")
+              .get(),
+            undefined,
+          );
+          const pending = await rejectedEngine.continueExisting(taskKey, rejectedRepair);
+          assert.deepEqual(pending, {
+            agentId: "writer-old",
+            continued: false,
+            delivery: "pending",
+            attemptId: `${taskKey}/4`,
+          });
+          assert.equal(sent, 0);
+          assert.equal(rejected.latest(taskKey)!.fence, 4);
+          assert.equal(rejected.latest(taskKey)!.agent_id, "writer-old");
+          await assert.rejects(() => rejectedEngine.continueExisting(taskKey, rejectedRepair));
+          rejected.db
+            .prepare("UPDATE review_runs SET result_json=? WHERE attempt_id=?")
+            .run(JSON.stringify({ ...rejectedResult, pass: true, unresolvedIssues: 0 }), oldId);
+          await assert.rejects(
+            () => rejectedEngine.deliver(`${taskKey}/4`),
+            /TERMINAL_REPAIR_REVIEW_CHANGED/,
+          );
+          assert.equal(sent, 0);
+          assert.equal(
+            rejected.db.prepare("SELECT state FROM outbox WHERE attempt_id=?").get(`${taskKey}/4`)!
+              .state,
+            "PENDING",
+          );
+          rejected.db
+            .prepare("UPDATE review_runs SET result_json=? WHERE attempt_id=?")
+            .run(resultJson, oldId);
+          await rejectedEngine.tick();
+          assert.equal(sent, 1);
+          assert.equal(rejected.latest(taskKey)!.run_accepted, 1);
+          assert.equal(rejected.latest(taskKey)!.status, "RUNNING");
+          assert.equal(
+            rejected.db.prepare("SELECT count(*) AS n FROM events WHERE kind='SEND_BEGIN'").get()!
+              .n,
+            1,
+          );
+          assert.equal(rejected.db.prepare("SELECT count(*) AS n FROM attempts").get()!.n, 2);
+          assert.equal(rejected.task(taskKey)!.rework, 3);
+          assert.deepEqual(rejected.attempt(oldId), originalAttempt);
+          assert.deepEqual(
+            rejected.db.prepare("SELECT * FROM turn_checks WHERE attempt_id=?").get(oldId),
+            oldChecks,
+          );
+          assert.deepEqual(
+            rejected.db.prepare("SELECT * FROM review_runs WHERE attempt_id=?").get(oldId),
+            oldReview,
+          );
+          assert.deepEqual(
+            rejected.db.prepare("SELECT * FROM reviews WHERE attempt_id=?").get(oldId),
+            oldFinalization,
+          );
+          sent = 0;
+        } finally {
+          rejected.close();
+        }
         await state.backupTo(noExtensionFile);
         const noExtension = new Store(noExtensionFile);
         const repairFile = path.join(worktreePath, "src", "in-progress.ts");

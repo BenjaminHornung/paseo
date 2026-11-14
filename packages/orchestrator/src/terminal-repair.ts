@@ -13,6 +13,14 @@ export const terminalRepairRequestSchema = z.strictObject({
   checkEvidenceSha256: digest,
   scopeRevision: digest,
   checkRevision: digest,
+  rejectedReview: z
+    .strictObject({
+      requestKey: z.string().min(1),
+      reviewerAgentId: z.string().min(1),
+      reviewerNativeSessionId: z.string().min(1),
+      resultSha256: digest,
+    })
+    .optional(),
   additionalAllowedPath: contractSchema.shape.allowedPaths.element.optional(),
   checks: contractSchema.shape.checks.optional(),
 });
@@ -21,6 +29,7 @@ export interface TerminalRepairGrant extends Omit<TerminalRepairRequest, "checks
   checks: Contract["checks"];
   taskKey: string;
   predecessorHash: string;
+  rejectedReviewRowHash?: string;
   approvedCheckRevision: string;
   approvedScopeRevision: string;
   reason: string;

@@ -148,6 +148,15 @@ Optional `checks` uses the normal build/test command arrays. The operator must r
 compilation and the original test assertions; diagnostic `--no-build` runs are not
 final checks. Existing script/worktree validation remains mandatory.
 
+A terminal independent-review rejection with green, quiescent checks additionally
+requires `rejectedReview: {requestKey, reviewerAgentId, reviewerNativeSessionId,
+resultSha256}`. The digest hashes the raw stored `review_runs.result_json` bytes.
+Only its exact completed FAIL with actionable findings and matching finalization
+is eligible. Approval and continuation freshly validate the pinned independent
+reviewer and native session. Continuation findings must equal that rejected result;
+the complete review row remains bound through delivery and is preserved unchanged.
+PASS, unfinished, changed or unrelated reviews do not authorize a repair.
+
 Approval is CLI-only, not a human intake receipt or a main tool. It freezes the exact
 terminal predecessor, old evidence and approved scope/check revisions. The usual
 `orchestrator_continue_task` then supplies exact-diff, scoped findings. After fresh

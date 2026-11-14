@@ -105,6 +105,7 @@ export interface Snapshot {
 }
 export interface Provider {
   nativeSessionId?(agentId: string): string | null;
+  loadedAgent?(agentId: string): PaseoAgent | null;
   freezeApiBudget?(requestKey: string): { limit: number; debited: number };
   readonly url?: string;
   resume?(agentId: string): Promise<void>;
@@ -153,6 +154,10 @@ export class PaseoProvider implements Provider {
     // Read the same SDK handle refreshed by refresh/wait and foreground's
     // timeline RPCs. ref(string) itself always creates an unloaded handle.
     return this.agentHandles?.get(agentId)?.runtimeInfo?.sessionId ?? null;
+  }
+  loadedAgent(agentId: string): PaseoAgent | null {
+    // Observe only the existing handle; creating ref(id) here loses its current metadata.
+    return this.agentHandles?.get(agentId)?.current() ?? null;
   }
   constructor(url: string) {
     this.url = url;

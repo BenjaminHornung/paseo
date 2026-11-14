@@ -15,6 +15,7 @@ import {
   contractSchema,
   pathInScope,
   canonicalPath,
+  reviewResultSchema,
 } from "./contracts.ts";
 import {
   terminalRepairRequestSchema,
@@ -57,6 +58,15 @@ export interface TaskRow {
   config_json: string;
   state: string;
   rework: number;
+}
+interface TerminalRepairReviewRow {
+  attempt_id: string;
+  request_key: string;
+  route_json: string;
+  agent_id: string | null;
+  state: string;
+  diff_hash: string;
+  result_json: string | null;
 }
 export interface ContinuationReviewBinding {
   requestKey: string;
@@ -664,14 +674,14 @@ export class Store {
       route.access !== "codex-pro200"
     )
       throw Error("TERMINAL_REPAIR_NOT_ELIGIBLE");
-    const { checks, review } = this.terminalRepairCheckEvidence(attempt, request);
+    const { checks, review, rejectedReview } = this.terminalRepairCheckEvidence(attempt, request);
     if (
       this.scopeRevision(contract) !== request.scopeRevision ||
       this.checkRevision(contract) !== request.checkRevision
     )
       throw Error("TERMINAL_REPAIR_REVISION_CHANGED");
-    this.assertTerminalRepairAvailable(contract, attempt);
-    return { task, attempt, contract, checks, review };
+    this.assertTerminalRepairAvailable(contract, attempt, rejectedReview?.row);
+    return { task, attempt, contract, checks, review, rejectedReview };
   }
   private assertTerminalRepairNativeBinding(
     attempt: Attempt,
@@ -684,24 +694,19 @@ export class Store {
     )
       throw Error("TERMINAL_REPAIR_SESSION_CHANGED");
   }
-  private terminalRepairCheckEvidence(attempt: Attempt, request: TerminalRepairRequest) {
+  private terminalRepairChecks(attempt: Attempt, request: TerminalRepairRequest) {
     const checks = this.db.prepare("SELECT * FROM turn_checks WHERE attempt_id=?").get(attempt.id);
-    const review = this.db.prepare("SELECT * FROM reviews WHERE attempt_id=?").get(attempt.id);
     if (
       !checks ||
-      !review ||
       checks.diff_hash !== request.diffHash ||
       createHash("sha256").update(String(checks.result_json)).digest("hex") !==
         request.checkEvidenceSha256
     )
       throw Error("TERMINAL_REPAIR_CHECK_EVIDENCE_CHANGED");
     const result = JSON.parse(String(checks.result_json));
-    const evidence = JSON.parse(String(review.evidence_json));
     if (
-      evidence.phase !== "pre-review" ||
       !Number.isInteger(result.build.exit) ||
       !Number.isInteger(result.test.exit) ||
-      (!result.build.exit && !result.test.exit) ||
       result.build.quiescent !== true ||
       result.test.quiescent !== true ||
       result.changed !== false ||
@@ -711,20 +716,89 @@ export class Store {
       attempt.result_hash !== request.diffHash
     )
       throw Error("TERMINAL_REPAIR_CHECK_FAILURE_REQUIRED");
+    return { checks, result };
+  }
+  private terminalRepairCheckEvidence(attempt: Attempt, request: TerminalRepairRequest) {
+    const { checks, result } = this.terminalRepairChecks(attempt, request);
+    const review = this.db.prepare("SELECT * FROM reviews WHERE attempt_id=?").get(attempt.id);
+    if (!review) throw Error("TERMINAL_REPAIR_CHECK_EVIDENCE_CHANGED");
+    const evidence = JSON.parse(String(review.evidence_json));
+    if (evidence.stage === "independent-review") {
+      const rejectedReview = this.terminalRepairRejectedReview(request);
+      if (!rejectedReview) throw Error("TERMINAL_REPAIR_REJECTED_REVIEW_REQUIRED");
+      if (
+        result.build.exit !== 0 ||
+        result.test.exit !== 0 ||
+        review.diff_hash !== request.diffHash ||
+        hash(evidence.reviewResult) !== hash(rejectedReview.result) ||
+        hash(evidence.controllerFindings) !== hash(rejectedReview.result.findings)
+      )
+        throw Error("TERMINAL_REPAIR_REVIEW_CHANGED");
+      return { checks, review, rejectedReview };
+    }
+    if (
+      evidence.phase !== "pre-review" ||
+      (!result.build.exit && !result.test.exit) ||
+      request.rejectedReview
+    )
+      throw Error("TERMINAL_REPAIR_CHECK_FAILURE_REQUIRED");
     return { checks, review };
   }
-  private assertTerminalRepairAvailable(contract: Contract, attempt: Attempt): void {
+  terminalRepairRejectedReview(request: TerminalRepairRequest) {
+    const binding = request.rejectedReview;
+    if (!binding) return;
+    const row = this.db
+      .prepare("SELECT * FROM review_runs WHERE attempt_id=?")
+      .get(request.predecessorAttemptId) as unknown as TerminalRepairReviewRow | undefined;
+    if (
+      !row ||
+      row.state !== "DONE" ||
+      row.request_key !== binding.requestKey ||
+      row.agent_id !== binding.reviewerAgentId ||
+      row.agent_id === request.agentId ||
+      row.diff_hash !== request.diffHash ||
+      !row.result_json ||
+      createHash("sha256").update(row.result_json).digest("hex") !== binding.resultSha256
+    )
+      throw Error("TERMINAL_REPAIR_REVIEW_CHANGED");
+    const result = reviewResultSchema.parse(JSON.parse(row.result_json));
+    if (
+      result.pass !== false ||
+      result.unresolvedIssues <= 0 ||
+      !result.findings?.length ||
+      result.diffHash !== request.diffHash
+    )
+      throw Error("TERMINAL_REPAIR_REJECTED_REVIEW_REQUIRED");
+    return { row, result };
+  }
+  assertTerminalRepairReviewDelivery(grant: TerminalRepairGrant): void {
+    const rejected = this.terminalRepairRejectedReview(grant);
+    if (rejected && hash(rejected.row) !== grant.rejectedReviewRowHash)
+      throw Error("TERMINAL_REPAIR_REVIEW_CHANGED");
+  }
+  private assertTerminalRepairAvailable(
+    contract: Contract,
+    attempt: Attempt,
+    rejectedReview?: TerminalRepairReviewRow,
+  ): void {
+    const review = this.db.prepare("SELECT * FROM review_runs WHERE attempt_id=?").get(attempt.id);
     if (
       this.db.prepare("SELECT 1 FROM check_locks WHERE worktree=?").get(contract.worktree) ||
-      this.db.prepare("SELECT 1 FROM review_runs WHERE attempt_id=?").get(attempt.id) ||
+      (review && (!rejectedReview || hash(review) !== hash(rejectedReview))) ||
       this.reviewInWorktree(contract) ||
       this.active().some((a) => a.task_key === attempt.task_key || a.agent_id === attempt.agent_id)
     )
       throw Error("TERMINAL_REPAIR_WORK_IN_PROGRESS");
   }
-  approveTerminalRepair(key: string, input: unknown, reason: string): string {
+  approveTerminalRepair(
+    key: string,
+    input: unknown,
+    reason: string,
+    authorize: () => void = () => {},
+  ): string {
     const request = terminalRepairRequestSchema.parse(input);
     return this.transaction(() => {
+      authorize();
       if (!reason.trim() || reason.length > 500) throw Error("TERMINAL_REPAIR_REASON_REQUIRED");
       const previous = this.terminalRepairGrant(key);
       if (previous) {
@@ -761,6 +835,9 @@ export class Store {
         taskKey: key,
         checks: binding.checks,
         predecessorHash: hash(predecessor),
+        ...(predecessor.rejectedReview
+          ? { rejectedReviewRowHash: hash(predecessor.rejectedReview.row) }
+          : {}),
         approvedCheckRevision: hash({ contractHash: hash(c), ...binding }),
         approvedScopeRevision: hash({
           contractHash: hash(c),
@@ -784,6 +861,11 @@ export class Store {
       const predecessor = this.terminalRepairPredecessor(grant.taskKey, grant);
       if (hash(predecessor) !== grant.predecessorHash)
         throw Error("TERMINAL_REPAIR_BINDING_CHANGED");
+      if (
+        predecessor.rejectedReview &&
+        hash(findings) !== hash(predecessor.rejectedReview.result.findings)
+      )
+        throw Error("TERMINAL_REPAIR_FINDINGS_CHANGED");
       const consumed = `TERMINAL_REPAIR_CONSUMED:${hash(grant)}`;
       if (this.db.prepare("SELECT 1 FROM events WHERE kind=?").get(consumed))
         throw Error("TERMINAL_REPAIR_ALREADY_CONSUMED");

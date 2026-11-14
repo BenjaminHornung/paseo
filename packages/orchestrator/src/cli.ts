@@ -39,6 +39,8 @@ async function approveTerminalRepair(
   const config = configSchema.parse(JSON.parse(task.config_json));
   assertTaskAssessment(store, config, contract);
   if (provider.url !== config.daemonUrl) throw Error("Provider differs from pinned daemon");
+  const engine = new Engine(store, config, provider);
+  const assertReviewer = await engine.terminalRepairReviewerGuard(contract, request);
   const snapshot = await provider.refresh(request.agentId);
   if (
     !snapshot ||
@@ -52,7 +54,6 @@ async function approveTerminalRepair(
     throw Error("TERMINAL_REPAIR_WORKER_NOT_SETTLED");
   if (provider.nativeSessionId(request.agentId) !== request.nativeSessionId)
     throw Error("TERMINAL_REPAIR_SESSION_CHANGED");
-  const engine = new Engine(store, config, provider);
   engine.validateSnapshot(
     contract,
     JSON.parse(store.attempt(request.predecessorAttemptId).route_json),
@@ -60,7 +61,14 @@ async function approveTerminalRepair(
   );
   if (engine.git.snapshot(contract).diffHash !== request.diffHash)
     throw Error("TERMINAL_REPAIR_DIFF_CHANGED");
-  return store.approveTerminalRepair(key, request, reason);
+  return store.approveTerminalRepair(key, request, reason, () => {
+    assertReviewer();
+    assertTaskAssessment(store, config, contract);
+    if (provider.nativeSessionId(request.agentId) !== request.nativeSessionId)
+      throw Error("TERMINAL_REPAIR_SESSION_CHANGED");
+    if (engine.git.snapshot(contract).diffHash !== request.diffHash)
+      throw Error("TERMINAL_REPAIR_DIFF_CHANGED");
+  });
 }
 
 async function recoverVerificationCommand(
