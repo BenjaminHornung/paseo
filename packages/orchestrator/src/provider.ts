@@ -906,7 +906,7 @@ function codexStartupConfigurationWarning(entry: TimelineObservation["entries"][
     return false;
   // Only the provider's one-line, out-of-turn configuration notice is exempt.
   // History/permission warnings and unknown notifications still invalidate proof.
-  return /^Under-development features enabled: [A-Za-z0-9_-]{1,80}(?:, [A-Za-z0-9_-]{1,80}){0,31}\. Under-development features are incomplete and may behave unpredictably\. To suppress this warning, set `suppress_unstable_features_warning = true` in (?:[A-Za-z]:[\\/]|\/)[^\r\n]{1,1024}\.toml$/.test(
+  return /^Under-development features enabled: [A-Za-z0-9_-]{1,80}(?:, [A-Za-z0-9_-]{1,80}){0,31}\. Under-development features are incomplete and may behave unpredictably\. To suppress this warning, set `suppress_unstable_features_warning = true` in (?:[A-Za-z]:[\\/]|\/)[^\r\n]{1,1024}\.toml\.?$/.test(
     entry.item.message,
   );
 }

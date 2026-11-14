@@ -403,13 +403,15 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
             message:
               "Under-development features enabled: fixture_feature. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in C:/fixture/config.toml",
           };
-          warning = startup;
-          reads = 0;
-          assert.deepEqual(
-            (await provider.wait("reviewer")).reviewResult,
-            failedReview,
-            "a known out-of-band startup warning must preserve the final FAIL/2",
-          );
+          for (const message of [startup.message, startup.message + "."]) {
+            warning = { ...startup, message };
+            reads = 0;
+            assert.deepEqual(
+              (await provider.wait("reviewer")).reviewResult,
+              failedReview,
+              "a known out-of-band startup warning with zero or one sentence period must preserve the final FAIL/2",
+            );
+          }
           for (const invalid of [
             {
               ...startup,
@@ -418,6 +420,7 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
             { ...startup, level: "error" },
             { ...startup, provider: "claude" },
             { ...startup, message: startup.message + "\n" },
+            { ...startup, message: startup.message + ".." },
           ]) {
             warning = invalid;
             reads = 0;
