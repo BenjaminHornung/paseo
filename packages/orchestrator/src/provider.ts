@@ -2,6 +2,7 @@ import {
   createPaseoClient,
   type PaseoAgentHandle,
   type PaseoAgent,
+  type PaseoAgentRunResult,
   type PaseoClient,
   type PaseoProviderWaitOptions,
 } from "@getpaseo/client";
@@ -807,16 +808,14 @@ export class PaseoProvider implements Provider {
     let s = await this.snapshot(h, r.final);
     if (!s) throw Error("Provider outcome unknown");
     s = turnFailure(s, r.error, r.lastMessage);
-    if (r.lastMessage) {
-      s.reviewResult = parseAgentJson(r.lastMessage, reviewResultSchema);
-      s.planResult = parseAgentJson(r.lastMessage, planResultSchema);
+    if (s.status === "error") return s;
+    const message = await this.completedTurnMessage(h, r);
+    if (message !== undefined) {
+      s.reviewResult = parseAgentJson(message, reviewResultSchema);
+      s.planResult = parseAgentJson(message, planResultSchema);
     }
-    if (r.status === "idle" && s.status !== "error" && !s.foregroundActive) s.turnComplete = true;
-    if (
-      r.status === "timeout" &&
-      s.status !== "error" &&
-      !(s.status === "running" && s.foregroundActive)
-    )
+    if (r.status === "idle" && !s.foregroundActive) s.turnComplete = true;
+    if (r.status === "timeout" && !(s.status === "running" && s.foregroundActive))
       s.status = "unknown";
     return s;
   }
@@ -826,20 +825,114 @@ export class PaseoProvider implements Provider {
     let s = await this.snapshot(h, r.final);
     if (!s) throw Error("Provider outcome unknown");
     s = turnFailure(s, r.error, r.lastMessage);
-    if (r.lastMessage) {
-      s.reviewResult = parseAgentJson(r.lastMessage, reviewResultSchema);
-      s.planResult = parseAgentJson(r.lastMessage, planResultSchema);
+    if (s.status === "error") return s;
+    const message = await this.completedTurnMessage(h, r);
+    if (message !== undefined) {
+      s.reviewResult = parseAgentJson(message, reviewResultSchema);
+      s.planResult = parseAgentJson(message, planResultSchema);
     }
-    if (r.status === "idle" && s.status !== "error" && !s.foregroundActive) s.turnComplete = true;
+    if (r.status === "idle" && !s.foregroundActive) s.turnComplete = true;
     if (
       r.status === "timeout" &&
       s.status !== "idle" &&
-      s.status !== "error" &&
       !(s.status === "running" && s.foregroundActive)
     )
       s.status = "unknown";
     return s;
   }
+  private async completedTurnMessage(
+    handle: PaseoAgentHandle,
+    result: PaseoAgentRunResult,
+  ): Promise<string | undefined> {
+    if (result.status !== "idle" || result.final?.id !== handle.id) return undefined;
+    const identity = completedTurnIdentity(result.final);
+    if (!identity || completedTurnIdentity(handle.current()) !== identity) return undefined;
+    const first = await observedTimeline(handle, "projected");
+    if (!completeMessagePage(first, handle.id, identity)) return undefined;
+    const message = completedHeadMessage(first, result.final.provider);
+    if (!message) return undefined;
+    const fresh = await observedTimeline(handle, "projected");
+    if (
+      !completeMessagePage(fresh, handle.id, identity) ||
+      first.epoch !== fresh.epoch ||
+      hash(first.window) !== hash(fresh.window) ||
+      timelineReadbackHash(first) !== timelineReadbackHash(fresh) ||
+      completedTurnIdentity(handle.current()) !== identity
+    )
+      return undefined;
+    return message.text;
+  }
+}
+function completedHeadMessage(page: TimelineObservation, provider: string) {
+  const last = page.entries.at(-1);
+  if (
+    !last?.turnId ||
+    last.provider !== provider ||
+    last.item.type !== "assistant_message" ||
+    !last.item.messageId ||
+    last.seqEnd !== page.endCursor?.seq
+  )
+    return undefined;
+  // Entries are in source-sequence order. Once the head's turn first appears,
+  // another turn (or missing turn metadata) makes that result owner ambiguous.
+  const headTurnStart = page.entries.findIndex((entry) => entry.turnId === last.turnId);
+  if (
+    page.entries.some((entry) => !entry.turnId) ||
+    page.entries.slice(headTurnStart).some((entry) => entry.turnId !== last.turnId)
+  )
+    return undefined;
+  // Projection already merges chunks within one logical message. Never join
+  // separate messages or search backwards for an older parseable verdict.
+  const message = last.item;
+  const sameMessage = page.entries.filter(
+    (entry) =>
+      entry.item.type === "assistant_message" && entry.item.messageId === message.messageId,
+  );
+  if (sameMessage.length !== 1) return undefined;
+  return message;
+}
+function completedTurnIdentity(agent: PaseoAgent | null): string | undefined {
+  if (
+    !agent ||
+    agent.status !== "idle" ||
+    agent.activeTurn ||
+    agent.pendingPermissions.length ||
+    agent.archivedAt ||
+    !agent.runtimeInfo?.sessionId
+  )
+    return undefined;
+  return hash({
+    id: agent.id,
+    provider: agent.provider,
+    nativeSessionId: agent.runtimeInfo.sessionId,
+    cwd: localPath(agent.cwd),
+    workspaceId: agent.workspaceId,
+    model: agent.model,
+    modeId: agent.runtimeInfo.modeId ?? agent.currentModeId,
+    thinkingOptionId: agent.runtimeInfo.thinkingOptionId ?? agent.effectiveThinkingOptionId,
+    requestKey: agent.labels?.requestKey,
+    lastUserMessageAt: agent.lastUserMessageAt,
+    updatedAt: agent.updatedAt,
+  });
+}
+function completeMessagePage(
+  page: TimelineObservation,
+  agentId: string,
+  identity: string,
+): boolean {
+  if (page.error || page.gap || page.reset || page.staleCursor || page.hasOlder || page.hasNewer)
+    return false;
+  return (
+    page.agentId === agentId &&
+    page.projection === "projected" &&
+    completedTurnIdentity(page.agent) === identity &&
+    !!page.startCursor &&
+    !!page.endCursor &&
+    page.startCursor.epoch === page.epoch &&
+    page.endCursor.epoch === page.epoch &&
+    page.startCursor.seq === page.window?.minSeq &&
+    page.endCursor.seq === page.window?.maxSeq
+  );
 }
 export function completedClaudeNativeTool(
   tool: unknown,

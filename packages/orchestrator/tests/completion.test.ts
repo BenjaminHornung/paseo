@@ -4,6 +4,7 @@ import { CurrentPaseoCompletion, OptionalBackgroundCapability } from "../src/com
 import { parseAgentJson, reviewResultSchema, contractSchema } from "../src/contracts.ts";
 import type { Snapshot } from "../src/provider.ts";
 import { PaseoProvider, taskPrompt } from "../src/provider.ts";
+import { createPaseoApi } from "@getpaseo/client";
 
 // Fault: an absent/failed process inventory or a completed foreground turn releases
 // a writer while work continues. Existing starter tests cannot exercise SDK capabilities.
@@ -120,7 +121,7 @@ test("optional documented SDK capability never substitutes failed reads with an 
 
 // Observed live reviewer output has a leading Markdown rule. Reject arbitrary prose
 // rather than treating an embedded, unbound JSON fragment as the review verdict.
-test("structured review accepts the observed SDK wrapper and rejects unbound or invalid verdicts", () => {
+test("structured review accepts the observed SDK wrapper and rejects unbound or invalid verdicts", async (t) => {
   const result = { diffHash: "a".repeat(64), pass: true, unresolvedIssues: 0 },
     json = JSON.stringify(result);
   for (const text of [json, "\n\n---\n\n" + json, "```json\n" + json + "\n```"])
@@ -166,6 +167,233 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
     ),
     undefined,
     "native arrays remain invalid instead of being silently normalized",
+  );
+  await t.test(
+    "public SDK recovery reads only the bound final logical message",
+    async (caseContext) => {
+      const failedReview = {
+        diffHash: "d".repeat(64),
+        pass: false,
+        unresolvedIssues: 2,
+        findings: [
+          {
+            severity: "P1",
+            file: "src/a.ts",
+            line: 3,
+            problem: "Missing validation",
+            requiredChange: "Validate the input",
+          },
+          {
+            severity: "P2",
+            file: "src/b.ts",
+            line: 7,
+            problem: "Missing result",
+            requiredChange: "Return the result",
+          },
+        ],
+      };
+      let earlier = "The review is in progress.",
+        latest = JSON.stringify(failedReview),
+        reads = 0,
+        sends = 0,
+        quota = false,
+        timelineUnavailable = false,
+        turnSequence: "single" | "two-turn" | "reappearing" = "single",
+        drift: "none" | "session" | "cursor" | "active-turn" = "none";
+      const sdkAgent = () => ({
+        id: "reviewer",
+        cwd: process.cwd(),
+        workspaceId: "fixture-workspace",
+        provider: "codex",
+        model: "gpt-6-astra",
+        status: "idle",
+        activeTurn: null,
+        pendingPermissions: [],
+        archivedAt: null,
+        lastUsage: quota ? { inputTokens: 0, outputTokens: 0 } : undefined,
+        lastUserMessageAt: "2026-11-13T20:00:00Z",
+        runtimeInfo: { provider: "codex", sessionId: "native-review", modeId: "auto-review" },
+      });
+      // Only daemon transport is synthetic: ref(), wait/run, timeline refetch and
+      // the per-handle current snapshot are the actual public SDK implementation.
+      const api = createPaseoApi({
+        getLastServerInfoMessage: () => ({ serverId: "fixture-server" }),
+        fetchAgent: async () => ({ agent: sdkAgent() }),
+        sendAgentMessage: async () => {
+          sends++;
+        },
+        waitForFinish: async () => ({
+          status: "idle",
+          final: sdkAgent(),
+          error: null,
+          lastMessage: quota ? "You've hit your session limit. Try again later." : earlier + latest,
+        }),
+        fetchAgentTimeline: async () => {
+          reads++;
+          if (timelineUnavailable) throw Error("synthetic timeline unavailable");
+          const agent = sdkAgent();
+          if (reads === 2 && drift === "session") agent.runtimeInfo.sessionId = "other-native";
+          const changedHead = reads === 2 && drift === "cursor";
+          let headSeq = 8;
+          if (changedHead) headSeq = 9;
+          if (turnSequence === "reappearing") headSeq = 10;
+          return {
+            agent:
+              reads === 2 && drift === "active-turn"
+                ? { ...agent, activeTurn: { id: "new-turn" } }
+                : agent,
+            agentId: "reviewer",
+            projection: "projected",
+            epoch: "fixture-epoch",
+            reset: false,
+            staleCursor: false,
+            error: null,
+            gap: false,
+            hasOlder: false,
+            hasNewer: false,
+            window: { minSeq: 1, maxSeq: headSeq, nextSeq: headSeq + 1 },
+            startCursor: { epoch: "fixture-epoch", seq: 1 },
+            endCursor: { epoch: "fixture-epoch", seq: headSeq },
+            entries: [
+              {
+                provider: "codex",
+                turnId: turnSequence === "single" ? "review-turn" : "old-turn",
+                timestamp: "2026-11-13T20:00:01Z",
+                seqStart: 1,
+                seqEnd: 3,
+                sourceSeqRanges: [{ startSeq: 1, endSeq: 3 }],
+                collapsed: ["assistant_merge"],
+                item: { type: "assistant_message", messageId: "commentary", text: earlier },
+              },
+              {
+                provider: "codex",
+                turnId: "review-turn",
+                timestamp: "2026-11-13T20:00:02Z",
+                seqStart: 4,
+                seqEnd: 8,
+                sourceSeqRanges: [{ startSeq: 4, endSeq: 8 }],
+                collapsed: ["assistant_merge"],
+                item: { type: "assistant_message", messageId: "final", text: latest },
+              },
+              ...(turnSequence === "reappearing"
+                ? [
+                    {
+                      provider: "codex",
+                      turnId: "old-turn",
+                      timestamp: "2026-11-13T20:00:03Z",
+                      seqStart: 9,
+                      seqEnd: 10,
+                      sourceSeqRanges: [{ startSeq: 9, endSeq: 10 }],
+                      collapsed: ["assistant_merge"],
+                      item: {
+                        type: "assistant_message",
+                        messageId: "late-old-pass",
+                        text: JSON.stringify({
+                          ...failedReview,
+                          pass: true,
+                          unresolvedIssues: 0,
+                          findings: [],
+                        }),
+                      },
+                    },
+                  ]
+                : []),
+            ],
+          };
+        },
+        refreshAgentBackgroundWork: async () => ({
+          agentId: "reviewer",
+          providerSessionId: "native-review",
+          observationId: "fresh",
+          coverage: "codex_background_terminals",
+          queriedProviderSessionIds: ["native-review"],
+          items: [],
+          providerSubagents: [],
+        }),
+      } as unknown as Parameters<typeof createPaseoApi>[0]);
+      const provider = new PaseoProvider("ws://fixture.invalid/ws");
+      Object.assign(provider, { client: { ...api, close: () => api.dispose() } });
+      caseContext.after(() => provider.close());
+      const recovered = (await provider.refresh("reviewer"))!;
+      assert.deepEqual(
+        recovered.reviewResult,
+        failedReview,
+        "commentary cannot corrupt the final FAIL and its findings",
+      );
+      assert.equal((await new CurrentPaseoCompletion(provider).assess(recovered)).state, "VERIFY");
+      reads = 0;
+      assert.deepEqual(
+        (await provider.run("reviewer", "synthetic fixture only")).reviewResult,
+        failedReview,
+      );
+      assert.equal(sends, 1);
+      turnSequence = "two-turn";
+      reads = 0;
+      assert.deepEqual(
+        (await provider.wait("reviewer")).reviewResult,
+        failedReview,
+        "an unambiguous A to B sequence preserves the final B FAIL",
+      );
+      await caseContext.test(
+        "a reappearing old head turn cannot replace the newer FAIL",
+        async () => {
+          turnSequence = "reappearing";
+          reads = 0;
+          assert.equal(
+            (await provider.wait("reviewer")).reviewResult,
+            undefined,
+            "A to B to A must not accept the delayed A PASS",
+          );
+        },
+      );
+      turnSequence = "single";
+      earlier = JSON.stringify({ ...failedReview, pass: true, unresolvedIssues: 0, findings: [] });
+      latest = "The newest response is invalid JSON.";
+      reads = 0;
+      assert.equal(
+        (await provider.wait("reviewer")).reviewResult,
+        undefined,
+        "never select older valid JSON",
+      );
+      latest = JSON.stringify(failedReview);
+      for (const change of ["session", "cursor", "active-turn"] as const) {
+        reads = 0;
+        drift = change;
+        assert.equal(
+          (await provider.wait("reviewer")).reviewResult,
+          undefined,
+          `${change} drift must block acceptance`,
+        );
+      }
+      drift = "none";
+      await caseContext.test(
+        "classified quota errors survive unavailable timeline reads",
+        async () => {
+          quota = true;
+          timelineUnavailable = true;
+          reads = 0;
+          for (const method of ["wait", "run"] as const) {
+            let operation: Promise<Snapshot>;
+            if (method === "wait") operation = provider.wait("reviewer");
+            else operation = provider.run("reviewer", "synthetic quota fixture");
+            const [outcome] = await Promise.allSettled([operation]);
+            assert.ok(
+              outcome.status === "fulfilled",
+              "the classified quota snapshot must be returned without reading timeline",
+            );
+            assert.equal(outcome.value.status, "error");
+            assert.equal(outcome.value.failureKind, "quota-5h");
+            assert.equal(outcome.value.turnComplete, false);
+            assert.equal(outcome.value.reviewResult, undefined);
+            assert.equal(
+              reads,
+              0,
+              "a classified error must not start structured-result observation",
+            );
+          }
+        },
+      );
+    },
   );
 });
 
