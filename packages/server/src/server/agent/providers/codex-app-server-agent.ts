@@ -2300,9 +2300,7 @@ async function projectCodexThreadHistory(
         // Cap each item as it is projected so a large history is never held uncapped.
         item: limitAgentTimelineItemContent(settledTimelineItem),
         timestamp: timestamp ?? undefined,
-        ...(timelineItem.type === "user_message" && row.turnId !== undefined
-          ? { providerTurnId: row.turnId }
-          : {}),
+        ...(row.turnId !== undefined ? { providerTurnId: row.turnId } : {}),
       });
       for (const childThreadId of readCodexHistoricalSubAgentThreadIds(item)) {
         subAgentTimelineIndexByThreadId.set(childThreadId, timeline.length - 1);
@@ -4891,6 +4889,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         provider: CODEX_PROVIDER,
         item: entry.item,
         timestamp: entry.timestamp,
+        turnId: entry.providerTurnId,
       };
     }
   }

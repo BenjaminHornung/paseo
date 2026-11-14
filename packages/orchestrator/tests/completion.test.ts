@@ -198,7 +198,9 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
         sends = 0,
         quota = false,
         timelineUnavailable = false,
-        turnSequence: "single" | "two-turn" | "reappearing" = "single",
+        warning: { provider: string; level: string; message: string } | undefined,
+        warningAfterTurn = false,
+        turnSequence: "single" | "two-turn" | "reappearing" | "missing" = "single",
         drift: "none" | "session" | "cursor" | "active-turn" = "none";
       const sdkAgent = () => ({
         id: "reviewer",
@@ -214,6 +216,54 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
         lastUserMessageAt: "2026-11-13T20:00:00Z",
         runtimeInfo: { provider: "codex", sessionId: "native-review", modeId: "auto-review" },
       });
+      function reviewMessageEntries() {
+        let firstTurn: string | undefined = "old-turn";
+        if (turnSequence === "single") firstTurn = "review-turn";
+        if (turnSequence === "missing") firstTurn = undefined;
+        const entries = [
+          {
+            provider: "codex",
+            turnId: firstTurn,
+            timestamp: "2026-11-13T20:00:01Z",
+            seqStart: 2,
+            seqEnd: 4,
+            sourceSeqRanges: [{ startSeq: 2, endSeq: 4 }],
+            collapsed: ["assistant_merge"],
+            item: { type: "assistant_message", messageId: "commentary", text: earlier },
+          },
+          {
+            provider: "codex",
+            turnId: "review-turn",
+            timestamp: "2026-11-13T20:00:02Z",
+            seqStart: 5,
+            seqEnd: 9,
+            sourceSeqRanges: [{ startSeq: 5, endSeq: 9 }],
+            collapsed: ["assistant_merge"],
+            item: { type: "assistant_message", messageId: "final", text: latest },
+          },
+        ];
+        if (turnSequence === "reappearing")
+          entries.push({
+            provider: "codex",
+            turnId: "old-turn",
+            timestamp: "2026-11-13T20:00:03Z",
+            seqStart: 10,
+            seqEnd: 11,
+            sourceSeqRanges: [{ startSeq: 10, endSeq: 11 }],
+            collapsed: ["assistant_merge"],
+            item: {
+              type: "assistant_message",
+              messageId: "late-old-pass",
+              text: JSON.stringify({
+                ...failedReview,
+                pass: true,
+                unresolvedIssues: 0,
+                findings: [],
+              }),
+            },
+          });
+        return entries;
+      }
       // Only daemon transport is synthetic: ref(), wait/run, timeline refetch and
       // the per-handle current snapshot are the actual public SDK implementation.
       const api = createPaseoApi({
@@ -234,9 +284,20 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
           const agent = sdkAgent();
           if (reads === 2 && drift === "session") agent.runtimeInfo.sessionId = "other-native";
           const changedHead = reads === 2 && drift === "cursor";
-          let headSeq = 8;
-          if (changedHead) headSeq = 9;
-          if (turnSequence === "reappearing") headSeq = 10;
+          let headSeq = 9;
+          if (changedHead) headSeq = 10;
+          if (turnSequence === "reappearing") headSeq = 11;
+          if (warning && warningAfterTurn) headSeq++;
+          const notice = warning
+            ? {
+                provider: warning.provider,
+                timestamp: "2026-11-13T20:00:00Z",
+                seqStart: warningAfterTurn ? headSeq : 1,
+                seqEnd: warningAfterTurn ? headSeq : 1,
+                item: { type: "notification", level: warning.level, message: warning.message },
+              }
+            : undefined;
+          const firstSeq = notice && !warningAfterTurn ? 1 : 2;
           return {
             agent:
               reads === 2 && drift === "active-turn"
@@ -251,53 +312,13 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
             gap: false,
             hasOlder: false,
             hasNewer: false,
-            window: { minSeq: 1, maxSeq: headSeq, nextSeq: headSeq + 1 },
-            startCursor: { epoch: "fixture-epoch", seq: 1 },
+            window: { minSeq: firstSeq, maxSeq: headSeq, nextSeq: headSeq + 1 },
+            startCursor: { epoch: "fixture-epoch", seq: firstSeq },
             endCursor: { epoch: "fixture-epoch", seq: headSeq },
             entries: [
-              {
-                provider: "codex",
-                turnId: turnSequence === "single" ? "review-turn" : "old-turn",
-                timestamp: "2026-11-13T20:00:01Z",
-                seqStart: 1,
-                seqEnd: 3,
-                sourceSeqRanges: [{ startSeq: 1, endSeq: 3 }],
-                collapsed: ["assistant_merge"],
-                item: { type: "assistant_message", messageId: "commentary", text: earlier },
-              },
-              {
-                provider: "codex",
-                turnId: "review-turn",
-                timestamp: "2026-11-13T20:00:02Z",
-                seqStart: 4,
-                seqEnd: 8,
-                sourceSeqRanges: [{ startSeq: 4, endSeq: 8 }],
-                collapsed: ["assistant_merge"],
-                item: { type: "assistant_message", messageId: "final", text: latest },
-              },
-              ...(turnSequence === "reappearing"
-                ? [
-                    {
-                      provider: "codex",
-                      turnId: "old-turn",
-                      timestamp: "2026-11-13T20:00:03Z",
-                      seqStart: 9,
-                      seqEnd: 10,
-                      sourceSeqRanges: [{ startSeq: 9, endSeq: 10 }],
-                      collapsed: ["assistant_merge"],
-                      item: {
-                        type: "assistant_message",
-                        messageId: "late-old-pass",
-                        text: JSON.stringify({
-                          ...failedReview,
-                          pass: true,
-                          unresolvedIssues: 0,
-                          findings: [],
-                        }),
-                      },
-                    },
-                  ]
-                : []),
+              ...(notice && !warningAfterTurn ? [notice] : []),
+              ...reviewMessageEntries(),
+              ...(notice && warningAfterTurn ? [notice] : []),
             ],
           };
         },
@@ -346,6 +367,13 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
           );
         },
       );
+      turnSequence = "missing";
+      reads = 0;
+      assert.equal(
+        (await provider.wait("reviewer")).reviewResult,
+        undefined,
+        "turn-bearing rows without metadata remain ambiguous",
+      );
       turnSequence = "single";
       earlier = JSON.stringify({ ...failedReview, pass: true, unresolvedIssues: 0, findings: [] });
       latest = "The newest response is invalid JSON.";
@@ -366,6 +394,43 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
         );
       }
       drift = "none";
+      await caseContext.test(
+        "only the exact leading unscoped Codex configuration warning is outside turns",
+        async () => {
+          const startup = {
+            provider: "codex",
+            level: "warning",
+            message:
+              "Under-development features enabled: fixture_feature. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in C:/fixture/config.toml",
+          };
+          warning = startup;
+          reads = 0;
+          assert.deepEqual(
+            (await provider.wait("reviewer")).reviewResult,
+            failedReview,
+            "a known out-of-band startup warning must preserve the final FAIL/2",
+          );
+          for (const invalid of [
+            {
+              ...startup,
+              message: "The rest of this Codex thread's history is too large to load.",
+            },
+            { ...startup, level: "error" },
+            { ...startup, provider: "claude" },
+            { ...startup, message: startup.message + "\n" },
+          ]) {
+            warning = invalid;
+            reads = 0;
+            assert.equal((await provider.wait("reviewer")).reviewResult, undefined);
+          }
+          warning = startup;
+          warningAfterTurn = true;
+          reads = 0;
+          assert.equal((await provider.wait("reviewer")).reviewResult, undefined);
+          warning = undefined;
+          warningAfterTurn = false;
+        },
+      );
       await caseContext.test(
         "classified quota errors survive unavailable timeline reads",
         async () => {
@@ -602,6 +667,71 @@ test("native Codex foreground settles only exact terminal retries and bound read
         output: {
           ...activity.detail.output,
           structuredContent: { ...activity.detail.output.structuredContent, updateCount: "2" },
+        },
+      },
+    },
+  ]) {
+    row = invalid;
+    assert.equal((await assess()).state, "NEEDS_CONFIRMATION");
+  }
+  const issue = { id: "10001", key: "FIXTURE-1", summary: "Synthetic issue" };
+  const issueText = JSON.stringify(issue);
+  const jira = {
+    type: "tool_call",
+    callId: "jira-reader",
+    name: "atlassian_x_tention.jira_get_issue",
+    status: "completed",
+    error: null,
+    detail: {
+      type: "unknown",
+      input: { issue_key: "FIXTURE-1", fields: "summary", update_history: false },
+      output: {
+        content: [{ type: "text", text: issueText }],
+        structuredContent: { result: issueText },
+        _meta: {},
+      },
+    },
+  };
+  row = jira;
+  assert.equal(
+    (await assess()).state,
+    "VERIFY",
+    "the completed read-only Jira result must bind its exact target",
+  );
+  for (const invalid of [
+    { ...jira, status: "running" },
+    { ...jira, name: "atlassian_x_tention.jira_update_issue" },
+    { ...jira, detail: { ...jira.detail, input: { ...jira.detail.input, update_history: true } } },
+    { ...jira, detail: { ...jira.detail, input: { issue_key: "FIXTURE-1" } } },
+    { ...jira, detail: { ...jira.detail, input: { ...jira.detail.input, issue_key: "OTHER-2" } } },
+    { ...jira, detail: { ...jira.detail, input: { ...jira.detail.input, execute: true } } },
+    { ...jira, detail: { ...jira.detail, output: { ...jira.detail.output, isError: true } } },
+    {
+      ...jira,
+      detail: {
+        ...jira.detail,
+        output: {
+          content: [{ type: "text", text: JSON.stringify({ ...issue, error: "Denied" }) }],
+        },
+      },
+    },
+    {
+      ...jira,
+      detail: {
+        ...jira.detail,
+        output: {
+          ...jira.detail.output,
+          structuredContent: { result: JSON.stringify({ ...issue, key: "OTHER-2" }) },
+        },
+      },
+    },
+    {
+      ...jira,
+      detail: {
+        ...jira.detail,
+        output: {
+          ...jira.detail.output,
+          content: [{ type: "text", text: "Invalid latest result" }],
         },
       },
     },

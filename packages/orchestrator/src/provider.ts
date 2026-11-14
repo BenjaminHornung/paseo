@@ -21,6 +21,7 @@ import { readFileSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { isDeepStrictEqual } from "node:util";
 import { hash, localPath, routeAllowsPath } from "./contracts.ts";
 import { DatabaseSync } from "node:sqlite";
 import lockfile from "proper-lockfile";
@@ -876,8 +877,12 @@ function completedHeadMessage(page: TimelineObservation, provider: string) {
   // Entries are in source-sequence order. Once the head's turn first appears,
   // another turn (or missing turn metadata) makes that result owner ambiguous.
   const headTurnStart = page.entries.findIndex((entry) => entry.turnId === last.turnId);
+  const firstTurnStart = page.entries.findIndex((entry) => !!entry.turnId);
   if (
-    page.entries.some((entry) => !entry.turnId) ||
+    page.entries.some(
+      (entry, index) =>
+        !entry.turnId && !(index < firstTurnStart && codexStartupConfigurationWarning(entry)),
+    ) ||
     page.entries.slice(headTurnStart).some((entry) => entry.turnId !== last.turnId)
   )
     return undefined;
@@ -890,6 +895,20 @@ function completedHeadMessage(page: TimelineObservation, provider: string) {
   );
   if (sameMessage.length !== 1) return undefined;
   return message;
+}
+function codexStartupConfigurationWarning(entry: TimelineObservation["entries"][number]): boolean {
+  if (
+    entry.provider !== "codex" ||
+    entry.turnId ||
+    entry.item.type !== "notification" ||
+    entry.item.level !== "warning"
+  )
+    return false;
+  // Only the provider's one-line, out-of-turn configuration notice is exempt.
+  // History/permission warnings and unknown notifications still invalidate proof.
+  return /^Under-development features enabled: [A-Za-z0-9_-]{1,80}(?:, [A-Za-z0-9_-]{1,80}){0,31}\. Under-development features are incomplete and may behave unpredictably\. To suppress this warning, set `suppress_unstable_features_warning = true` in (?:[A-Za-z]:[\\/]|\/)[^\r\n]{1,1024}\.toml$/.test(
+    entry.item.message,
+  );
 }
 function completedTurnIdentity(agent: PaseoAgent | null): string | undefined {
   if (
@@ -1062,6 +1081,7 @@ export function completedNonExecutingMcp(tool: unknown): boolean {
     .safeParse(tool);
   if (!parsed.success) return false;
   const { name, detail } = parsed.data;
+  if (name === "atlassian_x_tention.jira_get_issue") return completedJiraIssueRead(tool);
   if (name === "paseo.get_agent_activity") {
     const activity = z
       .object({
@@ -1106,6 +1126,49 @@ export function completedNonExecutingMcp(tool: unknown): boolean {
       Number.isInteger(detail.input.index) &&
       Number(detail.input.index) >= 0)
   );
+}
+function completedJiraIssueRead(tool: unknown): boolean {
+  const read = z
+    .object({
+      error: z.null().optional(),
+      detail: z.object({
+        input: z.strictObject({
+          issue_key: z.string().min(1),
+          update_history: z.literal(false),
+          fields: z.string().optional(),
+        }),
+        output: z.object({
+          isError: z.literal(false).optional(),
+          error: z.never().optional(),
+          content: z.tuple([z.strictObject({ type: z.literal("text"), text: z.string() })]),
+          structuredContent: z.strictObject({ result: z.string() }).optional(),
+        }),
+      }),
+    })
+    .safeParse(tool);
+  if (!read.success) return false;
+  const { input, output } = read.data.detail;
+  const issue = z
+    .object({
+      id: z.string().min(1),
+      key: z.string().min(1),
+      error: z.never().optional(),
+      isError: z.never().optional(),
+    })
+    .passthrough();
+  try {
+    const textResult: unknown = JSON.parse(output.content[0].text);
+    const result = issue.safeParse(textResult);
+    if (!result.success || result.data.key !== input.issue_key) return false;
+    if (
+      output.structuredContent &&
+      !isDeepStrictEqual(JSON.parse(output.structuredContent.result), textResult)
+    )
+      return false;
+    return true;
+  } catch {
+    return false;
+  }
 }
 type TimelineMetadata = Record<string, unknown>;
 type NativeTerminalCorrelation =

@@ -1,4 +1,5 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
+import { createDaemonTestContext } from "../../../test-utils/daemon-test-context.js";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
 import type { AgentSession, AgentStreamEvent } from "../../agent-sdk-types.js";
@@ -95,6 +96,11 @@ describe("Codex thread history", () => {
     try {
       const events = await readHistory(session);
 
+      expect(events.flatMap((event) => (event.type === "timeline" ? [event.turnId] : []))).toEqual([
+        ...Array.from({ length: 121 }, () => "turn-1"),
+        ...Array.from({ length: 31 }, () => "turn-2"),
+      ]);
+
       expect(timelineItems(events)).toEqual([
         { type: "user_message", text: "First", messageId: "user-1" },
         ...answers.slice(0, 120).map((answer) => ({
@@ -190,7 +196,12 @@ describe("Codex thread history", () => {
       turns: [{ id: "turn-1", items: [userItem("user-1", "Hello"), agentItem("agent-1", "Hi")] }],
     });
     try {
-      expect(timelineItems(await readHistory(session))).toEqual([
+      const events = await readHistory(session);
+      expect(events.flatMap((event) => (event.type === "timeline" ? [event.turnId] : []))).toEqual([
+        "turn-1",
+        "turn-1",
+      ]);
+      expect(timelineItems(events)).toEqual([
         { type: "user_message", text: "Hello", messageId: "user-1" },
         { type: "assistant_message", text: "Hi", messageId: "agent-1" },
       ]);
@@ -202,6 +213,125 @@ describe("Codex thread history", () => {
     }
     appServer.assertNoErrors();
   });
+
+  test("public reload preserves native history turns and the final failed review", async () => {
+    const verdict = {
+      diffHash: "d".repeat(64),
+      pass: false,
+      unresolvedIssues: 2,
+      findings: [
+        {
+          severity: "P1",
+          file: "src/a.ts",
+          line: 3,
+          problem: "Missing validation",
+          requiredChange: "Validate the input",
+        },
+        {
+          severity: "P2",
+          file: "src/b.ts",
+          line: 7,
+          problem: "Missing result",
+          requiredChange: "Return the result",
+        },
+      ],
+    };
+    const history = fakeCodexThreadHistory({
+      "thread-1": {
+        historyMode: "paginated",
+        turns: [
+          {
+            id: "native-old",
+            items: [
+              userItem("request-old", "Earlier review"),
+              agentItem("older", "Earlier response"),
+            ],
+          },
+          {
+            id: "native-review",
+            items: [
+              userItem("request-review", "Review the current diff"),
+              {
+                type: "commandExecution",
+                id: "check",
+                command: "node --version",
+                cwd: process.cwd(),
+                status: "completed",
+                aggregatedOutput: "v24",
+                exitCode: 0,
+              },
+              agentItem("commentary", "Reviewing the diff."),
+              agentItem("verdict", JSON.stringify(verdict)),
+            ],
+          },
+        ],
+      },
+    });
+    const servers: FakeCodexAppServer[] = [];
+    const provider = new CodexAppServerAgentClient(
+      createTestLogger(),
+      {
+        command: { mode: "replace", argv: ["codex-must-not-run-in-this-test"] },
+      },
+      {
+        appServerProcess: {
+          resolvePrefix: async () => ({ command: "codex", args: [] }),
+          spawn: () => {
+            const server = createFakeCodexAppServer(history);
+            servers.push(server);
+            return server.child;
+          },
+        },
+      },
+    );
+    vi.spyOn(provider, "isAvailable").mockResolvedValue(true);
+    const internals = provider as unknown as {
+      goalsEnabledPromise: Promise<boolean>;
+      autoReviewEnabledPromise: Promise<boolean>;
+    };
+    internals.goalsEnabledPromise = Promise.resolve(false);
+    internals.autoReviewEnabledPromise = Promise.resolve(false);
+    const ctx = await createDaemonTestContext({
+      agentClients: { codex: provider },
+      pluginsEnabled: false,
+      mcpEnabled: false,
+    });
+    try {
+      const agent = await ctx.client.createAgent({
+        config: { provider: "codex", cwd: ctx.daemon.paseoHome },
+      });
+      const refreshed = await ctx.client.refreshAgent(agent.id);
+      expect(refreshed.agentId).toBe(agent.id);
+      const timeline = await ctx.client.fetchAgentTimeline(agent.id, {
+        direction: "tail",
+        limit: 0,
+        projection: "projected",
+      });
+      expect(timeline.hasOlder).toBe(false);
+      expect(timeline.hasNewer).toBe(false);
+      expect(timeline.agent?.id).toBe(agent.id);
+      expect(timeline.entries.map((entry) => entry.turnId)).toEqual([
+        "native-old",
+        "native-old",
+        "native-review",
+        "native-review",
+        "native-review",
+        "native-review",
+      ]);
+      const final = timeline.entries.at(-1)!;
+      expect(final.item).toEqual({
+        type: "assistant_message",
+        messageId: "verdict",
+        text: JSON.stringify(verdict),
+      });
+      expect(
+        JSON.parse(final.item.type === "assistant_message" ? final.item.text : "null"),
+      ).toEqual(verdict);
+      for (const server of servers) server.assertNoErrors();
+    } finally {
+      await ctx.cleanup();
+    }
+  }, 60000);
 
   test("a legacy thread too big for one read shows the migration command", async () => {
     const { appServer, session } = await openCodexThread(

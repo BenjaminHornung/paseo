@@ -4940,11 +4940,10 @@ export class AgentManager {
       }
     }
     for (const event of historyEvents) {
-      const row = this.recordTimeline(
-        agent.id,
-        event.item,
-        event.timestamp ? { timestamp: event.timestamp } : undefined,
-      );
+      const row = this.recordTimeline(agent.id, event.item, {
+        timestamp: event.timestamp,
+        turnId: event.turnId,
+      });
       if (broadcastTimeline) {
         this.dispatchStream(agent.id, event, {
           seq: row.seq,
@@ -5009,11 +5008,10 @@ export class AgentManager {
       }
     }
     for (const event of historyEvents) {
-      const row = this.recordTimeline(
-        agent.id,
-        event.item,
-        event.timestamp ? { timestamp: event.timestamp } : undefined,
-      );
+      const row = this.recordTimeline(agent.id, event.item, {
+        timestamp: event.timestamp,
+        turnId: event.turnId,
+      });
       if (deferredBroadcast) {
         timelineEvents.push({ event, row });
       } else if (broadcast) {
@@ -5341,11 +5339,7 @@ export class AgentManager {
         continue;
 
       if (options?.fromHistory) {
-        this.recordTimeline(
-          agent.id,
-          item,
-          event.timestamp ? { timestamp: event.timestamp } : undefined,
-        );
+        this.recordTimeline(agent.id, item, { timestamp: event.timestamp, turnId: event.turnId });
         continue;
       }
 
