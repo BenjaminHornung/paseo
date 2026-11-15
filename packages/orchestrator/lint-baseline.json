@@ -2,6 +2,7 @@
   "description": "Reviewed controller import/integration source debt; all rules remain active and new diagnostics fail.",
   "originCandidate": "80c9ef3a278d8be4fea59ce9b79cc9ab37a71075df0ce60f59b9aad350da9390",
   "dispositions": {
+    "intakeAliasRearm": "Root authorized renewal of exactly two inherited count1 complexity entries after matching their original spans to base0a07: captureHumanIntake decreases 96 to 77 and settingsOperation decreases 247 to 235. Capture and rearm share the existing strict history/identity/checkpoint reader; the idle snapshot invariant is shared before and after observation. All new helpers meet normal thresholds. No new entries, rule changes or broad exceptions; historical pending evidence and authority bindings remain unchanged.",
     "verificationOnlyRecovery": "Five inherited fingerprints only: captureHumanIntake 95 to 96 for separately audited operator provenance without native-echo synthesis; plan 46 to 48 for durable no-new-work admission; acceptSnapshot 31 to 34 for verification-only process waits; advance remains 35 while using the observed finalization helper; review 65 to 66 for immutable DONE/PASS reuse without reviewer restart. All predecessor spans were matched to the immutable A/B-V2 hashes before renewal. New recovery schemas, audit/evidence/eligibility/process/CAS helpers meet normal thresholds. No new entries, rule exceptions or disabled checks.",
     "prospectiveOriginAndFinalization": "Only two inherited complexity fingerprints are renewed: captureHumanIntake remains 95 after rechecking the native session for every newly observed receipt alias; advance remains 35 after strict task authority admission and transactional finish callbacks. Both predecessor messages and hashes were checked against b997. New observed-alias and finalization-authority helpers meet normal thresholds. No new baseline entries, rule changes or broad exceptions; historical assessments and terminal attempts remain untouched.",
     "style": "Exact complexity, nesting, local shadow names and existing React allocation diagnostics are retained without a behavioral rewrite of the imported controller.",
@@ -1216,8 +1217,8 @@
     {
       "file": "packages/orchestrator/src/intake.ts",
       "rule": "eslint(complexity)",
-      "message": "async function `captureHumanIntake` has a complexity of 96. Maximum allowed is 20.",
-      "sourceSha256": "4b4c786cb8b7b070a68bb5ee48fdd506866377975883c5ed88edecf6b47fe81c",
+      "message": "async function `captureHumanIntake` has a complexity of 77. Maximum allowed is 20.",
+      "sourceSha256": "f78c9ad6c02ca2ff26c7ae5d572e4c2d69bcb894d01bffb2a5ca840166f922b6",
       "count": 1
     },
     {
@@ -1391,8 +1392,8 @@
     {
       "file": "packages/orchestrator/src/settings.ts",
       "rule": "eslint(complexity)",
-      "message": "async function `settingsOperation` has a complexity of 247. Maximum allowed is 20.",
-      "sourceSha256": "3d811dd4ca0f40d0fed24c1bf7aca094e72d84e1ba39b985d69ae62a752411d9",
+      "message": "async function `settingsOperation` has a complexity of 235. Maximum allowed is 20.",
+      "sourceSha256": "74065d947d47bc40b48268e91912c13907ad3d5348ce0eab86823d59fdf587db",
       "count": 1
     },
     {

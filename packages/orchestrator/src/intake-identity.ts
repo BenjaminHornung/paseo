@@ -101,6 +101,94 @@ function intakeIdentitiesFromRows(
   return [...latest.values()];
 }
 
+// A historical alias is only message identity. The caller separately binds the
+// immutable assessment and Main interpretation before using it for settlement.
+export function humanNativeIntakeAliases(
+  store: Store,
+  facts: readonly IntakeFacts[],
+  pendingMessageHashes: ReadonlySet<string>,
+): Map<string, IntakeIdentity> {
+  const aliases = new Map<string, IntakeIdentity>();
+  if (!facts.length || !pendingMessageHashes.size) return aliases;
+  const rows = store.db
+    .prepare("SELECT kind FROM events WHERE kind LIKE 'INTAKE_MESSAGE_IDENTITY:%' ORDER BY rowid")
+    .all() as { kind: string }[];
+  const recorded = rows.map((row) => JSON.parse(row.kind.slice(prefix.length)) as IntakeIdentity);
+  for (const input of facts) {
+    const relevant = recorded.some(
+      (item) =>
+        item.agentId === input.mainAgentId &&
+        item.messageId === input.messageId &&
+        item.nativeMessageId &&
+        pendingMessageHashes.has(hash(item.nativeMessageId)),
+    );
+    if (!relevant) continue;
+    const alias = humanNativeIntakeAlias(store, input, recorded);
+    if (alias) aliases.set(input.messageId, alias);
+  }
+  return aliases;
+}
+
+function humanNativeIntakeAlias(
+  store: Store,
+  facts: IntakeFacts,
+  recorded: readonly IntakeIdentity[],
+): IntakeIdentity | undefined {
+  const textHash = hash(facts.text);
+  const receipt = store.db
+    .prepare("SELECT kind FROM internal_messages WHERE agent_id=? AND message_id=?")
+    .get(facts.mainAgentId, facts.messageId) as { kind: string } | undefined;
+  if (facts.origin !== "human" || receipt?.kind !== `human:${textHash}`) return;
+  const candidates = recorded.filter(
+    (item) => item.agentId === facts.mainAgentId && item.messageId === facts.messageId,
+  );
+  const alias = candidates.find((item) => item.nativeMessageId);
+  if (!alias || alias.nativeMessageId === facts.messageId) return;
+  if (
+    !alias.sessionId ||
+    !nativeId.test(alias.nativeMessageId ?? "") ||
+    candidates.some(
+      (item) =>
+        item.sessionId !== alias.sessionId ||
+        item.textHash !== textHash ||
+        !Number.isFinite(Date.parse(item.timestamp)) ||
+        (item.nativeMessageId && item.nativeMessageId !== alias.nativeMessageId),
+    ) ||
+    recorded.some(
+      (item) =>
+        item.nativeMessageId === alias.nativeMessageId &&
+        (item.agentId !== facts.mainAgentId ||
+          item.messageId !== facts.messageId ||
+          item.sessionId !== alias.sessionId ||
+          item.textHash !== textHash),
+    )
+  )
+    throw Error("INTAKE_MESSAGE_IDENTITY_AMBIGUOUS");
+  const nativeReceipt = store.db
+    .prepare("SELECT 1 FROM internal_messages WHERE agent_id=? AND message_id=?")
+    .get(facts.mainAgentId, alias.nativeMessageId!);
+  const nativeAssessment = store.db
+    .prepare(
+      "SELECT 1 FROM assessments WHERE owner_id=? AND kind='intake' AND json_extract(facts_json,'$.messageId')=?",
+    )
+    .get(facts.mainAgentId, alias.nativeMessageId!);
+  const operatorClaim = store.db
+    .prepare(
+      "SELECT 1 FROM events WHERE substr(kind,1,?)=? AND json_extract(substr(kind,?),'$.binding.mainAgentId')=? AND json_extract(substr(kind,?),'$.binding.nativeMessageId')=?",
+    )
+    .get(
+      operatorOriginPrefix.length,
+      operatorOriginPrefix,
+      operatorOriginPrefix.length + 1,
+      facts.mainAgentId,
+      operatorOriginPrefix.length + 1,
+      alias.nativeMessageId!,
+    );
+  if (nativeReceipt || nativeAssessment || operatorClaim)
+    throw Error("INTAKE_MESSAGE_IDENTITY_AMBIGUOUS");
+  return alias;
+}
+
 export function rememberIntakeIdentity(store: Store, identity: IntakeIdentity): boolean {
   if (!identity.sessionId || !Number.isFinite(Date.parse(identity.timestamp))) return false;
   if (identity.nativeMessageId && !nativeId.test(identity.nativeMessageId))

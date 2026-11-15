@@ -2516,6 +2516,204 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
     "retained legacy authority can clarify the same unregistered package",
   );
 
+  async function rearmInterpretedHumanAlias(aliasTest: TestContext) {
+    async function aliasInterpret(action: "start" | "continue") {
+      const { input } = (await settingsOperation(
+        { operation: "auto-interpret", agentId, directory: repo },
+        options,
+      )) as { input: { intakeId: string; factsHash: string; previousWorkIntakeId: string | null } };
+      await settingsOperation(
+        {
+          operation: "auto-interpret",
+          agentId,
+          directory: repo,
+          interpretation: {
+            version: 1,
+            intakeId: input.intakeId,
+            factsHash: input.factsHash,
+            previousWorkIntakeId: input.previousWorkIntakeId,
+            action,
+          },
+        },
+        options,
+      );
+    }
+    await registerInput("alias-rearm-owned-start", "Implement the isolated alias example", false);
+    await aliasInterpret("start");
+    const clientId = "rearm-human-continue-0001";
+    const nativeId = "66666666-6666-7666-8666-666666666664";
+    await registerInput(clientId, "Continue the unchanged isolated example", false);
+    messages.at(-1)!.nativeId = nativeId;
+    await aliasInterpret("continue");
+    const before = new Store(database);
+    const checkpoint = before.db
+      .prepare("SELECT message_id,work_intake_id FROM main_checkpoints WHERE agent_id=?")
+      .get(agentId)!;
+    const assessmentRows = before.db.prepare("SELECT * FROM assessments ORDER BY rowid").all();
+    const receipt = before.db
+      .prepare("SELECT * FROM internal_messages WHERE agent_id=? AND message_id=?")
+      .get(agentId, clientId);
+    const lastSequence = Number(
+      before.db.prepare("SELECT max(sequence) AS n FROM events").get()!.n,
+    );
+    before.close();
+    const pendingPrefix = `INTAKE_CLASSIFICATION_PENDING:${agentId}:`;
+    const marker = pendingPrefix + hash(nativeId);
+    async function performRearm() {
+      await settingsOperation(
+        { operation: "auto-state", agentId, directory: repo, state: "off", requestId: "" },
+        options,
+      );
+      await settingsOperation(
+        {
+          operation: "auto-state",
+          agentId,
+          directory: repo,
+          state: "arming",
+          requestId: "native-human-rearm",
+        },
+        options,
+      );
+      await settingsOperation(
+        {
+          operation: "auto-state",
+          agentId,
+          directory: repo,
+          state: "ready",
+          requestId: "native-human-rearm",
+        },
+        options,
+      );
+    }
+    async function futureRearm() {
+      rehydratedHistory = true;
+      try {
+        await performRearm();
+        const state = new Store(database);
+        try {
+          assert.equal(
+            state.db.prepare("SELECT count(*) AS n FROM events WHERE kind=?").get(marker)!.n,
+            0,
+            "rearm must not mark the already interpreted native human checkpoint as unseen",
+          );
+          assert.equal(currentIntake(state, agentId, true).id, checkpoint.work_intake_id);
+          assert.deepEqual(
+            state.db
+              .prepare("SELECT message_id,work_intake_id FROM main_checkpoints WHERE agent_id=?")
+              .get(agentId),
+            checkpoint,
+          );
+          assert.deepEqual(
+            state.db.prepare("SELECT * FROM assessments ORDER BY rowid").all(),
+            assessmentRows,
+          );
+        } finally {
+          state.close();
+        }
+      } finally {
+        rehydratedHistory = false;
+        const cleanup = new Store(database);
+        cleanup.db
+          .prepare("DELETE FROM events WHERE substr(kind,1,?)=? AND sequence>?")
+          .run(pendingPrefix.length, pendingPrefix, lastSequence);
+        cleanup.close();
+      }
+    }
+    function historicalPending() {
+      const state = new Store(database);
+      markIntakeClassificationPending(state, agentId, nativeId);
+      const historical = state.db.prepare("SELECT * FROM events WHERE kind=?").get(marker);
+      try {
+        assert.equal(
+          currentIntake(state, agentId, true).id,
+          checkpoint.work_intake_id,
+          "an existing native pending marker for the interpreted human alias must retain current work",
+        );
+        assert.deepEqual(
+          state.db.prepare("SELECT * FROM events WHERE kind=?").get(marker),
+          historical,
+        );
+        assert.deepEqual(
+          state.db.prepare("SELECT * FROM assessments ORDER BY rowid").all(),
+          assessmentRows,
+        );
+        assert.deepEqual(
+          state.db
+            .prepare("SELECT * FROM internal_messages WHERE agent_id=? AND message_id=?")
+            .get(agentId, clientId),
+          receipt,
+        );
+        state.db
+          .prepare("INSERT INTO internal_messages VALUES(?,?,?)")
+          .run(agentId, nativeId, `operator-readonly-advisor:${hash("foreign reader claim")}`);
+        assert.throws(
+          () => currentIntake(state, agentId, true),
+          /INTAKE_PENDING|INTAKE_MESSAGE_IDENTITY_AMBIGUOUS/,
+          "a competing native receipt must not become settled human input",
+        );
+      } finally {
+        state.db
+          .prepare("DELETE FROM internal_messages WHERE agent_id=? AND message_id=?")
+          .run(agentId, nativeId);
+        state.db.prepare("DELETE FROM events WHERE kind=?").run(marker);
+        state.close();
+      }
+    }
+    async function foreignSession() {
+      const originalSavedSession = savedSessionId;
+      const originalProviderSession = providerSessionId;
+      rehydratedHistory = true;
+      savedSessionId = "foreign-human-rearm-session";
+      providerSessionId = savedSessionId;
+      try {
+        await assert.rejects(
+          () => performRearm(),
+          /INTAKE_HISTORY_GAP|INTAKE_HISTORY_SESSION_CHANGED/,
+        );
+      } finally {
+        savedSessionId = originalSavedSession;
+        providerSessionId = originalProviderSession;
+        rehydratedHistory = false;
+      }
+    }
+    async function newHumanStop() {
+      const stopId = "alias-rearm-unreceipted-stop";
+      messages.push({ id: stopId, text: "Stop", timestamp: new Date().toISOString() });
+      rehydratedHistory = true;
+      try {
+        await performRearm();
+        const stopped = new Store(database);
+        try {
+          assert.throws(() => currentIntake(stopped, agentId, true), /INTAKE_PENDING/);
+        } finally {
+          stopped.close();
+        }
+      } finally {
+        rehydratedHistory = false;
+        messages.pop();
+        const cleanup = new Store(database);
+        cleanup.db
+          .prepare("DELETE FROM events WHERE substr(kind,1,?)=? AND sequence>?")
+          .run(pendingPrefix.length, pendingPrefix, lastSequence);
+        cleanup.close();
+      }
+    }
+    await aliasTest.test("future rearm keeps the interpreted native human checkpoint", futureRearm);
+    await aliasTest.test(
+      "existing native pending is read without mutating its history",
+      historicalPending,
+    );
+    await aliasTest.test(
+      "rearm cannot import the human checkpoint from a foreign session",
+      foreignSession,
+    );
+    await aliasTest.test("a new unseen human stop remains pending after rearm", newHumanStop);
+  }
+  await t.test(
+    "rearm reuses the interpreted human alias without new authority",
+    rearmInterpretedHumanAlias,
+  );
+
   await t.test(
     "main authority separates plan, native implementation and stop from pending advisory calls",
     async (mainAuthority) => {

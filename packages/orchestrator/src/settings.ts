@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { PaseoAgent } from "@getpaseo/client";
 import { decisionHistory } from "./decision-history.ts";
 import { randomUUID } from "node:crypto";
 import {
@@ -42,7 +43,7 @@ import {
   linkApprovalToOutstandingTask,
   markIntakeClassificationPending,
   recordInternalMessage,
-  timelineCheckpointIndex,
+  observeMainIntakeHistory,
 } from "./intake.ts";
 import {
   effectiveImplementation,
@@ -54,7 +55,6 @@ import {
 } from "./assessments.ts";
 import { researchWithSynthesis, researchRequestSchema } from "./research.ts";
 import { processMonitorFile } from "./process-monitor.ts";
-import { verifiedProviderSessionId } from "./completion.ts";
 import { intakeConfirmationSchema } from "../paseo-plugin/shared/intake-confirmation.ts";
 import {
   mainInputInterpretationSchema,
@@ -67,6 +67,17 @@ import {
   effectivePackageAssessment,
   mainInputInterpretation,
 } from "./main-interpretation.ts";
+
+function assertAutomationMainIdle(agent: PaseoAgent | null | undefined, directory: string): void {
+  if (
+    !agent ||
+    canonicalPath(agent.cwd) !== directory ||
+    agent.status !== "idle" ||
+    agent.activeTurn ||
+    agent.pendingPermissions.length
+  )
+    throw Error("AUTOMATION_MAIN_MUST_BE_IDLE");
+}
 
 export const settingsRequestSchema = z.discriminatedUnion("operation", [
   z.strictObject({ operation: z.literal("get") }),
@@ -685,20 +696,15 @@ export async function settingsOperation(
         try {
           const handle = provider.client.agents.ref(request.agentId),
             snapshot = (await handle.refresh())?.agent;
-          if (
-            !snapshot ||
-            canonicalPath(snapshot.cwd) !== directory ||
-            snapshot.status !== "idle" ||
-            snapshot.activeTurn
-          )
-            throw Error("AUTOMATION_MAIN_MUST_BE_IDLE");
-          const timeline = await handle.timeline.refetch({
-            direction: "tail",
-            limit: 200,
-            projection: "projected",
+          assertAutomationMainIdle(snapshot, directory);
+          const history = await observeMainIntakeHistory(store, handle, {
+            agentId: request.agentId,
+            checkpoint,
+            requireCompleteHistory: oldReceipts.length > 0,
           });
-          if (timeline.error || timeline.gap) throw Error("INTAKE_HISTORY_INCOMPLETE");
-          const last = timeline.entries
+          const { timeline, entries } = history;
+          assertAutomationMainIdle(handle.current(), directory);
+          const last = entries
             .map((entry) => entry.item)
             .findLast(
               (item) =>
@@ -710,11 +716,8 @@ export async function settingsOperation(
                   .get(request.agentId, item.clientMessageId ?? item.messageId ?? ""),
             );
           const emptyHistory =
-            !timeline.hasOlder &&
-            !timeline.entries.some((entry) => entry.item.type === "user_message");
-          let emptySessionId = snapshot.runtimeInfo?.sessionId ?? null;
-          if (emptyHistory && !emptySessionId)
-            emptySessionId = await verifiedProviderSessionId(handle);
+            !timeline.hasOlder && !entries.some((entry) => entry.item.type === "user_message");
+          const emptySessionId = history.sessionId;
           const baseline =
             last?.type === "user_message"
               ? (last.clientMessageId ?? last.messageId ?? null)
@@ -723,11 +726,7 @@ export async function settingsOperation(
                 : timeline.endCursor
                   ? `cursor:${timeline.endCursor.epoch}:${timeline.endCursor.seq}`
                   : null;
-          const boundary = timelineCheckpointIndex(
-            timeline.entries,
-            checkpoint?.message_id ?? null,
-          );
-          const unseenInput = timeline.entries.slice(boundary + 1).flatMap((entry) => {
+          const unseenInput = entries.slice(history.checkpointIndex + 1).flatMap((entry) => {
             if (entry.item.type !== "user_message") return [];
             const messageId = entry.item.clientMessageId ?? entry.item.messageId;
             if (!messageId) return [];

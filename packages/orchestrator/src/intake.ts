@@ -45,6 +45,7 @@ import {
   validateOperatorWakeOrigin,
   assertOperatorMainIdle,
   assertOperatorMainSnapshot,
+  humanNativeIntakeAliases,
 } from "./intake-identity.ts";
 import type { OperatorWakeBinding } from "./verification-recovery.ts";
 
@@ -252,6 +253,90 @@ export function abandonHumanInput(store: Store, agentId: string, messageId: stri
     settleIntakeClassification(store, agentId, messageId);
   });
 }
+interface IntakeHistoryRequest {
+  agentId: string;
+  checkpoint?: { message_id: string | null };
+  requireCompleteHistory: boolean;
+}
+function observedIntakeCheckpoint(
+  entries: TimelineObservation["entries"],
+  timeline: TimelineObservation,
+  checkpoint: IntakeHistoryRequest["checkpoint"],
+): number {
+  const messageId = checkpoint?.message_id;
+  if (!messageId || messageId.startsWith("empty:")) return -1;
+  const anchor = messageId.match(/^cursor:(.+):(\d+)$/);
+  if (anchor && timeline.endCursor?.epoch !== anchor[1])
+    throw Error("INTAKE_HISTORY_EPOCH_CHANGED");
+  const index = timelineCheckpointIndex(entries, messageId);
+  if (index < 0) throw Error("INTAKE_HISTORY_GAP");
+  return index;
+}
+export async function observeMainIntakeHistory(
+  store: Store,
+  handle: PaseoAgentHandle,
+  request: IntakeHistoryRequest,
+) {
+  const { agentId, checkpoint } = request;
+  const sessionId = await verifiedProviderSessionId(handle);
+  const emptyBaseline = checkpoint?.message_id?.startsWith("empty:");
+  if (emptyBaseline && checkpoint?.message_id !== `empty:${sessionId}`)
+    throw Error("INTAKE_HISTORY_SESSION_CHANGED");
+  const operatorOrigins = provenInternalMessages(store, agentId).filter(
+    (origin) => origin.provenance === "operator" && origin.identity.sessionId === sessionId,
+  );
+  const identities = intakeIdentities(store, agentId, sessionId).filter(
+    (identity) =>
+      !operatorOrigins.some((origin) => origin.identity.messageId === identity.messageId),
+  );
+  identities.push(...operatorOrigins.map((origin) => origin.identity));
+  const identitiesForCapture = (entries: TimelineObservation["entries"]) => {
+    const directEntries = resolveIntakeIdentities(entries, identities, false);
+    const index = timelineCheckpointIndex(directEntries, checkpoint?.message_id ?? null);
+    return relevantCaptureIdentities(store, {
+      identities,
+      entries: directEntries,
+      checkpointEntry: directEntries[index],
+    });
+  };
+  let reached: ((entries: TimelineObservation["entries"]) => boolean) | undefined;
+  if (!emptyBaseline && !request.requireCompleteHistory) {
+    if (checkpoint?.message_id) {
+      const checkpointId = checkpoint.message_id;
+      reached = (entries) => {
+        const relevant = identitiesForCapture(entries);
+        return (
+          !needsCompleteInternalHistory(store, relevant, entries) &&
+          timelineCheckpointIndex(
+            resolveIntakeIdentities(entries, relevant, false),
+            checkpointId,
+          ) >= 0
+        );
+      };
+    } else if (!checkpoint) {
+      reached = (entries) =>
+        !needsCompleteInternalHistory(store, identitiesForCapture(entries), entries);
+    }
+  }
+  const timeline = await observedTimeline(handle, "projected", reached);
+  if (
+    (await verifiedProviderSessionId(handle)) !== sessionId ||
+    (handle.runtimeInfo?.sessionId && handle.runtimeInfo.sessionId !== sessionId)
+  )
+    throw Error("INTAKE_HISTORY_SESSION_CHANGED");
+  const relevant = identitiesForCapture(timeline.entries);
+  const entries = resolveIntakeIdentities(timeline.entries, relevant, !timeline.hasOlder);
+  const checkpointIndex = observedIntakeCheckpoint(entries, timeline, checkpoint);
+  return {
+    sessionId,
+    identities,
+    operatorOrigins,
+    timeline,
+    entries,
+    checkpointIndex,
+    checkpointEntry: entries[checkpointIndex],
+  };
+}
 export async function captureHumanIntake(
   store: Store,
   config: Config,
@@ -280,19 +365,6 @@ export async function captureHumanIntake(
   const checkpoint = store.db
     .prepare("SELECT message_id,work_intake_id FROM main_checkpoints WHERE agent_id=?")
     .get(main.agentId) as { message_id: string | null; work_intake_id: string | null } | undefined;
-  const sessionId = await verifiedProviderSessionId(handle);
-  const emptyBaseline = checkpoint?.message_id?.startsWith("empty:");
-  if (emptyBaseline && checkpoint?.message_id !== `empty:${sessionId}`)
-    throw Error("INTAKE_HISTORY_SESSION_CHANGED");
-  const operatorOrigins = provenInternalMessages(store, main.agentId).filter(
-    (origin) => origin.provenance === "operator" && origin.identity.sessionId === sessionId,
-  );
-  const identities = intakeIdentities(store, main.agentId, sessionId).filter(
-    (identity) =>
-      !operatorOrigins.some((origin) => origin.identity.messageId === identity.messageId),
-  );
-  identities.push(...operatorOrigins.map((origin) => origin.identity));
-  const anchor = checkpoint?.message_id?.match(/^cursor:(.+):(\d+)$/);
   const receiptEvents = store.db
     .prepare("SELECT at_ms,kind FROM events WHERE kind LIKE 'HUMAN_INPUT_RECEIPT:%' AND at_ms<?")
     .all(Date.now() - 120000) as { at_ms: number; kind: string }[];
@@ -318,46 +390,14 @@ export async function captureHumanIntake(
           )
           .get(main.agentId, receipt.messageId),
     );
-  const identitiesForCapture = (entries: TimelineObservation["entries"]) => {
-    const directEntries = resolveIntakeIdentities(entries, identities, false);
-    const index = timelineCheckpointIndex(directEntries, checkpoint?.message_id ?? null);
-    return relevantCaptureIdentities(store, {
-      identities,
-      entries: directEntries,
-      checkpointEntry: directEntries[index],
-    });
-  };
-  let reached: ((entries: TimelineObservation["entries"]) => boolean) | undefined;
-  if (!emptyBaseline && !staleReceipts.length) {
-    if (checkpoint?.message_id) {
-      const checkpointId = checkpoint.message_id;
-      reached = (entries) => {
-        const relevant = identitiesForCapture(entries);
-        return (
-          !needsCompleteInternalHistory(store, relevant, entries) &&
-          timelineCheckpointIndex(
-            resolveIntakeIdentities(entries, relevant, false),
-            checkpointId,
-          ) >= 0
-        );
-      };
-    } else if (!checkpoint) {
-      reached = (entries) =>
-        !needsCompleteInternalHistory(store, identitiesForCapture(entries), entries);
-    }
-  }
-  const timeline = await observedTimeline(handle, "projected", reached);
-  const relevant = identitiesForCapture(timeline.entries);
-  let entries = resolveIntakeIdentities(timeline.entries, relevant, !timeline.hasOlder);
-  if (anchor && timeline.endCursor && timeline.endCursor.epoch !== anchor[1])
-    throw Error("INTAKE_HISTORY_EPOCH_CHANGED");
-  let checkpointEntry: (typeof entries)[number] | undefined;
-  let checkpointIndex = -1;
-  if (checkpoint?.message_id && !emptyBaseline) {
-    checkpointIndex = timelineCheckpointIndex(entries, checkpoint.message_id);
-    if (checkpointIndex < 0) throw Error("INTAKE_HISTORY_GAP");
-    checkpointEntry = entries[checkpointIndex];
-  }
+  const history = await observeMainIntakeHistory(store, handle, {
+    agentId: main.agentId,
+    checkpoint,
+    requireCompleteHistory: staleReceipts.length > 0,
+  });
+  const { sessionId, identities, operatorOrigins, timeline, checkpointIndex, checkpointEntry } =
+    history;
+  let entries = history.entries;
   const newInternalAlias = entries.some(
     ({ item }) =>
       item.type === "user_message" &&
@@ -1393,6 +1433,38 @@ export function confirmExistingWork(
     );
   });
 }
+function interpretedInputMessageHashes(
+  store: Store,
+  agentId: string,
+  pendingMessageHashes: ReadonlySet<string>,
+): Set<string> {
+  const messages = new Set<string>();
+  const humanFacts: IntakeFacts[] = [];
+  const rows = store.db
+    .prepare(
+      "SELECT id,facts_hash,facts_json FROM assessments WHERE owner_id=? AND kind='intake' AND json_extract(facts_json,'$.messageId') IS NOT NULL",
+    )
+    .all(agentId) as { id: string; facts_hash: string; facts_json: string }[];
+  for (const row of rows) {
+    const interpretation = mainInputInterpretation(store, row.id);
+    if (!interpretation) continue;
+    const raw = JSON.parse(row.facts_json);
+    messages.add(hash(raw.messageId));
+    const parsed = intakeFactsSchema.safeParse(raw);
+    if (
+      parsed.success &&
+      parsed.data.origin === "human" &&
+      parsed.data.mainAgentId === agentId &&
+      hash(parsed.data) === row.facts_hash &&
+      interpretation.intakeId === row.id &&
+      interpretation.factsHash === row.facts_hash
+    )
+      humanFacts.push(parsed.data);
+  }
+  for (const alias of humanNativeIntakeAliases(store, humanFacts, pendingMessageHashes).values())
+    if (alias.nativeMessageId) messages.add(hash(alias.nativeMessageId));
+  return messages;
+}
 function assertIntakeSettled(
   store: Store,
   agentId: string,
@@ -1428,6 +1500,8 @@ function assertIntakeSettled(
       approvedOriginal(store, approval),
   );
   const internalMessages = provenInternalMessages(store, agentId);
+  const pendingMessageHashes = new Set(pending.map((row) => row.kind.slice(pendingPrefix.length)));
+  const interpretedMessages = interpretedInputMessageHashes(store, agentId, pendingMessageHashes);
   for (const row of pending) {
     if (
       internalMessages.some(
@@ -1437,22 +1511,7 @@ function assertIntakeSettled(
       )
     )
       continue;
-    const interpreted = store.db
-      .prepare(
-        "SELECT id FROM assessments WHERE owner_id=? AND kind='intake' AND json_extract(facts_json,'$.messageId') IS NOT NULL",
-      )
-      .all(agentId) as { id: string }[];
-    if (
-      interpreted.some(({ id }) => {
-        const value = mainInputInterpretation(store, id);
-        if (!value) return false;
-        const facts = store.db.prepare("SELECT facts_json FROM assessments WHERE id=?").get(id) as {
-          facts_json: string;
-        };
-        return row.kind === `${pendingPrefix}${hash(JSON.parse(facts.facts_json).messageId)}`;
-      })
-    )
-      continue;
+    if (interpretedMessages.has(row.kind.slice(pendingPrefix.length))) continue;
     if (
       supersedingSequences.includes(row.sequence) ||
       approvedSupersession.some((approval) =>
