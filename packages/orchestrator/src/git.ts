@@ -53,6 +53,7 @@ interface ReviewFileState {
 
 const MAX_REVIEW_CONTEXT_BYTES = 512_000;
 const MAX_INLINE_REVIEW_CONTENT_BYTES = 512_000;
+const CRLF_BASE_LIMIT_BYTES = 16 * 1024 * 1024;
 
 interface CrlfPathEvidence {
   file: string;
@@ -68,6 +69,19 @@ export interface CrlfRecheckProof {
   whitespacePolicy: string | null;
   paths: CrlfPathEvidence[];
   diagnostics: { file: string; line: number }[];
+}
+
+// Path matching is done by the caller; this validates mode, type and object id only.
+function parseBaseEntry(entry: string): { mode: string; gitBlobId: string } {
+  const separator = entry.indexOf("\t");
+  const [mode, type, gitBlobId] = entry.slice(0, separator).split(" ");
+  if (
+    type !== "blob" ||
+    !["100644", "100755"].includes(mode) ||
+    !/^[a-f0-9]{40,64}$/.test(gitBlobId)
+  )
+    throw Error("Symlink/submodule or invalid base file requires manual inspection");
+  return { mode, gitBlobId };
 }
 
 function uniformCrlf(bytes: Buffer): boolean {
@@ -405,40 +419,163 @@ export class Git {
     policy: string | null,
   ): CrlfPathEvidence[] {
     if (policy?.split(",").some((rule) => rule.trim() === "-cr-at-eol")) return [];
-    const qualified: CrlfPathEvidence[] = [];
+    const candidates: { file: string; current: Buffer }[] = [];
     for (const file of files) {
       const absolute = path.resolve(c.worktree, file);
       if (!existsSync(absolute)) continue;
       const current = readFileSync(absolute);
-      if (!uniformCrlf(current)) continue;
-      const base = this.baseFileIdentity(c, file);
-      if (!base || base.bytes > 16 * 1024 * 1024) continue;
-      const original = execFileSync(this.executable, ["cat-file", "blob", base.gitBlobId], {
-        cwd: c.worktree,
-        maxBuffer: 16 * 1024 * 1024,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      if (!uniformCrlf(original)) continue;
-      const attributes = execFileSync(
-        this.executable,
-        ["check-attr", "-z", "whitespace", "--", file],
-        {
-          cwd: c.worktree,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      ).split("\0");
-      if (attributes.length !== 4 || attributes[0] !== file || attributes[1] !== "whitespace")
-        throw Error("CRLF_CHECK_ATTRIBUTES_UNAVAILABLE");
-      if (attributes[2] !== "unspecified") continue;
-      qualified.push({
-        file,
-        baseBlob: base.gitBlobId,
-        baseSha256: createHash("sha256").update(original).digest("hex"),
-        currentSha256: createHash("sha256").update(current).digest("hex"),
-      });
+      if (uniformCrlf(current)) candidates.push({ file, current });
     }
-    return qualified;
+    // Each git step below is one batched process for all candidates, not one per file.
+    const bases = this.baseFileIdentities(
+      c,
+      candidates.map((candidate) => candidate.file),
+    );
+    const sized = candidates.flatMap((candidate, index) => {
+      const base = bases[index];
+      return base && base.bytes <= CRLF_BASE_LIMIT_BYTES ? [{ ...candidate, base }] : [];
+    });
+    const originals = this.blobContents(
+      c,
+      sized.map((entry) => entry.base),
+    );
+    const uniform = sized.flatMap((entry, index) => {
+      const original = originals[index];
+      return uniformCrlf(original) ? [{ ...entry, original }] : [];
+    });
+    const attributes = this.whitespaceAttributes(
+      c,
+      uniform.map((entry) => entry.file),
+    );
+    return uniform.flatMap((entry, index) =>
+      attributes[index] === "unspecified"
+        ? [
+            {
+              file: entry.file,
+              baseBlob: entry.base.gitBlobId,
+              baseSha256: createHash("sha256").update(entry.original).digest("hex"),
+              currentSha256: createHash("sha256").update(entry.current).digest("hex"),
+            },
+          ]
+        : [],
+    );
+  }
+
+  // Same validation as baseFileIdentity, applied to one ls-tree call for many paths.
+  private baseFileIdentities(c: Contract, names: string[]): (BaseFileIdentity | null)[] {
+    if (!names.length) return [];
+    const output = execFileSync(
+      this.executable,
+      ["ls-tree", "-z", c.baseCommit, "--", ...names.map((name) => `:(literal)${name}`)],
+      {
+        cwd: c.worktree,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024 * names.length,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    const wanted = new Set(names);
+    const grouped = new Map<string, string[]>();
+    for (const entry of output.split("\0").filter(Boolean)) {
+      const separator = entry.indexOf("\t");
+      const name = entry.slice(separator + 1);
+      if (separator < 0 || !wanted.has(name)) throw Error("Review base path could not be verified");
+      grouped.set(name, [...(grouped.get(name) ?? []), entry]);
+    }
+    const found = names.map((name) => {
+      const entries = grouped.get(name) ?? [];
+      if (!entries.length) return null;
+      if (entries.length !== 1) throw Error("Review base path is ambiguous");
+      return parseBaseEntry(entries[0]);
+    });
+    const present = found.filter((base) => base !== null);
+    const sizes = this.blobSizes(
+      c,
+      present.map((base) => base.gitBlobId),
+    );
+    let index = 0;
+    return found.map((base) =>
+      base ? { mode: base.mode, gitBlobId: base.gitBlobId, bytes: sizes[index++] } : null,
+    );
+  }
+
+  private blobSizes(c: Contract, oids: string[]): number[] {
+    if (!oids.length) return [];
+    const lines = execFileSync(this.executable, ["cat-file", "--batch-check"], {
+      cwd: c.worktree,
+      encoding: "utf8",
+      input: oids.map((oid) => `${oid}\n`).join(""),
+      maxBuffer: 1024 * 1024 + oids.length * 256,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).split("\n");
+    if (lines.length !== oids.length + 1 || lines.at(-1) !== "")
+      throw Error("Symlink/submodule or invalid base file requires manual inspection");
+    return oids.map((oid, index) => {
+      const [echoed, type, size, ...rest] = lines[index].split(" ");
+      const bytes = Number(size);
+      if (
+        echoed !== oid ||
+        type !== "blob" ||
+        rest.length ||
+        !Number.isSafeInteger(bytes) ||
+        bytes < 0
+      )
+        throw Error("Symlink/submodule or invalid base file requires manual inspection");
+      return bytes;
+    });
+  }
+
+  // Binary safe: contents are returned as Buffers, in the same order as the input bases.
+  private blobContents(c: Contract, bases: BaseFileIdentity[]): Buffer[] {
+    if (!bases.length) return [];
+    const output = execFileSync(this.executable, ["cat-file", "--batch"], {
+      cwd: c.worktree,
+      input: bases.map((base) => `${base.gitBlobId}\n`).join(""),
+      maxBuffer: bases.reduce((total, base) => total + base.bytes + 256, 1024 * 1024),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const contents: Buffer[] = [];
+    let offset = 0;
+    for (const base of bases) {
+      const headerEnd = output.indexOf(10, offset);
+      if (headerEnd < 0) throw Error("Review base content identity changed");
+      const [oid, type, size] = output.subarray(offset, headerEnd).toString("utf8").split(" ");
+      const start = headerEnd + 1;
+      const end = start + base.bytes;
+      if (
+        oid !== base.gitBlobId ||
+        type !== "blob" ||
+        Number(size) !== base.bytes ||
+        output[end] !== 10
+      )
+        throw Error("Review base content identity changed");
+      contents.push(output.subarray(start, end));
+      offset = end + 1;
+    }
+    if (offset !== output.length) throw Error("Review base content identity changed");
+    return contents;
+  }
+
+  private whitespaceAttributes(c: Contract, files: string[]): string[] {
+    if (!files.length) return [];
+    const fields = execFileSync(
+      this.executable,
+      ["check-attr", "-z", "whitespace", "--", ...files],
+      { cwd: c.worktree, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    ).split("\0");
+    if (fields.length !== files.length * 3 + 1 || fields.at(-1) !== "")
+      throw Error("CRLF_CHECK_ATTRIBUTES_UNAVAILABLE");
+    const values = new Map<string, string>();
+    for (let index = 0; index < files.length * 3; index += 3) {
+      if (fields[index + 1] !== "whitespace" || values.has(fields[index]))
+        throw Error("CRLF_CHECK_ATTRIBUTES_UNAVAILABLE");
+      values.set(fields[index], fields[index + 2]);
+    }
+    return files.map((file) => {
+      const value = values.get(file);
+      if (value === undefined) throw Error("CRLF_CHECK_ATTRIBUTES_UNAVAILABLE");
+      return value;
+    });
   }
 
   private checkDiff(c: Contract, files: string[]) {

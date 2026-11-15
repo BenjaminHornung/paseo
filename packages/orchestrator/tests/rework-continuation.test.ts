@@ -225,6 +225,8 @@ test("CRLF checks preserve existing byte conventions and real whitespace policy"
   writeFileSync(file, "class Original {}\r\n");
   const lfFile = path.join(root, "existing-lf.cs");
   writeFileSync(lfFile, "class OriginalLf {}\n");
+  const attributedFile = path.join(root, "batch-attr.cs");
+  writeFileSync(attributedFile, "class Attributed {}\r\n");
   runGit(git, ["add", "."], root);
   runGit(git, ["commit", "-m", "existing CRLF"], root);
   const contract = contractSchema.parse({
@@ -294,6 +296,21 @@ test("CRLF checks preserve existing byte conventions and real whitespace policy"
   runGit(git, ["config", "--unset", "core.whitespace"], root);
   writeFileSync(path.join(root, ".gitattributes"), "existing.cs whitespace=trailing-space\n");
   assert.notEqual(new Git(git).snapshot(contract).diffCheckExit, 0, "path policy wins");
+  // Both CRLF files change in one snapshot: the attribute-marked file stays unqualified.
+  writeFileSync(path.join(root, ".gitattributes"), "batch-attr.cs whitespace=trailing-space\n");
+  writeFileSync(file, source);
+  writeFileSync(attributedFile, "class Attributed {}\r\nclass Added {}\r\n");
+  assert.notEqual(
+    new Git(git).snapshot(contract).diffCheckExit,
+    0,
+    "a whitespace attribute disqualifies one CRLF file in a batch",
+  );
+  writeFileSync(path.join(root, ".gitattributes"), "");
+  assert.equal(
+    new Git(git).snapshot(contract).diffCheckExit,
+    0,
+    "uniform CRLF files qualify together in one batch",
+  );
 });
 
 test("unresolved reviewer findings rework before visual acceptance and checkpoint before same-priority restart", async (t) => {
