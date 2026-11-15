@@ -25,14 +25,30 @@ const mainSchema = z.object({
     })
     .optional(),
 });
-const automationSchema = z.object({ mains: z.array(mainSchema).max(100) });
+const automationSchema = z.object({
+  mains: z.array(mainSchema).max(100),
+  advisory: z.boolean().optional(),
+});
 export type AutomationMain = z.infer<typeof mainSchema>;
 
-export function readAutomation(root = appRoot): { mains: AutomationMain[] } {
+export function readAutomation(root = appRoot): z.infer<typeof automationSchema> {
   const file = path.join(root, "state/automation.json");
   return existsSync(file)
     ? automationSchema.parse(JSON.parse(readFileSync(file, "utf8")))
     : { mains: [] };
+}
+// Kept beside mains so editAutomation's parse does not strip it. Not part of configSchema:
+// configs are pinned and hashed per task, and the switch must reach tasks already running.
+export function advisoryMode(root = appRoot): boolean {
+  return readAutomation(root).advisory === true;
+}
+export function setAdvisoryMode(on: boolean, root = appRoot): void {
+  withSettingsLock(root, () => {
+    const data = readAutomation(root);
+    data.advisory = on;
+    automationSchema.parse(data);
+    atomicWrite(path.join(root, "state/automation.json"), JSON.stringify(data));
+  });
 }
 export function editAutomation(
   agentId: string,

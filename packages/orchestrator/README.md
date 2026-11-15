@@ -218,6 +218,16 @@ This path does not reload closed agents, change check timeouts, ignore job child
 or reinterpret exit 124 as success. An operator must first reopen the same existing
 agent through the supported lifecycle when necessary.
 
+Advisory mode (`advisory on|off|status`, state in `state/automation.json`) lets the
+controller issue that grant itself when main asks to continue an exhausted terminal
+repair. Every other gate stays hard: stop, lease, budgets, open checks/reviews, diff,
+scope, check and session binding. The grant reason is `ADVISORY_MAIN_REQUEST:` and the
+continuation result carries `hint: "ADVISORY_OPERATOR_GRANT_SKIPPED"`. The default is off.
+An advisory grant that was issued but not yet consumed stays consumable even after the
+switch is turned off; while it exists, an operator cannot issue a different grant for
+the same predecessor (`TERMINAL_REPAIR_ALREADY_GRANTED`), for example one with
+`additionalAllowedPath`.
+
 Under **Rollen & Modelle → Reihenfolge je Rolle & Arbeitsart → UI-Implementierung**,
 choose existing routes and order their priority, including routes created from Advanced
 profiles. The optional `roleRoutes.ui` list applies to mutating implementation packages

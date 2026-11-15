@@ -26,12 +26,12 @@ import path from "node:path";
 import { CurrentPaseoCompletion, type CompletionCapability } from "./completion.ts";
 import { Decisions, type DecisionSelector } from "./decisions.ts";
 import { assertTaskAssessment, hasAuditedOwnerApproval, observeOperatorWake } from "./intake.ts";
-import { taskDispatchAllowed } from "./automation.ts";
+import { advisoryMode, taskDispatchAllowed } from "./automation.ts";
 import { appRoot } from "./settings-files.ts";
 import { z } from "zod";
 import { isClaudeProvider } from "../paseo-plugin/shared/providers.ts";
 import type { ContinuationResult } from "../paseo-plugin/shared/continuation.ts";
-import type { TerminalRepairRequest } from "./terminal-repair.ts";
+import type { TerminalRepairGrant, TerminalRepairRequest } from "./terminal-repair.ts";
 import {
   verificationRecoveryRequestSchema,
   verificationRecovery,
@@ -105,6 +105,9 @@ interface ContextCheckpointInput {
   snapshot: Snapshot;
 }
 const taskCheckpointPrefix = "TASK_CHECKPOINT:";
+// Recorded as the grant reason so the advisory path is visible in the event log.
+const ADVISORY_REPAIR_REASON =
+  "ADVISORY_MAIN_REQUEST: main asked to continue an exhausted repair in advisory mode";
 const taskCheckpointSchema = z.strictObject({
   version: z.literal(1),
   taskKey: z.string().min(1),
@@ -133,6 +136,7 @@ export class Engine {
   readonly completion: CompletionCapability;
   readonly decisions: DecisionSelector;
   readonly canDispatch: (key: string) => boolean;
+  readonly advisory: () => boolean;
   constructor(
     store: Store,
     config: Config,
@@ -140,6 +144,7 @@ export class Engine {
     completion?: CompletionCapability,
     decisions?: DecisionSelector,
     canDispatch: (key: string) => boolean = taskDispatchAllowed,
+    advisory: () => boolean = advisoryMode,
   ) {
     this.store = store;
     this.config = config;
@@ -151,6 +156,7 @@ export class Engine {
     this.completion = completion ?? new CurrentPaseoCompletion(provider);
     this.decisions = decisions ?? new Decisions(store);
     this.canDispatch = canDispatch;
+    this.advisory = advisory;
   }
   private context(key: string): Engine {
     const row = this.store.task(key);
@@ -168,6 +174,7 @@ export class Engine {
           this.completion,
           this.decisions,
           this.canDispatch,
+          this.advisory,
         );
   }
   private async observed(s: Snapshot | null): Promise<Snapshot | null> {
@@ -348,9 +355,74 @@ export class Engine {
     repair: { diffHash: string; findings: unknown } | undefined,
     findings: NonNullable<ReviewResult["findings"]>,
   ): Promise<ContinuationResult> {
+    let grant = this.store.terminalRepairGrant(predecessor.task_key);
+    if (!grant || grant.predecessorAttemptId !== predecessor.id) {
+      if (!this.advisory()) throw Error("TERMINAL_REPAIR_GRANT_REQUIRED");
+      grant = await this.advisoryRepairGrant(predecessor, contract, repair);
+    }
+    const result = await this.continueGrantedRepair(predecessor, contract, repair, findings, grant);
+    return grant.reason === ADVISORY_REPAIR_REASON
+      ? { ...result, hint: "ADVISORY_OPERATOR_GRANT_SKIPPED" }
+      : result;
+  }
+  // Advisory mode: the controller issues the grant that an operator would otherwise issue.
+  // Every binding check below is the same one the store repeats on approval.
+  private async advisoryRepairGrant(
+    predecessor: Attempt,
+    contract: Contract,
+    repair: { diffHash: string; findings: unknown } | undefined,
+  ): Promise<TerminalRepairGrant> {
+    const findings = reviewFindingsSchema.parse(repair?.findings ?? []);
+    const scope = this.store.scopePaths(contract);
+    if (
+      !repair ||
+      !findings.length ||
+      findings.some((finding) => !scope.some((allowed) => pathInScope(finding.file, allowed)))
+    )
+      throw Error("CONTINUATION_REVIEW_BINDING_MISMATCH");
+    const agentId = predecessor.agent_id;
+    if (!agentId) throw Error("TERMINAL_REPAIR_SESSION_CHANGED");
+    await this.provider.refresh(agentId);
+    const nativeSessionId = this.provider.nativeSessionId?.(agentId);
+    if (!nativeSessionId) throw Error("TERMINAL_REPAIR_SESSION_CHANGED");
+    if (this.git.snapshot(contract).diffHash !== repair.diffHash)
+      throw Error("TERMINAL_REPAIR_DIFF_CHANGED");
+    const facts = this.store.advisoryRepairFacts(predecessor);
+    let rejectedReview: TerminalRepairRequest["rejectedReview"];
+    if (facts.review) {
+      await this.provider.refresh(facts.review.reviewerAgentId);
+      const reviewerNativeSessionId = this.provider.nativeSessionId?.(facts.review.reviewerAgentId);
+      if (!reviewerNativeSessionId) throw Error("TERMINAL_REPAIR_REVIEWER_NOT_SETTLED");
+      rejectedReview = { ...facts.review, reviewerNativeSessionId };
+    }
+    const request: TerminalRepairRequest = {
+      predecessorAttemptId: predecessor.id,
+      predecessorFence: predecessor.fence,
+      agentId,
+      nativeSessionId,
+      contractHash: facts.contractHash,
+      configHash: facts.configHash,
+      diffHash: repair.diffHash,
+      checkEvidenceSha256: facts.checkEvidenceSha256,
+      scopeRevision: facts.scopeRevision,
+      checkRevision: facts.checkRevision,
+      ...(rejectedReview ? { rejectedReview } : {}),
+    };
+    const hint = `ADVISORY_HINT:${JSON.stringify({ code: "OPERATOR_GRANT_SKIPPED", rework: facts.rework, maxRework: facts.maxRework })}`;
+    this.store.approveTerminalRepair(predecessor.task_key, request, ADVISORY_REPAIR_REASON, () =>
+      this.store.event(hint, predecessor.id),
+    );
     const grant = this.store.terminalRepairGrant(predecessor.task_key);
-    if (!grant || grant.predecessorAttemptId !== predecessor.id)
-      throw Error("TERMINAL_REPAIR_GRANT_REQUIRED");
+    if (!grant) throw Error("TERMINAL_REPAIR_GRANT_REQUIRED");
+    return grant;
+  }
+  private async continueGrantedRepair(
+    predecessor: Attempt,
+    contract: Contract,
+    repair: { diffHash: string; findings: unknown } | undefined,
+    findings: NonNullable<ReviewResult["findings"]>,
+    grant: TerminalRepairGrant,
+  ): Promise<Extract<ContinuationResult, { continued: false }>> {
     const repairPaths = this.store.scopePaths(contract);
     if (grant.additionalAllowedPath !== undefined) repairPaths.push(grant.additionalAllowedPath);
     if (

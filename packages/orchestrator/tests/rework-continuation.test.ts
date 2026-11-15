@@ -1917,6 +1917,7 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
           undefined,
           undefined,
           () => dispatchAllowed,
+          () => false,
         );
         const repair = {
           diffHash: originalDiff.diffHash,
@@ -1926,6 +1927,112 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
           () => repairEngine.continueExisting(taskKey, repair),
           /TERMINAL_REPAIR_GRANT_REQUIRED/,
         );
+        // Advisory mode: each scenario runs on a copy of this pristine fixture.
+        const advisoryCopy = async (name: string) => {
+          const file = path.join(root, `terminal-repair-advisory-${name}.sqlite`);
+          await state.backupTo(file);
+          return new Store(file);
+        };
+        const countEvents = (copy: Store, kind: string) =>
+          (
+            copy.db.prepare("SELECT COUNT(*) AS n FROM events WHERE kind LIKE ?").get(kind) as {
+              n: number;
+            }
+          ).n;
+        const advisoryRepair = {
+          diffHash: originalDiff.diffHash,
+          findings: [{ ...reviewerFinding, file: "src/manifest.ts" }],
+        };
+        const advisoryEngine = (copy: Store, engineConfig = repairConfig, advisory = true) =>
+          new Engine(
+            copy,
+            engineConfig,
+            repairProvider,
+            undefined,
+            undefined,
+            () => dispatchAllowed,
+            () => advisory,
+          );
+        const sentBeforeAdvisory = sent,
+          reviewsBeforeAdvisory = reviews.length;
+        const advisoryPending = {
+          agentId: "writer-old",
+          continued: false,
+          delivery: "pending",
+          attemptId: `${taskKey}/4`,
+          hint: "ADVISORY_OPERATOR_GRANT_SKIPPED",
+        };
+        const offStore = await advisoryCopy("off");
+        try {
+          await assert.rejects(
+            () =>
+              advisoryEngine(offStore, repairConfig, false).continueExisting(
+                taskKey,
+                advisoryRepair,
+              ),
+            /TERMINAL_REPAIR_GRANT_REQUIRED/,
+          );
+          assert.equal(countEvents(offStore, "ADVISORY_HINT:%"), 0);
+          assert.equal(countEvents(offStore, "OPERATOR_TERMINAL_REPAIR:%"), 0);
+        } finally {
+          offStore.close();
+        }
+        const onStore = await advisoryCopy("on");
+        try {
+          assert.deepEqual(
+            await advisoryEngine(onStore).continueExisting(taskKey, advisoryRepair),
+            advisoryPending,
+          );
+          assert.equal(countEvents(onStore, "ADVISORY_HINT:%"), 1);
+          assert.match(
+            onStore.terminalRepairGrant(taskKey)?.reason ?? "",
+            /^ADVISORY_MAIN_REQUEST:/,
+          );
+          assert.equal(onStore.latest(taskKey)?.fence, 4);
+          assert.equal(onStore.latest(taskKey)?.agent_id, "writer-old");
+          assert.equal(sent, sentBeforeAdvisory, "the successor is delivered by the normal tick");
+          assert.equal(reviews.length, reviewsBeforeAdvisory, "no replacement worker is created");
+        } finally {
+          onStore.close();
+        }
+        const stoppedStore = await advisoryCopy("stopped");
+        try {
+          stoppedStore.stop(true);
+          await assert.rejects(
+            () => advisoryEngine(stoppedStore).continueExisting(taskKey, advisoryRepair),
+            /CONTINUATION_NOT_AUTHORIZED/,
+          );
+          assert.equal(countEvents(stoppedStore, "ADVISORY_HINT:%"), 0);
+          assert.equal(stoppedStore.latest(taskKey)?.id, oldId);
+        } finally {
+          stoppedStore.close();
+        }
+        const lockedStore = await advisoryCopy("locked");
+        try {
+          lockedStore.db
+            .prepare("INSERT INTO check_locks VALUES(?,?)")
+            .run(repairContract.worktree, oldId);
+          await assert.rejects(
+            () => advisoryEngine(lockedStore).continueExisting(taskKey, advisoryRepair),
+            /TERMINAL_REPAIR_WORK_IN_PROGRESS/,
+          );
+          assert.equal(countEvents(lockedStore, "ADVISORY_HINT:%"), 0);
+          assert.equal(lockedStore.latest(taskKey)?.id, oldId);
+        } finally {
+          lockedStore.close();
+        }
+        const pinnedStore = await advisoryCopy("pinned");
+        try {
+          // The engine's live config differs from the pinned one; context() must carry the switch.
+          const liveConfig = configSchema.parse({ ...repairConfig, maxRework: 1 });
+          assert.deepEqual(
+            await advisoryEngine(pinnedStore, liveConfig).continueExisting(taskKey, advisoryRepair),
+            advisoryPending,
+          );
+          assert.equal(pinnedStore.terminalRepairGrant(taskKey)?.configHash, hash(repairConfig));
+        } finally {
+          pinnedStore.close();
+        }
         const request = {
           predecessorAttemptId: oldId,
           predecessorFence: 3,
@@ -2016,6 +2123,38 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
           rejected.db
             .prepare("UPDATE review_runs SET result_json=? WHERE attempt_id=?")
             .run(resultJson, oldId);
+          // Advisory main path on the same rejected-review fixture, before any operator grant.
+          const rejectedAdvisoryFile = path.join(
+            root,
+            "terminal-repair-advisory-rejected-review.sqlite",
+          );
+          await rejected.backupTo(rejectedAdvisoryFile);
+          const rejectedAdvisory = new Store(rejectedAdvisoryFile);
+          try {
+            assert.deepEqual(
+              await advisoryEngine(rejectedAdvisory).continueExisting(taskKey, {
+                diffHash: originalDiff.diffHash,
+                findings: [reviewerFinding],
+              }),
+              advisoryPending,
+            );
+            const advisoryGrant = rejectedAdvisory.terminalRepairGrant(taskKey);
+            assert.match(advisoryGrant?.reason ?? "", /^ADVISORY_MAIN_REQUEST:/);
+            assert.equal(advisoryGrant?.rejectedReview?.reviewerAgentId, "rejected-reviewer");
+            assert.ok(advisoryGrant?.rejectedReview?.reviewerNativeSessionId);
+            assert.equal(
+              (
+                rejectedAdvisory.db
+                  .prepare(
+                    "SELECT COUNT(*) AS n FROM events WHERE kind LIKE 'ADVISORY_HINT:%' AND attempt_id=?",
+                  )
+                  .get(oldId) as { n: number }
+              ).n,
+              1,
+            );
+          } finally {
+            rejectedAdvisory.close();
+          }
           rejected.approveTerminalRepair(
             taskKey,
             rejectedRequest,

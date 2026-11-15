@@ -791,6 +791,36 @@ export class Store {
     )
       throw Error("TERMINAL_REPAIR_WORK_IN_PROGRESS");
   }
+  // Read-only evidence for the controller's advisory grant; the grant itself is still
+  // written and verified by approveTerminalRepair.
+  advisoryRepairFacts(attempt: Attempt) {
+    const task = this.task(attempt.task_key);
+    const checks = this.db.prepare("SELECT * FROM turn_checks WHERE attempt_id=?").get(attempt.id);
+    if (!task || !checks) throw Error("TERMINAL_REPAIR_CHECK_EVIDENCE_CHANGED");
+    const contract: Contract = JSON.parse(task.contract_json),
+      config: Config = JSON.parse(task.config_json);
+    const run = this.db
+      .prepare("SELECT * FROM review_runs WHERE attempt_id=?")
+      .get(attempt.id) as unknown as TerminalRepairReviewRow | undefined;
+    const review =
+      run?.state === "DONE" && run.result_json && run.agent_id
+        ? {
+            requestKey: run.request_key,
+            reviewerAgentId: run.agent_id,
+            resultSha256: createHash("sha256").update(run.result_json).digest("hex"),
+          }
+        : undefined;
+    return {
+      contractHash: task.contract_hash,
+      configHash: task.config_hash,
+      checkEvidenceSha256: createHash("sha256").update(String(checks.result_json)).digest("hex"),
+      scopeRevision: this.scopeRevision(contract),
+      checkRevision: this.checkRevision(contract),
+      rework: task.rework,
+      maxRework: config.maxRework,
+      review,
+    };
+  }
   approveTerminalRepair(
     key: string,
     input: unknown,

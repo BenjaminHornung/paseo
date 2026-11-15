@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export type ContinuationResult =
   | { agentId: string; continued: true }
-  | { agentId: string; continued: false; delivery: "pending"; attemptId: string };
+  | { agentId: string; continued: false; delivery: "pending"; attemptId: string; hint?: string };
 
 export const reviewFindingsSchema = z
   .array(

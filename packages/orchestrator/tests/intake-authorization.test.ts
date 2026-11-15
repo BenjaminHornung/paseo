@@ -7,8 +7,10 @@ import { createHash } from "node:crypto";
 import { createPaseoApi, type PaseoAgentTimelineRefetchOptions } from "@getpaseo/client";
 import { AgentTimelineEntryPayloadSchema } from "@getpaseo/protocol/messages";
 import {
+  advisoryMode,
   editAutomation,
   readAutomation,
+  setAdvisoryMode,
   taskDispatchAllowed,
   workflowStatus,
 } from "../src/automation.ts";
@@ -4302,4 +4304,29 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
       }
     },
   );
+});
+
+test("advisory switch survives automation edits in a temporary root", () => {
+  const root = mkdtempSync(path.join(process.cwd(), ".advisory-switch-test-"));
+  try {
+    setAdvisoryMode(true, root);
+    editAutomation(
+      "advisory-main",
+      () => ({
+        agentId: "advisory-main",
+        directory: root,
+        state: "off",
+        requestId: "",
+        taskKeys: [],
+        wakeCount: 0,
+        wakeBaseline: {},
+      }),
+      root,
+    );
+    assert.equal(advisoryMode(root), true);
+    setAdvisoryMode(false, root);
+    assert.equal(advisoryMode(root), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

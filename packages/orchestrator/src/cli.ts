@@ -13,7 +13,12 @@ import { Decisions } from "./decisions.ts";
 import { CredentialVault } from "./secrets.ts";
 import { settingsOperation } from "./settings.ts";
 import { randomUUID } from "node:crypto";
-import { automaticTaskKeys, taskDispatchAllowed } from "./automation.ts";
+import {
+  advisoryMode,
+  automaticTaskKeys,
+  setAdvisoryMode,
+  taskDispatchAllowed,
+} from "./automation.ts";
 import { acquireWatchLease } from "./watch-lock.ts";
 import { intakeConfirmationSchema } from "../paseo-plugin/shared/intake-confirmation.ts";
 import { assertTaskAssessment, approveIntakeModelAnswer } from "./intake.ts";
@@ -171,6 +176,9 @@ try {
         }),
       );
     else throw Error("AUTOMATION_ARGUMENT_REQUIRED");
+  } else if (command === "advisory" && ["on", "off", "status"].includes(subcommand)) {
+    if (subcommand !== "status") setAdvisoryMode(subcommand === "on", root);
+    print({ advisory: advisoryMode(root) });
   } else if (command === "decisions" && subcommand === "test") {
     print(
       await settingsOperation({ operation: "test-decisions", nonce: argument ?? randomUUID() }),
