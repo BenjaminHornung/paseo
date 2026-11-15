@@ -2131,8 +2131,18 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
           await rejected.backupTo(rejectedAdvisoryFile);
           const rejectedAdvisory = new Store(rejectedAdvisoryFile);
           try {
+            // The rejected-review claim re-reads the loaded reviewer, like the production provider.
+            const rejectedAdvisoryEngine = new Engine(
+              rejectedAdvisory,
+              repairConfig,
+              { ...repairProvider, loadedAgent: (id) => sdkProvider.loadedAgent(id) },
+              undefined,
+              undefined,
+              () => dispatchAllowed,
+              () => true,
+            );
             assert.deepEqual(
-              await advisoryEngine(rejectedAdvisory).continueExisting(taskKey, {
+              await rejectedAdvisoryEngine.continueExisting(taskKey, {
                 diffHash: originalDiff.diffHash,
                 findings: [reviewerFinding],
               }),
