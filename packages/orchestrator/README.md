@@ -106,6 +106,13 @@ input or missing task-specific owner approval pauses the existing revision witho
 changing its verdict, repair counter or lease. After legitimate clarification, the
 same revision can finish normally; this does not reopen previously failed attempts.
 
+Check preparation failures proven to precede supervisor startup release only their
+own still-bound verification lock and record a static reason. They produce no check
+result. A possible process start without confirmed quiescence retains its lock;
+historical unbound locks cannot be released by this prospective cleanup. Normal
+checks retain no runtime deadline and resume through regular observation after the
+runtime binding is corrected.
+
 An exhausted task (`BLOCKED`, latest attempt `FAILED`) cannot be resumed by an agent.
 
 An unchanged pre-review failure caused solely by the old CRLF checker can use the

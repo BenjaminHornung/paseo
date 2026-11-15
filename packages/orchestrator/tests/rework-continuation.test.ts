@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import path from "node:path";
 import { rm } from "node:fs/promises";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { Engine } from "../src/engine.ts";
 import {
   canonicalPath,
@@ -653,6 +654,179 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
   assert.equal(workerFeedback.includes(reviewerFinding.problem), true);
   assert.equal(store.latest(taskKey)?.route_json, JSON.stringify(writerRoute));
   store.close();
+
+  await t.test(
+    "check preparation releases only startless owned verification locks",
+    async (checksTest) => {
+      for (const scenario of ["missing-supervisor", "unknown-supervisor"] as const) {
+        await checksTest.test(scenario, async () => {
+          const id = `${taskKey}/4`;
+          const file = path.join(root, `${scenario}.sqlite`);
+          const started = path.join(root, `${scenario}-started`);
+          const built = path.join(root, `${scenario}-built`);
+          const runtime = path.join(root, `${scenario}-runtime`);
+          mkdirSync(path.join(runtime, "scripts"), { recursive: true });
+          writeFileSync(
+            path.join(runtime, "scripts/check-job.ps1"),
+            `[IO.File]::WriteAllText('${started.replaceAll("'", "''")}', 'started')\nWrite-Output 'missing job result'\n`,
+          );
+          const c = contractSchema.parse({
+            ...contract,
+            uiChanged: false,
+            checks: {
+              build: [
+                process.execPath,
+                "-e",
+                `require('node:fs').writeFileSync(${JSON.stringify(built)},'built')`,
+              ],
+              test: [process.execPath, "--version"],
+            },
+          });
+          const state = new Store(file);
+          try {
+            state.db
+              .prepare("INSERT INTO workflows VALUES(?,?,?,?)")
+              .run(c.workflowId, repoPath, "", hash(config));
+            state.db
+              .prepare(
+                "INSERT INTO tasks(key,workflow_id,contract_json,contract_hash,config_hash,config_json,state,rework) VALUES(?,?,?,?,?,?,'RUNNING',4)",
+              )
+              .run(
+                taskKey,
+                c.workflowId,
+                JSON.stringify(c),
+                hash(c),
+                hash(config),
+                JSON.stringify(config),
+              );
+            state.db
+              .prepare(
+                "INSERT INTO attempts(id,task_key,sequence,status,route_json,agent_id,fence,session_key,created_ms) VALUES(?,?,4,'RUNNING',?,?,4,'preparation-session',?)",
+              )
+              .run(id, taskKey, JSON.stringify(writerRoute), "writer-old", Date.now());
+            state.db
+              .prepare("INSERT INTO leases VALUES(?,?,4,'HELD',?)")
+              .run(worktree, id, Date.now());
+            const lease = state.db.prepare("SELECT * FROM leases").get();
+            const observed = await provider.refresh("writer-old");
+            assert.ok(observed);
+            const probe = `
+            import {Engine} from ${JSON.stringify(pathToFileURL(path.join(codeRoot, "src/engine.ts")).href)};
+            import {Store} from ${JSON.stringify(pathToFileURL(path.join(codeRoot, "src/store.ts")).href)};
+            const state=new Store(process.argv[1]),id=process.argv[2];
+            const task=state.task(state.attempt(id).task_key);
+            let errorKind=null,guard=null;
+            const provider={foregroundEvidence:async()=>({complete:true,traceHash:'f'.repeat(64),toolCount:1})};
+            try {await new Engine(state,JSON.parse(task.config_json),provider).acceptSnapshot(id,${JSON.stringify(observed)});}
+            catch(error){
+              guard=/^[A-Za-z _-]+$/.test(error.message)?error.message:null;
+              errorKind=error.code==='ENOENT'?'ENOENT':
+                error.message==='CHECK_PREPARATION_FAILED'?'CHECK_PREPARATION_FAILED':
+                error.message==='Check processes not confirmed terminated'?'CHECK_PROCESSES_UNKNOWN':'UNEXPECTED';
+            }
+            state.close();process.stdout.write(JSON.stringify({errorKind,guard}));
+          `;
+            const result = spawnSync(
+              process.execPath,
+              ["--input-type=module", "-e", probe, file, id],
+              {
+                cwd: process.cwd(),
+                encoding: "utf8",
+                windowsHide: true,
+                env: {
+                  ...process.env,
+                  PASEO_ORCHESTRATOR_ROOT: runtime,
+                  PASEO_ORCHESTRATOR_DATA_ROOT: runtime,
+                  PASEO_ORCHESTRATOR_POWERSHELL:
+                    scenario === "missing-supervisor"
+                      ? path.join(runtime, "absent-pwsh.exe")
+                      : powershellExecutable,
+                },
+              },
+            );
+            assert.equal(result.status, 0, "the isolated controller must report its check outcome");
+            const outcome = JSON.parse(result.stdout) as {
+              errorKind: string;
+              guard: string | null;
+            };
+            const locks = state.db.prepare("SELECT count(*) AS n FROM check_locks").get()!.n;
+            if (scenario === "missing-supervisor") {
+              assert.ok(
+                ["ENOENT", "CHECK_PREPARATION_FAILED"].includes(outcome.errorKind),
+                outcome.guard ?? "unexpected check guard",
+              );
+              assert.equal(existsSync(started), false);
+              assert.equal(
+                locks,
+                0,
+                "a proven prelaunch failure must not strand the verification lock",
+              );
+              assert.equal(
+                state.db
+                  .prepare(
+                    "SELECT count(*) AS n FROM events WHERE kind='CHECK_PREPARATION_NOT_STARTED:supervisor'",
+                  )
+                  .get()!.n,
+                1,
+              );
+            } else {
+              assert.equal(
+                outcome.errorKind,
+                "CHECK_PROCESSES_UNKNOWN",
+                outcome.guard ?? "unexpected check guard",
+              );
+              assert.equal(
+                existsSync(started),
+                true,
+                "the supervisor process actually crossed the launch boundary",
+              );
+              assert.equal(locks, 1, "an unconfirmed postlaunch outcome must remain locked");
+              assert.equal(
+                state.db
+                  .prepare(
+                    "SELECT count(*) AS n FROM events WHERE kind LIKE 'CHECK_PREPARATION_NOT_STARTED:%'",
+                  )
+                  .get()!.n,
+                0,
+              );
+            }
+            assert.equal(existsSync(built), false);
+            assert.equal(state.db.prepare("SELECT count(*) AS n FROM turn_checks").get()!.n, 0);
+            assert.equal(state.db.prepare("SELECT count(*) AS n FROM review_runs").get()!.n, 0);
+            const currentLease = state.db.prepare("SELECT * FROM leases").get()!;
+            assert.equal(currentLease.worktree, lease!.worktree);
+            assert.equal(currentLease.attempt_id, lease!.attempt_id);
+            assert.equal(currentLease.fence, lease!.fence);
+            assert.equal(currentLease.state, "SUSPECT");
+            assert.equal(state.attempt(id).fence, 4);
+            assert.equal(state.task(taskKey)?.rework, 4);
+            assert.equal(state.db.prepare("SELECT count(*) AS n FROM attempts").get()!.n, 1);
+            if (scenario === "missing-supervisor") {
+              const resumed = await provider.refresh("writer-old");
+              assert.ok(resumed);
+              await new Engine(state, config, provider).acceptSnapshot(id, resumed);
+              assert.equal(
+                existsSync(built),
+                true,
+                "normal observation resumes real checks on the same attempt",
+              );
+              const checked = state.db
+                .prepare("SELECT result_json FROM turn_checks WHERE attempt_id=?")
+                .get(id)!;
+              assert.equal(JSON.parse(String(checked.result_json)).build.quiescent, true);
+              assert.equal(JSON.parse(String(checked.result_json)).build.exit, 0);
+              assert.equal(JSON.parse(String(checked.result_json)).test.quiescent, true);
+              assert.equal(JSON.parse(String(checked.result_json)).test.exit, 0);
+              assert.equal(state.latest(taskKey)!.id, id);
+              assert.equal(state.task(taskKey)?.rework, 4);
+            }
+          } finally {
+            state.close();
+          }
+        });
+      }
+    },
+  );
 
   await t.test(
     "terminal invalid native review permits only bound same-worker repair and fresh review",

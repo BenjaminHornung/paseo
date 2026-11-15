@@ -1076,7 +1076,34 @@ export function failedLocalBrowserConnection(tool: unknown): boolean {
     return false;
   }
 }
+function failedConfluenceSearchResponse(tool: unknown): boolean {
+  return z
+    .object({
+      name: z.literal("atlassian_x_tention.confluence_search"),
+      status: z.literal("failed"),
+      error: z.strictObject({ message: z.literal("Tool call failed") }),
+      detail: z.strictObject({
+        type: z.literal("unknown"),
+        input: z.strictObject({ query: z.string().min(1), limit: z.literal(5) }),
+        output: z.strictObject({
+          content: z.tuple([
+            z.strictObject({
+              type: z.literal("text"),
+              text: z.literal(
+                "Error calling tool 'search': Error processing search results: Confluence search returned a malformed response missing the 'results' field",
+              ),
+            }),
+          ]),
+          structuredContent: z.null(),
+          _meta: z.null(),
+        }),
+      }),
+    })
+    .safeParse(tool).success;
+}
 export function completedNonExecutingMcp(tool: unknown): boolean {
+  // This exact failed reader response also completes the caller's observation.
+  if (failedConfluenceSearchResponse(tool)) return true;
   const parsed = z
     .object({
       name: z.string(),

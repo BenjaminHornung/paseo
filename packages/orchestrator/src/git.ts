@@ -528,6 +528,69 @@ export class Git {
   }
 }
 
+type CheckPreparationStage =
+  | "timeout"
+  | "command"
+  | "working-directory"
+  | "supervisor"
+  | "scratch"
+  | "request";
+
+export class CheckPreparationError extends Error {
+  readonly stage: CheckPreparationStage;
+
+  constructor(stage: CheckPreparationStage, cause: unknown) {
+    super("CHECK_PREPARATION_FAILED", { cause });
+    this.name = "CheckPreparationError";
+    this.stage = stage;
+  }
+}
+
+interface PreparedCheck {
+  supervisorExecutable: string;
+  cwd: string;
+  scratch: string;
+  request: string;
+}
+
+function prepareCheck(command: string[], cwd: string, timeoutMs: number): PreparedCheck {
+  let stage: CheckPreparationStage = "timeout";
+  try {
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 2147483647)
+      throw Error("Invalid diagnostic check timeout");
+    stage = "command";
+    const executable = localPath(command[0]);
+    for (const arg of command.slice(1)) {
+      const fileArgument = arg.match(/^[-/][^=]+=(.+)$/)?.[1] ?? arg;
+      if (/\.(?:[cm]?js|ts|ps1|exe|cmd|bat)$/i.test(fileArgument))
+        localPath(path.resolve(cwd, fileArgument));
+    }
+    if (/dotnet(?:\.exe)?$/i.test(executable) && command[1] === "test")
+      throw Error("Use Invoke-DotnetTest.ps1 launcher");
+    stage = "working-directory";
+    cwd = localPath(cwd);
+    stage = "supervisor";
+    const supervisorExecutable = localPath(powershellExecutable);
+    stage = "scratch";
+    const scratch = path.join(appRoot, "state/check-tmp");
+    mkdirSync(scratch, { recursive: true });
+    stage = "request";
+    const request = Buffer.from(
+      JSON.stringify({
+        command: [executable, ...command.slice(1)],
+        cwd,
+        timeoutMs,
+        controllerPid: process.pid,
+      }),
+    ).toString("base64");
+    return { supervisorExecutable, cwd, scratch, request };
+  } catch (cause) {
+    // This function performs no process calls. Only its failures prove that
+    // the supervisor was never started by this invocation.
+    throw new CheckPreparationError(stage, cause);
+  }
+}
+
 export function runCheck(
   command: string[],
   cwd: string,
@@ -544,43 +607,23 @@ export function runCheck(
     counts: { outcome: string; count: number }[];
   };
 } {
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 2147483647)
-    throw Error("Invalid diagnostic check timeout");
-  const executable = localPath(command[0]);
-  for (const arg of command.slice(1)) {
-    const fileArgument = arg.match(/^[-/][^=]+=(.+)$/)?.[1] ?? arg;
-    if (/\.(?:[cm]?js|ts|ps1|exe|cmd|bat)$/i.test(fileArgument))
-      localPath(path.resolve(cwd, fileArgument));
-  }
-  if (/dotnet(?:\.exe)?$/i.test(executable) && command[1] === "test")
-    throw Error("Use Invoke-DotnetTest.ps1 launcher");
-  cwd = localPath(cwd);
-  const scratch = path.join(appRoot, "state/check-tmp");
-  mkdirSync(scratch, { recursive: true });
-  const request = Buffer.from(
-    JSON.stringify({
-      command: [executable, ...command.slice(1)],
-      cwd,
-      timeoutMs,
-      controllerPid: process.pid,
-    }),
-  ).toString("base64");
+  const prepared = prepareCheck(command, cwd, timeoutMs);
   const r = spawnSync(
-    localPath(powershellExecutable),
+    prepared.supervisorExecutable,
     [
       "-NoProfile",
       "-NonInteractive",
       "-File",
       path.join(codeRoot, "scripts/check-job.ps1"),
       "-Request",
-      request,
+      prepared.request,
     ],
     {
-      cwd,
+      cwd: prepared.cwd,
       env: {
         ...process.env,
-        TMP: scratch,
-        TEMP: scratch,
+        TMP: prepared.scratch,
+        TEMP: prepared.scratch,
         MSBUILDDISABLENODEREUSE: "1",
         DOTNET_CLI_USE_MSBUILD_SERVER: "0",
         UseSharedCompilation: "false",

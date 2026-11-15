@@ -199,6 +199,7 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
         quota = false,
         timelineUnavailable = false,
         warning: { provider: string; level: string; message: string } | undefined,
+        reviewTool: object | undefined,
         warningAfterTurn = false,
         turnSequence: "single" | "two-turn" | "reappearing" | "missing" = "single",
         drift: "none" | "session" | "cursor" | "active-turn" = "none";
@@ -262,7 +263,18 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
               }),
             },
           });
-        return entries;
+        if (!reviewTool) return entries;
+        return [
+          {
+            provider: "codex",
+            turnId: "review-turn",
+            timestamp: "2026-11-13T20:00:00Z",
+            seqStart: 1,
+            seqEnd: 1,
+            item: reviewTool,
+          },
+          ...entries,
+        ];
       }
       // Only daemon transport is synthetic: ref(), wait/run, timeline refetch and
       // the per-handle current snapshot are the actual public SDK implementation.
@@ -297,7 +309,8 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
                 item: { type: "notification", level: warning.level, message: warning.message },
               }
             : undefined;
-          const firstSeq = notice && !warningAfterTurn ? 1 : 2;
+          const messageEntries = reviewMessageEntries();
+          const firstSeq = notice && !warningAfterTurn ? 1 : messageEntries[0].seqStart;
           return {
             agent:
               reads === 2 && drift === "active-turn"
@@ -317,7 +330,7 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
             endCursor: { epoch: "fixture-epoch", seq: headSeq },
             entries: [
               ...(notice && !warningAfterTurn ? [notice] : []),
-              ...reviewMessageEntries(),
+              ...messageEntries,
               ...(notice && warningAfterTurn ? [notice] : []),
             ],
           };
@@ -342,6 +355,68 @@ test("structured review accepts the observed SDK wrapper and rejects unbound or 
         "commentary cannot corrupt the final FAIL and its findings",
       );
       assert.equal((await new CurrentPaseoCompletion(provider).assess(recovered)).state, "VERIFY");
+      await caseContext.test(
+        "the exact terminal Confluence parser failure settles the caller and preserves FAIL/2",
+        async () => {
+          try {
+            const failedSearch = {
+              type: "tool_call",
+              callId: "failed-confluence-search",
+              name: "atlassian_x_tention.confluence_search",
+              status: "failed",
+              error: { message: "Tool call failed" },
+              detail: {
+                type: "unknown",
+                input: { query: "fixture documentation", limit: 5 },
+                output: {
+                  content: [
+                    {
+                      type: "text",
+                      text: "Error calling tool 'search': Error processing search results: Confluence search returned a malformed response missing the 'results' field",
+                    },
+                  ],
+                  structuredContent: null,
+                  _meta: null,
+                },
+              },
+            };
+            reviewTool = failedSearch;
+            reads = 0;
+            const settled = await provider.wait("reviewer");
+            assert.deepEqual(settled.reviewResult, failedReview);
+            assert.equal(
+              (await new CurrentPaseoCompletion(provider).assess(settled)).state,
+              "VERIFY",
+              "a returned exact Confluence parser failure cannot indefinitely pause the review",
+            );
+            for (const invalid of [
+              { ...failedSearch, name: "atlassian_x_tention.confluence_update_page" },
+              { ...failedSearch, status: "running" },
+              {
+                ...failedSearch,
+                detail: {
+                  ...failedSearch.detail,
+                  output: {
+                    ...failedSearch.detail.output,
+                    content: [{ type: "text", text: "Unobserved search failure" }],
+                  },
+                },
+              },
+            ]) {
+              reviewTool = invalid;
+              reads = 0;
+              const blocked = await provider.wait("reviewer");
+              assert.deepEqual(blocked.reviewResult, failedReview);
+              assert.equal(
+                (await new CurrentPaseoCompletion(provider).assess(blocked)).state,
+                "NEEDS_CONFIRMATION",
+              );
+            }
+          } finally {
+            reviewTool = undefined;
+          }
+        },
+      );
       reads = 0;
       assert.deepEqual(
         (await provider.run("reviewer", "synthetic fixture only")).reviewResult,

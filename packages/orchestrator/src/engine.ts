@@ -20,7 +20,7 @@ import type { Route } from "../starter/src/types.ts";
 import { Store, type Attempt, type ContinuationReviewBinding } from "./store.ts";
 import type { Discovery, Provider, Snapshot } from "./provider.ts";
 import { taskPrompt } from "./provider.ts";
-import { Git, runCheck } from "./git.ts";
+import { CheckPreparationError, Git, runCheck } from "./git.ts";
 import { readFileSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { CurrentPaseoCompletion, type CompletionCapability } from "./completion.ts";
@@ -1431,6 +1431,33 @@ export class Engine {
       }
     }
   }
+  private releaseCheckPreparationLock(a: Attempt, c: Contract, error: CheckPreparationError): void {
+    this.store.transaction(() => {
+      const current = this.store.attempt(a.id);
+      const task = this.store.task(a.task_key);
+      if (
+        this.store.latest(a.task_key)?.id !== a.id ||
+        current.task_key !== a.task_key ||
+        current.fence !== a.fence ||
+        current.agent_id !== a.agent_id ||
+        current.route_json !== a.route_json ||
+        current.session_key !== a.session_key ||
+        !["TURN_COMPLETE", "VERIFY"].includes(current.status) ||
+        task?.contract_hash !== hash(c) ||
+        task.config_hash !== hash(this.config)
+      )
+        return;
+      const released = this.store.db
+        .prepare(
+          `DELETE FROM check_locks WHERE worktree=? AND attempt_id=?
+           AND EXISTS(SELECT 1 FROM leases WHERE attempt_id=? AND fence=? AND state='HELD')`,
+        )
+        .run(c.worktree, a.id, a.id, a.fence);
+      if (released.changes === 1)
+        this.store.event(`CHECK_PREPARATION_NOT_STARTED:${error.stage}`, a.id);
+    });
+  }
+
   private runVerification(id: string, fresh = false) {
     this.recheckBindings(id);
     const recovery = this.recoveryBindings(id);
@@ -1493,7 +1520,8 @@ export class Engine {
     } catch (error) {
       // Binding checks happen before a process launch or after the preceding
       // synchronous supervised job settled. They do not leave an unknown job.
-      if (error instanceof Error && error.message.startsWith("CHECK_COMMAND_"))
+      if (error instanceof CheckPreparationError) this.releaseCheckPreparationLock(a, c, error);
+      else if (error instanceof Error && error.message.startsWith("CHECK_COMMAND_"))
         this.store.db
           .prepare("DELETE FROM check_locks WHERE worktree=? AND attempt_id=?")
           .run(c.worktree, id);
