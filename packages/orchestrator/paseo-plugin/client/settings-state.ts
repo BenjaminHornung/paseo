@@ -272,6 +272,7 @@ export function useSettingsState(initialTab: Tab) {
       return value as Awaited<ReturnType<typeof save>>;
     },
     onSuccess: (value, sent) => {
+      if (!mountedRef.current) return;
       const next = value as unknown as SettingsView;
       queryClient.setQueryData(["orchestrator-settings"], next);
       viewRef.current = next;
