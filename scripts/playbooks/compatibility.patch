@@ -120,3 +120,89 @@ index 50d4400..e6d2a32 100644
      this.armTimeout(this.store.get(runId)!, stepId);
      await this.archiveStepAgent(agentId);
      if (options.resuming) {
+diff --git a/server/store.ts b/server/store.ts
+index 2bb0983..0bd39a6 100644
+--- a/server/store.ts
++++ b/server/store.ts
+@@ -1,4 +1,5 @@
+ import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
++import { setTimeout as delay } from "node:timers/promises";
+ import { repairRun } from "./engine";
+ import { isDeepStrictEqual } from "node:util";
+ import path from "node:path";
+@@ -196,7 +197,20 @@ export class RunStore {
+     if (this.closed) return;
+     const file = path.join(this.dir, `${run.id}.json`);
+     const temp = `${file}.${process.pid}.tmp`;
+-    const done = writeFile(temp, `${JSON.stringify(run)}\n`, "utf8").then(() => rename(temp, file));
++    const done = writeFile(temp, `${JSON.stringify(run)}\n`, "utf8").then(async () => {
++      // Windows readers can briefly deny replacement. Keep the old complete snapshot and
++      // retry only the atomic rename; never unlink it or replay the mutation callback.
++      for (let retry = 0; ; retry += 1) {
++        try {
++          await rename(temp, file);
++          return;
++        } catch (error) {
++          const code = (error as NodeJS.ErrnoException).code;
++          if (process.platform !== "win32" || retry >= 10 || !["EPERM", "EACCES", "EBUSY"].includes(code ?? "")) throw error;
++          await delay(50);
++        }
++      }
++    });
+     this.writing.add(done);
+     try {
+       await done;
+diff --git a/server/store.windows.test.ts b/server/store.windows.test.ts
+new file mode 100644
+index 0000000..5977b53
+--- /dev/null
++++ b/server/store.windows.test.ts
+@@ -0,0 +1,48 @@
++import { spawn } from "node:child_process";
++import { once } from "node:events";
++import { mkdtemp, readFile, rm } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import path from "node:path";
++import { expect, it } from "vitest";
++import { newRun } from "./engine";
++import { loadPlaybooks } from "./loader";
++import { RunStore } from "./store";
++
++it.skipIf(process.platform !== "win32")("persists a run mutation after a temporary Windows reader lock", async () => {
++  const dir = await mkdtemp(path.join(tmpdir(), "playbooks-windows-store-"));
++  const store = new RunStore(dir);
++  let reader: ReturnType<typeof spawn> | undefined;
++  let readerEnded: Promise<unknown> | undefined;
++  try {
++    const entries = (await loadPlaybooks(path.resolve(__dirname, "..", "examples"))).entries;
++    const playbook = entries.find(entry => entry.id === "pr")!.playbook!;
++    const run = newRun({ id: "run_windows", playbook, workspaceId: "ws", workspaceDir: dir, projectId: "p", branch: null, managerAgentId: "manager", inputs: { request: "Check persistence" }, now: new Date().toISOString() });
++    await store.create(run);
++    const file = path.join(dir, "run_windows.json");
++    reader = spawn("pwsh.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", [
++      "$stream = [IO.File]::Open($env:PLAYBOOKS_LOCK_FILE, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)",
++      "try { [Console]::Out.WriteLine('locked'); Start-Sleep -Milliseconds 300 } finally { $stream.Dispose() }",
++    ].join("; ")], { env: { ...process.env, PLAYBOOKS_LOCK_FILE: file }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
++    readerEnded = once(reader, "close");
++    await new Promise<void>((resolve, reject) => {
++      let output = "";
++      reader!.once("error", reject);
++      reader!.once("close", () => reject(new Error("Reader closed before acquiring its lock")));
++      reader!.stdout!.on("data", chunk => { output += String(chunk); if (output.includes("locked")) resolve(); });
++    });
++
++    // The old complete snapshot stays readable while Windows temporarily forbids replacing it.
++    expect(JSON.parse(await readFile(file, "utf8")).id).toBe(run.id);
++    await store.mutate(run.id, current => { current.name = "Saved after the reader released its lock"; });
++    await readerEnded;
++    const reopened = new RunStore(dir);
++    await reopened.init();
++    expect(reopened.get(run.id)?.name).toBe("Saved after the reader released its lock");
++    expect(reopened.get(run.id)?.status).toBe("running");
++    await reopened.close();
++  } finally {
++    if (readerEnded) await readerEnded;
++    await store.close();
++    await rm(dir, { recursive: true, force: true });
++  }
++}, 10000);

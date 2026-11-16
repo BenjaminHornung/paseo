@@ -10,15 +10,21 @@ The automatic tiers use the existing Claude, Codex and DeepSeek Go subscriptions
 Paid OpenAI API profiles remain configured for their existing uses and are absent
 from the automatic tiers. Provider/model/mode/thinking are set per target. A target
 that reports quota exhaustion advances to the next target in its tier.
+Planning and review use Codex: the company Claude account blocks the injected
+Paseo MCP server through its enterprise policy. Keep that policy intact; this is
+not a quota failure and must not trigger retries through another Claude account.
 
 ## Pinned plugin and compatibility changes
 
 The local installation is based on `lerenn/paseo-playbooks` v0.115.2, upstream commit
 `47540935f9a3e738688174d5bd4bf31d67a1513d`. The adjacent
 [`compatibility.patch`](../scripts/playbooks/compatibility.patch) records the local
-changes: execute `.ps1` checks through PowerShell 7 on Windows and give replacement
-step agents a concrete predecessor reference for `get_agent_activity`. It includes
-the focused regression test for both PowerShell launch sites.
+changes: execute `.ps1` checks through PowerShell 7 on Windows, give replacement
+step agents a concrete predecessor reference for `get_agent_activity`, and retry
+atomic snapshot replacement briefly when a Windows reader holds the destination.
+It includes focused regression tests for both PowerShell launch sites and a real
+Windows file lock. The local commits are `d8bae7e83501f75d1fdff952e3e932e097b0faca`
+and `d2788280d558f0a3307d595cae8b93e7ca9bee43`; neither is pushed to upstream.
 
 A replacement uses the same attempt and checkout with a new native session. Its
 brief points to the predecessor's activity; it does not copy the entire transcript.
