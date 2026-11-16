@@ -223,10 +223,16 @@ controller issue that grant itself when main asks to continue an exhausted termi
 repair. Every other gate stays hard: stop, lease, budgets, open checks/reviews, diff,
 scope, check and session binding. The grant reason is `ADVISORY_MAIN_REQUEST:` and the
 continuation result carries `hint: "ADVISORY_OPERATOR_GRANT_SKIPPED"`. The default is off.
-An advisory grant that was issued but not yet consumed stays consumable even after the
-switch is turned off; while it exists, an operator cannot issue a different grant for
-the same predecessor (`TERMINAL_REPAIR_ALREADY_GRANTED`), for example one with
+An issued advisory grant that was not yet consumed stays consumable after the switch is
+turned off, unless its reviewer was unobserved (`advisory-unobserved`). Such a grant is
+not consumable once the switch is off, and while it exists an operator cannot issue a
+grant for the same predecessor (`TERMINAL_REPAIR_ALREADY_GRANTED`), for example one with
 `additionalAllowedPath`.
+
+`tick` and `recover` exit 0 even when single items fail. Each failure is recorded as a
+`TICK_FAILED:<CODE>` or `RECOVER_FAILED:<CODE>` event, once per hour; raw messages are
+never recorded (`UNCLASSIFIED`). While advisory mode is on, these appear in the status
+hints; while it is off, the status hint list is empty.
 
 Under **Rollen & Modelle → Reihenfolge je Rolle & Arbeitsart → UI-Implementierung**,
 choose existing routes and order their priority, including routes created from Advanced

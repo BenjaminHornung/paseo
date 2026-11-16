@@ -66,6 +66,12 @@ export const statusSchema = z.object({
   mainAgents: z.array(z.object({ agentId: z.string(), state: z.string() })).optional(),
   orchestrationVersion: z.number().optional(),
   writeAuthorization: z.object({ allowed: z.boolean(), reason: z.string() }).optional(),
+  advisory: z
+    .object({
+      enabled: z.boolean(),
+      hints: z.array(z.object({ sequence: z.number(), at: z.number(), code: z.string() })),
+    })
+    .optional(),
   mainInput: z
     .object({
       intakeId: z.string(),

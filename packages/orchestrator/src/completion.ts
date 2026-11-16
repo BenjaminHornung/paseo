@@ -48,8 +48,13 @@ export function nativeCompletionMatches(
  * or a recorded operator confirmation of the exact completed turn. */
 export class CurrentPaseoCompletion implements CompletionCapability {
   readonly provider: Pick<Provider, "foregroundEvidence">;
-  constructor(provider: Pick<Provider, "foregroundEvidence">) {
+  readonly advisory: () => boolean;
+  constructor(
+    provider: Pick<Provider, "foregroundEvidence">,
+    advisory: () => boolean = () => false,
+  ) {
     this.provider = provider;
+    this.advisory = advisory;
   }
   async assess(s: Snapshot): Promise<{ state: CompletionState; reason: string }> {
     if (s.status === "permission") return { state: "PERMISSION", reason: "provider-permission" };
@@ -59,16 +64,26 @@ export class CurrentPaseoCompletion implements CompletionCapability {
       return { state: "NEEDS_CONFIRMATION", reason: "session-outcome-unknown" };
     if (s.backgroundActive === true)
       return { state: "WAITING_PROCESSES", reason: "known-background-work-running" };
-    if (s.backgroundActive === null)
+    // Advisory mode turns unknown coverage and unreadable history into hints on a VERIFY
+    // (one more rework round at worst), never into a false completion.
+    // Reasons match store.completionReason (^[a-z-]{1,80}$) so the status view shows them.
+    const noCoverage = s.backgroundActive === null;
+    if (noCoverage && !this.advisory())
       return { state: "NEEDS_CONFIRMATION", reason: "process-coverage-unavailable" };
+    let unobserved = false;
     if (this.provider.foregroundEvidence) {
       const trace = await this.provider.foregroundEvidence(s.id, s.nativeCompletion);
-      if (!trace.complete)
+      unobserved = !trace.complete;
+      if (unobserved && !this.advisory())
         return {
           state: "NEEDS_CONFIRMATION",
           reason: "tool-history-incomplete-or-unobserved-work",
         };
     }
+    const hints: string[] = [];
+    if (unobserved) hints.push("unobserved-tools");
+    if (noCoverage) hints.push("no-process-coverage");
+    if (hints.length) return { state: "VERIFY", reason: `advisory-${hints.join("-")}` };
     return { state: "VERIFY", reason: "turn-and-known-work-complete" };
   }
 }

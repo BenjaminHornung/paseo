@@ -25,8 +25,10 @@ import { readFileSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { CurrentPaseoCompletion, type CompletionCapability } from "./completion.ts";
 import { Decisions, type DecisionSelector } from "./decisions.ts";
-import { assertTaskAssessment, hasAuditedOwnerApproval, observeOperatorWake } from "./intake.ts";
-import { advisoryMode, taskDispatchAllowed } from "./automation.ts";
+import { observeOperatorWake } from "./intake.ts";
+import { assertTaskAssessment, hasAuditedOwnerApproval } from "./advisory-gates.ts";
+import { taskDispatchAllowed } from "./automation.ts";
+import { advisoryHint, advisoryOn, recordOnce, softCode } from "./advisory.ts";
 import { appRoot } from "./settings-files.ts";
 import { z } from "zod";
 import { isClaudeProvider } from "../paseo-plugin/shared/providers.ts";
@@ -144,7 +146,7 @@ export class Engine {
     completion?: CompletionCapability,
     decisions?: DecisionSelector,
     canDispatch: (key: string) => boolean = taskDispatchAllowed,
-    advisory: () => boolean = advisoryMode,
+    advisory: () => boolean = advisoryOn,
   ) {
     this.store = store;
     this.config = config;
@@ -153,7 +155,7 @@ export class Engine {
       ...store.scopePaths(contract),
       ...store.peerAllowedPaths(contract),
     ]);
-    this.completion = completion ?? new CurrentPaseoCompletion(provider);
+    this.completion = completion ?? new CurrentPaseoCompletion(provider, advisory);
     this.decisions = decisions ?? new Decisions(store);
     this.canDispatch = canDispatch;
     this.advisory = advisory;
@@ -391,8 +393,9 @@ export class Engine {
     let rejectedReview: TerminalRepairRequest["rejectedReview"];
     if (facts.review) {
       await this.provider.refresh(facts.review.reviewerAgentId);
-      const reviewerNativeSessionId = this.provider.nativeSessionId?.(facts.review.reviewerAgentId);
-      if (!reviewerNativeSessionId) throw Error("TERMINAL_REPAIR_REVIEWER_NOT_SETTLED");
+      // An unloaded reviewer is recorded as unobserved; the reviewer guard then relies on the row.
+      const reviewerNativeSessionId =
+        this.provider.nativeSessionId?.(facts.review.reviewerAgentId) || "advisory-unobserved";
       rejectedReview = { ...facts.review, reviewerNativeSessionId };
     }
     const request: TerminalRepairRequest = {
@@ -409,8 +412,12 @@ export class Engine {
       ...(rejectedReview ? { rejectedReview } : {}),
     };
     const hint = `ADVISORY_HINT:${JSON.stringify({ code: "OPERATOR_GRANT_SKIPPED", rework: facts.rework, maxRework: facts.maxRework })}`;
-    this.store.approveTerminalRepair(predecessor.task_key, request, ADVISORY_REPAIR_REASON, () =>
-      this.store.event(hint, predecessor.id),
+    this.store.approveTerminalRepair(
+      predecessor.task_key,
+      request,
+      ADVISORY_REPAIR_REASON,
+      () => this.store.event(hint, predecessor.id),
+      true,
     );
     const grant = this.store.terminalRepairGrant(predecessor.task_key);
     if (!grant) throw Error("TERMINAL_REPAIR_GRANT_REQUIRED");
@@ -488,6 +495,38 @@ export class Engine {
       throw Error("TERMINAL_REPAIR_ROUTE_CHANGED");
   }
   async terminalRepairReviewerGuard(
+    contract: Contract,
+    request: TerminalRepairRequest,
+  ): Promise<() => void> {
+    try {
+      return await this.strictRepairReviewerGuard(contract, request);
+    } catch (error) {
+      if (!this.advisory()) throw error;
+      const rejected = this.store.terminalRepairRejectedReview(request);
+      if (
+        !rejected ||
+        !(error instanceof Error) ||
+        error.message !== "TERMINAL_REPAIR_REVIEWER_NOT_SETTLED"
+      )
+        throw error;
+      advisoryHint(
+        this.store,
+        "REVIEWER_NOT_SETTLED",
+        { task: `${contract.workflowId}/${contract.taskId}/${contract.role}` },
+        request.predecessorAttemptId,
+      );
+      return this.recordedReviewGuard(request, rejected.row);
+    }
+  }
+  // Advisory: the reviewer may not be observable, so only the recorded review row must hold.
+  private recordedReviewGuard(request: TerminalRepairRequest, row: unknown): () => void {
+    return () => {
+      if (hash(this.store.terminalRepairRejectedReview(request)?.row) !== hash(row))
+        throw Error("TERMINAL_REPAIR_REVIEW_CHANGED");
+    };
+  }
+  // Pure move of the strict guard; the advisory fallback above wraps it.
+  private async strictRepairReviewerGuard(
     contract: Contract,
     request: TerminalRepairRequest,
   ): Promise<() => void> {
@@ -1444,30 +1483,57 @@ export class Engine {
   }
   async recover(): Promise<Attempt[]> {
     // Recovery observes only. Even INTENT is not sent automatically after a restart.
+    // Each element fails alone: one broken attempt must not block the others.
     const result: Attempt[] = [];
-    for (const a of this.store.active()) result.push(await this.reconcile(a.id));
+    for (const a of this.store.active()) {
+      try {
+        result.push(await this.reconcile(a.id));
+      } catch (error) {
+        this.noteFailure("RECOVER_FAILED", error, a.id);
+      }
+    }
     const reviews = this.store.db
       .prepare(
         "SELECT attempt_id FROM review_runs WHERE state IN ('SENDING','UNKNOWN','RUNNING','PERMISSION','NEEDS_CONFIRMATION','WAITING_PROCESSES')",
       )
       .all() as { attempt_id: string }[];
     for (const r of reviews) {
-      // A closed or otherwise unsettled implementation is still a blocked
-      // rework boundary, not a valid input to observe-only review processing.
-      if (this.store.attempt(r.attempt_id).status !== "VERIFY") continue;
-      const recheck = verificationRecheck(this.store, r.attempt_id);
-      // A known changed revision belongs to the normal tick/finalization path.
-      // Do not process the old review or bypass a waiting worker observation here.
-      if (
-        recheck &&
-        this.git.snapshot(this.contract(recheck.taskKey)).diffHash !== recheck.request.diffHash
-      )
-        continue;
-      await this.review(r.attempt_id, true);
+      try {
+        await this.recoverReview(r.attempt_id);
+      } catch (error) {
+        this.noteFailure("RECOVER_FAILED", error, r.attempt_id);
+      }
     }
     return result;
   }
+  private async recoverReview(attemptId: string): Promise<void> {
+    // A closed or otherwise unsettled implementation is still a blocked
+    // rework boundary, not a valid input to observe-only review processing.
+    if (this.store.attempt(attemptId).status !== "VERIFY") return;
+    const recheck = verificationRecheck(this.store, attemptId);
+    // A known changed revision belongs to the normal tick/finalization path.
+    // Do not process the old review or bypass a waiting worker observation here.
+    if (
+      recheck &&
+      this.git.snapshot(this.contract(recheck.taskKey)).diffHash !== recheck.request.diffHash
+    )
+      return;
+    await this.review(attemptId, true);
+  }
+  // Records a kind:code row once per store. The raw message stays out of the log.
+  // The hour bucket lets a persistent failure reappear at most once per hour instead of never.
+  private noteFailure(kind: string, error: unknown, attemptId?: string): void {
+    const hourBucket = Math.floor(Date.now() / 3_600_000);
+    recordOnce(this.store, `${kind}:${softCode(error)}:${hourBucket}`, attemptId ?? null);
+  }
   async tick(taskKeys?: readonly string[]): Promise<void> {
+    try {
+      await this.tickOnce(taskKeys);
+    } catch (error) {
+      this.noteFailure("TICK_FAILED", error);
+    }
+  }
+  private async tickOnce(taskKeys?: readonly string[]): Promise<void> {
     const included = (key: string) =>
       this.canDispatch(key) && (taskKeys === undefined || taskKeys.includes(key));
     await this.recover();

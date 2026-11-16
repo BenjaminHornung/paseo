@@ -27,6 +27,12 @@ import {
   type PackageResult,
 } from "../src/assessments.ts";
 import { Engine } from "../src/engine.ts";
+import { useAdvisoryReader } from "../src/advisory.ts";
+import {
+  assertTaskAssessment as gatedAssertTaskAssessment,
+  currentIntake as gatedCurrentIntake,
+  hasAuditedOwnerApproval as gatedHasAuditedOwnerApproval,
+} from "../src/advisory-gates.ts";
 import {
   approveLowConfidenceIntake,
   approveIntakeModelAnswer,
@@ -2096,6 +2102,33 @@ test("automatic intake preserves authorization, audits high-risk approval, and w
     () => assertTaskAssessment(afterAmendment, config, originalContract),
     /INTAKE_SUPERSEDED/,
   );
+  // Advisory on: the superseded intake is a soft gate with one TASK_GATE_SKIPPED hint,
+  // while a repository outside the intake directory stays hard.
+  const restoreSoftOn = useAdvisoryReader(() => true);
+  try {
+    assert.doesNotThrow(() => gatedAssertTaskAssessment(afterAmendment, config, originalContract));
+    assert.equal(advisoryHintCount(afterAmendment, "TASK_GATE_SKIPPED"), 1);
+    assert.throws(
+      () =>
+        gatedAssertTaskAssessment(afterAmendment, config, {
+          ...originalContract,
+          repository: path.dirname(repo),
+        }),
+      /INTAKE_REPOSITORY_SCOPE_MISMATCH/,
+    );
+  } finally {
+    restoreSoftOn();
+  }
+  // Advisory off: the same superseded intake throws again.
+  const restoreSoftOff = useAdvisoryReader(() => false);
+  try {
+    assert.throws(
+      () => gatedAssertTaskAssessment(afterAmendment, config, originalContract),
+      /INTAKE_SUPERSEDED/,
+    );
+  } finally {
+    restoreSoftOff();
+  }
   assert.doesNotThrow(() =>
     assertTaskAssessment(
       afterAmendment,
@@ -4327,6 +4360,184 @@ test("advisory switch survives automation edits in a temporary root", () => {
     setAdvisoryMode(false, root);
     assert.equal(advisoryMode(root), false);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function advisoryHintCount(store: Store, code: string): number {
+  return (
+    store.db
+      .prepare("SELECT COUNT(*) AS n FROM events WHERE kind LIKE ?")
+      .get(`ADVISORY_HINT:{"code":"${code}"%`) as { n: number }
+  ).n;
+}
+
+test("advisory intake gate records one owner-approval hint and keeps hard codes hard", () => {
+  const root = mkdtempSync(path.join(process.cwd(), ".advisory-gates-test-"));
+  const store = new Store(path.join(root, "gates.sqlite"));
+  try {
+    const contract = {
+      workflowId: "auto-owner-fixture",
+      taskId: "task",
+      role: "implement-normal",
+      mutation: true,
+      highRisk: true,
+      intakeId: "a".repeat(64),
+      packageAssessmentId: "b".repeat(64),
+    } as unknown as Contract;
+    const restoreOff = useAdvisoryReader(() => false);
+    try {
+      assert.equal(gatedHasAuditedOwnerApproval(store, contract), false);
+    } finally {
+      restoreOff();
+    }
+    const restoreOn = useAdvisoryReader(() => true);
+    try {
+      assert.equal(gatedHasAuditedOwnerApproval(store, contract), true);
+      assert.equal(gatedHasAuditedOwnerApproval(store, contract), true);
+      assert.equal(advisoryHintCount(store, "OWNER_APPROVAL_SKIPPED"), 1);
+      assert.throws(
+        () => gatedAssertTaskAssessment(store, { orchestrationVersion: 3 } as Config, contract),
+        /TASK_ASSESSMENT_REQUIRED/,
+      );
+      assert.throws(
+        () => gatedCurrentIntake(store, "advisory-main", false),
+        /INTAKE_CLASSIFICATION_REQUIRED/,
+      );
+    } finally {
+      restoreOn();
+    }
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("advisory intake gate skips the pending classification with one hint and stays strict when off", () => {
+  const root = mkdtempSync(path.join(process.cwd(), ".advisory-pending-test-"));
+  const store = new Store(path.join(root, "pending.sqlite"));
+  try {
+    const facts = intakeFactsSchema.parse({
+      mainAgentId: "advisory-main",
+      messageId: "advisory-message",
+      origin: "human",
+      directory: root,
+      text: "pending advisory fixture",
+      knownFacts: [],
+      messageRevision: 1,
+      factsRevision: 1,
+    });
+    store.db
+      .prepare(
+        "INSERT INTO assessments(id,kind,owner_id,facts_hash,facts_json,result_json,state,created_ms) VALUES(?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        intakeIdentity(facts),
+        "intake",
+        "advisory-main",
+        hash(facts),
+        JSON.stringify(facts),
+        null,
+        "PENDING",
+        1,
+      );
+    const restoreOff = useAdvisoryReader(() => false);
+    try {
+      assert.throws(() => gatedCurrentIntake(store, "advisory-main", false), /INTAKE_PENDING/);
+    } finally {
+      restoreOff();
+    }
+    const restoreOn = useAdvisoryReader(() => true);
+    try {
+      let message = "";
+      try {
+        gatedCurrentIntake(store, "advisory-main", false);
+      } catch (error) {
+        message = error instanceof Error ? error.message : "";
+      }
+      assert.notEqual(message, "INTAKE_PENDING");
+      assert.equal(advisoryHintCount(store, "INTAKE_PENDING_SKIPPED"), 1);
+    } finally {
+      restoreOn();
+    }
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("advisory intake gate falls back to the decided intake with one INTAKE_GATE_SKIPPED hint", () => {
+  const root = mkdtempSync(path.join(process.cwd(), ".advisory-fallback-test-"));
+  const store = new Store(path.join(root, "fallback.sqlite"));
+  try {
+    const agentId = "advisory-fallback-main";
+    const facts = intakeFactsSchema.parse({
+      mainAgentId: agentId,
+      messageId: "advisory-fallback-message",
+      origin: "human",
+      directory: root,
+      text: "fallback question fixture",
+      knownFacts: [],
+      messageRevision: 1,
+      factsRevision: 1,
+    });
+    const id = intakeIdentity(facts);
+    const assessment = {
+      id,
+      kind: "intake",
+      factsHash: hash(facts),
+      version: "intake-v3",
+      source: "main",
+      reason: "advisory fallback fixture",
+      result: {
+        intent: "question",
+        needExplorer: false,
+        needPlanner: false,
+        needAdvisor: false,
+        needImplementation: false,
+        extraReviewRecommended: false,
+      },
+    };
+    store.db
+      .prepare(
+        "INSERT INTO assessments(id,kind,owner_id,facts_hash,facts_json,result_json,state,created_ms) VALUES(?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        id,
+        "intake",
+        agentId,
+        hash(facts),
+        JSON.stringify(facts),
+        JSON.stringify(assessment),
+        "SETTLED",
+        1,
+      );
+    store.db
+      .prepare("INSERT INTO internal_messages(agent_id,message_id,kind) VALUES(?,?,?)")
+      .run(agentId, facts.messageId, `human:${hash(facts.text)}`);
+    store.db
+      .prepare("INSERT INTO main_checkpoints(agent_id,message_id,work_intake_id) VALUES(?,?,?)")
+      .run(agentId, facts.messageId, id);
+    // Strict: the checkpointed intake does not authorize implementation.
+    const restoreOff = useAdvisoryReader(() => false);
+    try {
+      assert.throws(
+        () => gatedCurrentIntake(store, agentId, true),
+        /INTAKE_IMPLEMENTATION_NOT_AUTHORIZED/,
+      );
+    } finally {
+      restoreOff();
+    }
+    // Advisory: the decided intake is returned and the skipped gate is recorded exactly once.
+    const restoreOn = useAdvisoryReader(() => true);
+    try {
+      assert.equal(gatedCurrentIntake(store, agentId, true).id, id);
+      assert.equal(advisoryHintCount(store, "INTAKE_GATE_SKIPPED"), 1);
+    } finally {
+      restoreOn();
+    }
+  } finally {
+    store.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

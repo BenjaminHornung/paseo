@@ -31,15 +31,14 @@ import {
   readAutomation,
   requireAutomaticMain,
   taskActivitySequence,
-  workflowStatus,
 } from "./automation.ts";
+import { currentIntake, workflowStatus } from "./advisory-gates.ts";
 import { Engine } from "./engine.ts";
 import { Git } from "./git.ts";
 import {
   abandonHumanInput,
   approveIntakeModelAnswer,
   captureHumanIntake,
-  currentIntake,
   linkApprovalToOutstandingTask,
   markIntakeClassificationPending,
   recordInternalMessage,
