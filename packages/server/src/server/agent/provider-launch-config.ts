@@ -56,6 +56,14 @@ export interface ProviderLaunchDefault {
   resolvePath?: () => Promise<string | null>;
 }
 
+/** Custom launchers can restore tools or run hooks before sampler restrictions apply. */
+export function supportsIsolatedTextGeneration(settings?: ProviderRuntimeSettings): boolean {
+  const command = settings?.command;
+  return (
+    !command || command.mode === "default" || (command.mode === "append" && !command.args?.length)
+  );
+}
+
 function normalizeLaunchDefault(
   defaultBinary: string | ProviderLaunchDefault,
 ): ProviderLaunchDefault {

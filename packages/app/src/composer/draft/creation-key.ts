@@ -3,7 +3,55 @@
  * same draft resumes its creation, while an edited draft is a new request with its own key.
  */
 export function draftCreationKey(draftId: string, request: object): string {
-  return `${draftId}:${hash(canonicalJson(request))}`;
+  return `${draftId}:${hash(canonicalJson(neutralizeHarnessAgentIds(request)))}`;
+}
+
+export type CreationAgentIdNamespace = "workspace-draft" | "new-workspace-initial";
+
+export function draftCreationAgentId(
+  draftId: string,
+  request: object,
+  namespace: CreationAgentIdNamespace,
+): string {
+  const requestJson = canonicalJson(neutralizeHarnessAgentIds(request));
+  const material = `${namespace}\0${draftId}\0${requestJson}`;
+  const hashRuns = [0, 1, 2].map((run) =>
+    Number.parseInt(hash(`paseo-agent-id-v1\0${namespace}\0${run}\0${material}`), 36)
+      .toString(16)
+      .padStart(14, "0"),
+  );
+  const rawHex = hashRuns.join("").slice(0, 32);
+  const versionedHex = `${rawHex.slice(0, 12)}8${rawHex.slice(13)}`;
+  const variantNibble = ((Number.parseInt(versionedHex[16], 16) & 0x3) | 0x8).toString(16);
+  const uuidHex = `${versionedHex.slice(0, 16)}${variantNibble}${versionedHex.slice(17)}`;
+  return `${uuidHex.slice(0, 8)}-${uuidHex.slice(8, 12)}-${uuidHex.slice(12, 16)}-${uuidHex.slice(16, 20)}-${uuidHex.slice(20)}`;
+}
+
+function neutralizeHarnessAgentIds(request: object): object {
+  if (!isRecord(request) || !Array.isArray(request.attachments)) return request;
+  const hasHarnessContext = request.attachments.some((attachment) => {
+    if (!isRecord(attachment) || attachment.type !== "text") return false;
+    const context = attachment.harnessContext;
+    return isRecord(context) && typeof context.agentId === "string";
+  });
+  if (!hasHarnessContext) return request;
+
+  const attachments = request.attachments.map((attachment) => {
+    if (!isRecord(attachment) || attachment.type !== "text") return attachment;
+    const context = attachment.harnessContext;
+    if (!isRecord(context) || typeof context.agentId !== "string") return attachment;
+    return { ...attachment, harnessContext: { ...context, agentId: "__harness_agent_id__" } };
+  });
+
+  return {
+    ...request,
+    ...(typeof request.agentId === "string" ? { agentId: "__harness_agent_id__" } : {}),
+    attachments,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function canonicalJson(value: unknown): string {

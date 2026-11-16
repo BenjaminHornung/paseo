@@ -1,0 +1,68 @@
+title: Implement, verify and review
+description: Complete one authorized change with one writer and independent verification and review.
+manager: { mode: none }
+inputs:
+  request:
+    type: string
+    required: true
+    description: Concrete task, allowed paths, existing authorization and acceptance criteria.
+steps:
+  - id: implement
+    role:
+      name: implementer
+      prompt: |
+        Complete this authorized task in the run's working directory:
+        {{ inputs.request }}
+        If a prior attempt exists, inspect its actual changes and activity before continuing.
+    inputs: [request]
+    outputs:
+      handoff:
+        {
+          type: string,
+          description: "Changed paths, behavior, exact checks and remaining acceptance gaps.",
+        }
+    outcomes: [done, blocked]
+    on:
+      blocked: { end: blocked }
+  - id: verify
+    needs: [implement]
+    role:
+      name: verifier
+      prompt: |
+        Verify the changed behavior and acceptance criteria of this task:
+        {{ inputs.request }}
+        Writer's handoff:
+        {{ inputs.handoff }}
+    inputs: [request, handoff]
+    outputs:
+      verification:
+        { type: string, description: "Observed checks, exit codes and remaining evidence gaps." }
+    outcomes: [pass, changes_requested]
+    on:
+      changes_requested: { goto: implement, max_loops: 1 }
+  - id: review
+    needs: [verify]
+    role:
+      name: reviewer
+      prompt: |
+        Independently review the final source and task acceptance:
+        {{ inputs.request }}
+        Implementation:
+        {{ inputs.handoff }}
+        Verification:
+        {{ inputs.verification }}
+    inputs: [request, handoff, verification]
+    outputs:
+      review:
+        {
+          type: string,
+          description: Actionable material findings or a source pass with evidence limits.,
+        }
+    outcomes: [pass, changes_requested]
+    on:
+      changes_requested: { goto: implement, max_loops: 1 }
+outcomes: [done, blocked]
+outputs:
+  handoff: { type: string }
+  verification: { type: string }
+  review: { type: string }

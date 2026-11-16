@@ -3,6 +3,7 @@ import { PluginRegistriesSchema } from "@getpaseo/protocol/plugin-registry";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { ComposerPredictionsConfigSchema } from "@getpaseo/protocol/composer";
 
 import {
   AgentProviderRuntimeSettingsMapSchema,
@@ -278,6 +279,7 @@ export const PersistedConfigSchema = z
         appendSystemPrompt: z.string().optional(),
         terminalProfiles: z.array(TerminalProfileSchema).optional(),
         agentProfiles: z.array(AgentProfileSchema).optional(),
+        composerPredictions: ComposerPredictionsConfigSchema.optional(),
         cors: z
           .object({
             allowedOrigins: z.array(z.string()).optional(),

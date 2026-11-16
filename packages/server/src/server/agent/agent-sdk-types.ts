@@ -9,7 +9,7 @@ import type {
   ToolPolicy,
 } from "@getpaseo/protocol/agent-types";
 import type { AgentMessage } from "@getpaseo/protocol/agent-message";
-import type { AgentAttachment } from "@getpaseo/protocol/messages";
+import type { AgentAttachment, HarnessContextEntry } from "@getpaseo/protocol/messages";
 import type { AgentBackgroundWorkObservationInput } from "./background-work/index.js";
 import type { PaseoToolCatalog } from "./tools/types.js";
 
@@ -169,6 +169,7 @@ export interface AgentCreateConfigUnattendedInput {
 }
 
 export interface AgentCapabilityFlags {
+  supportsTextGeneration?: boolean;
   [capability: string]: boolean | undefined;
   supportsStreaming: boolean;
   supportsSessionPersistence: boolean;
@@ -741,6 +742,7 @@ export interface AgentSession {
   /** Release live runtime resources without archiving or deleting the durable native session. */
   close(): Promise<void>;
   listCommands?(): Promise<AgentSlashCommand[]>;
+  listContext?(kinds?: readonly HarnessContextEntry["kind"][]): Promise<HarnessContextEntry[]>;
   /** A returned model is the effective selection committed by this mutation.
    * Returning void means the requested selection was accepted. No status read is required. */
   setModel?(modelId: string | null): Promise<void | { model: string | null }>;
@@ -811,6 +813,8 @@ export interface AgentDraftControls {
 }
 
 export interface AgentClient {
+  /** Isolated text inference. Implementations must prevent tool execution and own cleanup. */
+  generateText?(config: AgentSessionConfig, prompt: string, signal: AbortSignal): Promise<string>;
   readonly provider: AgentProvider;
   readonly capabilities: AgentCapabilityFlags;
   /**

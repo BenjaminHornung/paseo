@@ -181,6 +181,12 @@ import { useComposerForgeAutoAttach } from "./forge-auto-attach";
 import { readClipboardImage } from "./clipboard-image";
 import { normalizeNativePastedImages, type NativePastedFile } from "./native-pasted-image";
 import { PluginResourceAttachmentPill, usePluginAttachmentPicker } from "@/plugins";
+import { Button } from "@/components/ui/button";
+import { randomUUID } from "expo-crypto";
+import { harnessContextAgentId } from "./context/selection";
+import type { HarnessContextEntry } from "@getpaseo/protocol/messages";
+import { HarnessContextPicker } from "./context/picker";
+import { ComposerPredictionBinding, type PredictionHandle } from "./predictions/binding";
 import { resolveClientSlashCommand, type ClientSlashCommand } from "@/client-slash-commands";
 import {
   appendWorkspaceFileAttachment,
@@ -429,6 +435,18 @@ interface RenderComposerAttachmentPillArgs {
 
 function renderComposerAttachmentPill(args: RenderComposerAttachmentPillArgs): ReactElement {
   const { attachment, index, disabled, onOpen, onRemove, labels } = args;
+  if (attachment.kind === "harness_context") {
+    return (
+      <HarnessContextAttachmentPill
+        key={`context:${attachment.entry.id}`}
+        attachment={attachment}
+        index={index}
+        disabled={disabled}
+        onRemove={onRemove}
+        removeLabel={labels.removeFile}
+      />
+    );
+  }
   if (attachment.kind === "image") {
     return (
       <ImageAttachmentPill
@@ -724,6 +742,35 @@ function QueuedMessageRow({
         </Pressable>
       </View>
     </View>
+  );
+}
+
+function HarnessContextAttachmentPill({
+  attachment,
+  index,
+  disabled,
+  onRemove,
+  removeLabel,
+}: {
+  attachment: Extract<ComposerAttachment, { kind: "harness_context" }>;
+  index: number;
+  disabled: boolean;
+  onRemove: (index: number) => void;
+  removeLabel: string;
+}) {
+  const remove = useCallback(() => onRemove(index), [onRemove, index]);
+  return (
+    <AttachmentFrame>
+      <AttachmentLabel title={attachment.entry.name} subtitle={attachment.entry.kind} />
+      <Button
+        variant="ghost"
+        disabled={disabled}
+        onPress={remove}
+        accessibilityLabel={`${removeLabel}: ${attachment.entry.name}`}
+      >
+        {removeLabel}
+      </Button>
+    </AttachmentFrame>
   );
 }
 
@@ -1402,6 +1449,45 @@ function ComposerContentImpl({
   );
   useEffect(() => () => cursorPublication.cancel(), [cursorPublication]);
   const autocompleteRef = useRef<ComposerAutocompleteHandle>(null);
+  const predictionRef = useRef<PredictionHandle>(null);
+  const [contextPickerOpen, setContextPickerOpen] = useState(false);
+  const liveContextProvider = useSessionStore(
+    (state) => state.sessions[serverId]?.agents.get(agentId)?.provider,
+  );
+  const contextProvider =
+    commandDraft?.status === "ready" ? commandDraft.config.provider : liveContextProvider;
+  const contextSupported = useSessionStore(
+    (state) => state.sessions[serverId]?.serverInfo?.features?.harnessContext === true,
+  );
+  useEffect(() => {
+    if (!commandDraft || !contextProvider) return;
+    const current = attachments.filter(
+      (attachment) =>
+        attachment.kind !== "harness_context" || attachment.provider === contextProvider,
+    );
+    if (current.length !== attachments.length) onChangeAttachments(current);
+  }, [commandDraft, contextProvider, attachments, onChangeAttachments]);
+  const selectHarnessContext = useCallback(
+    (entry: HarnessContextEntry) => {
+      if (!contextProvider) return;
+      const targetId = commandDraft
+        ? (harnessContextAgentId(attachments) ?? randomUUID())
+        : agentId;
+      const exists = attachments.some(
+        (attachment) =>
+          attachment.kind === "harness_context" &&
+          attachment.agentId === targetId &&
+          attachment.provider === contextProvider &&
+          attachment.entry.id === entry.id,
+      );
+      if (!exists)
+        onChangeAttachments([
+          ...attachments,
+          { kind: "harness_context", agentId: targetId, provider: contextProvider, entry },
+        ]);
+    },
+    [attachments, agentId, onChangeAttachments, commandDraft, contextProvider],
+  );
   const recall = useMemo(() => new ComposerRecall(), []);
   const [isProcessing, setIsProcessing] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<PendingFileAttachment[]>([]);
@@ -2117,6 +2203,7 @@ function ComposerContentImpl({
   const handleCommandKeyPress = useCallback(
     (event: ComposerKeyPressEvent) => {
       if (autocompleteRef.current?.onKeyPress(event)) return true;
+      if (predictionRef.current?.onKeyPress(event)) return true;
       const recalledText = recall.handleKeyPress(event, () =>
         selectAgentSentMessages(useSessionStore.getState().sessions[serverId], agentId),
       );
@@ -2285,6 +2372,14 @@ function ComposerContentImpl({
         },
       },
     ];
+    if (contextSupported) {
+      items.push({
+        id: "harness-context",
+        label: t("composer.context.title"),
+        icon: <ThemedPaperclip size={ICON_SIZE.md} uniProps={iconForegroundMutedMapping} />,
+        onSelect: () => setContextPickerOpen(true),
+      });
+    }
     if (isNative) {
       items.push({
         id: "paste-image",
@@ -2323,6 +2418,7 @@ function ComposerContentImpl({
     handlePickFile,
     handlePickImage,
     pluginAttachments.menuItems,
+    contextSupported,
     t,
   ]);
 
@@ -2498,6 +2594,7 @@ function ComposerContentImpl({
       canExecuteClientSlashCommand: buildOutgoingAttachments(attachments).length === 0,
       onClientSlashCommand: runClientSlashCommand,
       pluginClientSlashCommands,
+      onSelectHarnessContext: selectHarnessContext,
     }),
     [
       replaceUserInput,
@@ -2508,6 +2605,7 @@ function ComposerContentImpl({
       attachments,
       runClientSlashCommand,
       pluginClientSlashCommands,
+      selectHarnessContext,
     ],
   );
 
@@ -2567,6 +2665,25 @@ function ComposerContentImpl({
           <View style={inputAreaContentStyle}>
             {isFullscreen ? null : queueList}
             {!isFullscreen && sendErrorNode}
+            <ComposerPredictionBinding
+              ref={predictionRef}
+              serverId={serverId}
+              agentId={agentId}
+              text={textSource}
+              accept={replaceUserInput}
+              enabled={
+                inputMode === "chat" && !isSubmitLoadingVisible && selectedAttachments.length === 0
+              }
+            />
+            <HarnessContextPicker
+              serverId={serverId}
+              agentId={agentId}
+              draft={commandDraft}
+              anchorRef={attachButtonRef}
+              open={contextPickerOpen}
+              onOpenChange={setContextPickerOpen}
+              onSelect={selectHarnessContext}
+            />
 
             <ComposerAutocompleteBinding
               text={textSource}

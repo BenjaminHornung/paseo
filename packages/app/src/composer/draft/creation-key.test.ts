@@ -9,6 +9,10 @@ const request = {
 };
 
 describe("draftCreationKey", () => {
+  it("preserves existing keys for requests without harness context", () => {
+    expect(draftCreationKey("draft-1", request)).toBe("draft-1:9cfx1hqrhz");
+  });
+
   it("keeps the key for a retry of the same request, whatever its key order", () => {
     const reordered = {
       clientMessageId: request.clientMessageId,

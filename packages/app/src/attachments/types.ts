@@ -4,6 +4,7 @@ import type {
   UploadedFileAttachment,
 } from "@getpaseo/protocol/messages";
 import type { PluginResourceComposerAttachment } from "@/plugins/attachments";
+import type { HarnessContextEntry } from "@getpaseo/protocol/messages";
 
 export type AttachmentStorageType = "web-indexeddb" | "desktop-file" | "native-file";
 
@@ -104,6 +105,7 @@ export interface WorkspaceFileComposerAttachment {
 }
 
 export type UserComposerAttachment =
+  | { kind: "harness_context"; agentId: string; provider: string; entry: HarnessContextEntry }
   | { kind: "image"; metadata: AttachmentMetadata }
   | { kind: "file"; attachment: UploadedFileAttachment }
   | WorkspaceFileComposerAttachment

@@ -14,6 +14,7 @@ import { composerWorkspaceAttachment } from "@/composer/attachments/workspace";
 import { useAgentInputDraft } from "@/composer/draft/input-draft";
 import type { CreateAgentInitialValues } from "@/hooks/use-agent-form-state";
 import { useDraftAgentCreateFlow, type DraftCreateAttempt } from "@/composer/draft/create-flow";
+import { requestDraftAgent } from "@/composer/draft/create-request";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { buildWorkspaceDraftAgentConfig } from "@/screens/workspace/workspace-draft-agent-config";
 import { buildDraftStoreKey } from "@/stores/draft-keys";
@@ -30,7 +31,7 @@ import {
   validateDraftSubmission,
 } from "@/composer/draft/workspace-tab-core";
 import { DRAFT_CAPABILITIES } from "@/composer/draft/timeline";
-import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
+import type { AgentAttachment, AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { WorkspaceComposerAttachment } from "@/attachments/types";
 import {
@@ -47,7 +48,6 @@ import {
 } from "@/workspace-tabs/model";
 import { openWorkspaceChanges } from "@/workspace-tabs/open-supporting-view";
 import { useSettings } from "@/hooks/use-settings";
-import { draftCreationKey } from "@/composer/draft/creation-key";
 
 interface AutoSubmitConfig {
   provider: string;
@@ -109,7 +109,7 @@ async function submitDraftCreateRequest(input: {
   attempt: { clientMessageId: string };
   text: string;
   images?: UserMessageImageAttachment[];
-  attachments?: unknown;
+  attachments?: AgentAttachment[];
   cwd: string;
   client: DaemonClient | null;
   workspaceDirectory: string | null;
@@ -163,7 +163,7 @@ async function submitDraftCreateRequest(input: {
     providerOptions: autoSubmitConfig?.providerOptions ?? composerState.providerOptions,
   });
 
-  const attachmentsArray = Array.isArray(attachments) ? attachments : undefined;
+  const attachmentsArray = attachments ?? [];
   const imagesData = await encodeImages(images);
   const request = {
     config,
@@ -172,11 +172,11 @@ async function submitDraftCreateRequest(input: {
     clientMessageId: attempt.clientMessageId,
     ...(Object.keys(composerState.metadata).length > 0 ? { metadata: composerState.metadata } : {}),
     ...(imagesData && imagesData.length > 0 ? { images: imagesData } : {}),
-    ...(attachmentsArray && attachmentsArray.length > 0 ? { attachments: attachmentsArray } : {}),
+    ...(attachmentsArray.length > 0 ? { attachments: attachmentsArray } : {}),
   };
-  const result = await client.createAgent({
-    ...request,
-    idempotencyKey: draftCreationKey(input.draftId, request),
+  const result = await requestDraftAgent(client, {
+    draftId: input.draftId,
+    request,
   });
 
   return {

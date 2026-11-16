@@ -1,0 +1,3 @@
+title: Independent source review
+readonly: true
+agent: { tier: reviewer }

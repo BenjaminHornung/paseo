@@ -1,4 +1,6 @@
 import { useAddHost } from "@/hosts/add-host";
+import { bindHarnessContextAgentId } from "@/composer/context/selection";
+import { bindCreationAgentIdentity } from "@/composer/draft/create-request";
 import type { CreateWorkspaceRequestOptions } from "@getpaseo/client/internal/daemon-client";
 import type { AgentSnapshotPayload, CreationSnapshot } from "@getpaseo/protocol/messages";
 import { encodeImages } from "@/utils/encode-images";
@@ -362,7 +364,7 @@ interface CreateChatAgentInput {
   serverId: string;
   draftKey: string;
   clearDraft: (lifecycle: "sent" | "abandoned") => void;
-  draftId?: string;
+  draftId: string;
   draftContextScopeKey: string | null;
   supportsForgeSearch: boolean;
   resolveClient: () => DaemonClient;
@@ -457,7 +459,7 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
   const images = await encodeImages(wirePayload.images);
   let navigated = false;
   let outcome: SubmitOutcome = "background";
-  const initialAgent: NonNullable<CreateWorkspaceRequestOptions["agent"]> = {
+  const initialAgentRequest: NonNullable<CreateWorkspaceRequestOptions["agent"]> = {
     config: {
       provider,
       cwd,
@@ -472,11 +474,19 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
     images: images?.length ? images : undefined,
     attachments: wirePayload.attachments?.length ? wirePayload.attachments : undefined,
   };
+  const initialAgent = bindCreationAgentIdentity({
+    draftId: input.draftId,
+    namespace: "new-workspace-initial",
+    request: initialAgentRequest,
+  });
+  const initialAgentAttachments = initialAgent.agentId
+    ? bindHarnessContextAgentId(workspaceNamingAttachments, initialAgent.agentId)
+    : workspaceNamingAttachments;
   const execute = async (): Promise<AgentSnapshotPayload> => {
     const { agent } = await ensureWorkspace({
       cwd,
       prompt: text,
-      attachments: workspaceNamingAttachments,
+      attachments: initialAgentAttachments,
       withInitialAgent: true,
       agent: initialAgent,
       onEvent: (snapshot) => {

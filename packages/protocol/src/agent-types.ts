@@ -123,6 +123,7 @@ export function normalizeAgentModelCatalog(models: AgentModelDefinition[]): Agen
 
 export interface ProviderSnapshotEntry {
   provider: AgentProvider;
+  capabilities?: AgentCapabilityFlags;
   status: ProviderStatus;
   enabled: boolean;
   source?: "builtin" | "custom";
@@ -176,6 +177,7 @@ export type AgentOptionSelectControl = z.infer<typeof AgentOptionSelectControlSc
 export type AgentOptionControl = z.infer<typeof AgentOptionControlSchema>;
 
 export interface AgentCapabilityFlags {
+  supportsTextGeneration?: boolean;
   [capability: string]: boolean | undefined;
   supportsStreaming: boolean;
   supportsSessionPersistence: boolean;

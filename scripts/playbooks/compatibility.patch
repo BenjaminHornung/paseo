@@ -1,0 +1,122 @@
+diff --git a/server/admission.test.ts b/server/admission.test.ts
+index dd23efb..8333df8 100644
+--- a/server/admission.test.ts
++++ b/server/admission.test.ts
+@@ -436,10 +436,10 @@ async function until(check: () => boolean | Promise<boolean>, ms = 5000): Promis
+   }
+ }
+ 
+-async function setup(admit = "{ script: admit.sh, poll: 1h }", wakeGapMs = 100) {
++async function setup(admit = "{ script: admit.sh, poll: 1h }", wakeGapMs = 100, scripts?: Record<string, string>) {
+   const dir = await mkdtemp(path.join(tmpdir(), "admission-rt-"));
+   temps.push(dir);
+-  await writePlaybooks(dir, { "apply.yaml": APPLY(admit), "pr.yaml": PR });
++  await writePlaybooks(dir, { "apply.yaml": APPLY(admit), "pr.yaml": PR }, scripts);
+   const store = new RunStore(path.join(dir, "runs"));
+   await store.init();
+   const fake = fakePaseo(dir);
+@@ -459,6 +459,29 @@ async function setup(admit = "{ script: admit.sh, poll: 1h }", wakeGapMs = 100)
+ }
+ 
+ describe("queue.admit: the runtime", () => {
++  it.skipIf(process.platform !== "win32")("runs PowerShell scripts for script steps and pipeline admission", async () => {
++    const { dir, store, runtime, handOff, status } = await setup(
++      "{ script: admit.ps1, poll: 1h }",
++      100,
++      {
++        "admit.ps1": `[Console]::Out.WriteLine('{"admit":[]}')`,
++        "check.ps1": `[Console]::Out.WriteLine('{"summary":"PowerShell ran","outputs":{}}')`,
++      },
++    );
++    const root = path.join(dir, ".paseo/plugins/playbooks");
++    await writeFile(path.join(root, "check.yaml"), "title: Check\nsteps:\n  - id: check\n    script: { run: check.ps1 }\n");
++    const checkEntry = (await loadPlaybooks(dir)).entries.find((entry) => entry.id === "check")!;
++    expect(checkEntry.errors).toEqual([]);
++
++    const run = await runtime.startPlaybook({ id: "script-manager", workspaceId: "ws", cwd: "/" }, "check", {}, { playbook: checkEntry.playbook! });
++    await until(() => ["completed", "failed"].includes(store.get(run.id)!.status));
++    expect.soft(store.get(run.id)!.steps.check!.attempts[0]!.report).toMatchObject({ outcome: "success", summary: "PowerShell ran" });
++
++    await handOff(1);
++    await until(() => status().checks === 1);
++    expect.soft(status()).toMatchObject({ lastOutcome: "ok", error: null });
++  });
++
+   it("runs the script in the pipeline's workspace with the waiting jobs, and holds what it does not name", async () => {
+     const { dir, handOff, pipe, checks, types, status, batch, runtime } = await setup();
+     const parent = await handOff(1, { ticket: "T-1" });
+diff --git a/server/runtime.ts b/server/runtime.ts
+index 50d4400..e6d2a32 100644
+--- a/server/runtime.ts
++++ b/server/runtime.ts
+@@ -240,6 +240,14 @@ function scriptEnv(run: Run, stepId: string, attempt: Run["steps"][string]["atte
+   return env;
+ }
+ 
++/** PowerShell scripts are not directly executable on Windows; all other scripts keep their existing launch path. */
++function commandForScript(file: string): { command: string; args: string[] } {
++  if (process.platform === "win32" && path.extname(file).toLowerCase() === ".ps1") {
++    return { command: "pwsh.exe", args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", file] };
++  }
++  return { command: file, args: [] };
++}
++
+ /** How many ended checks of a running script attempt the panel can show. */
+ const SCRIPT_CHECKS_KEPT = 5;
+ 
+@@ -331,6 +339,16 @@ function reportedLine(stepId: string, n: number, report: { outcome: string; summ
+   return `step "${stepId}" attempt ${n} reported ${report.outcome}: ${report.summary}${Object.keys(report.outputs).length ? ` Outputs: ${JSON.stringify(report.outputs)}.` : ""}`;
+ }
+ 
++/** Brief for a replacement step agent: point it to prior work without copying the conversation. */
++function stepAgentHandover(previousAgentId: string, previousTarget: string, nextTarget?: string): string {
++  const previousModel = previousTarget ? `, on ${previousTarget}` : "";
++  const nextModel = nextTarget ? ` on ${nextTarget}` : "";
++  return [
++    `A previous agent of this attempt (agent ${previousAgentId}${previousModel}) handed this attempt over to you${nextModel}.`,
++    `Before repeating or writing work, inspect the current workspace status and diff (git status, git diff HEAD), then read that agent's activity with get_agent_activity for agent ${previousAgentId}.`,
++  ].join(" ");
++}
++
+ /** Remind a step agent after this long without activity, unless its step sets `silence`. */
+ export const DEFAULT_SILENCE_MS = 30 * 60_000;
+ 
+@@ -2643,7 +2661,8 @@ export class Runtime {
+       const refreshed = run.scripts ? path.join(run.scripts.dir, step.script!) : null;
+       const inWorktree = run.worktree ? path.join(run.worktree.path, step.script!) : null;
+       const scriptFile = refreshed && existsSync(refreshed) ? refreshed : inWorktree && existsSync(inWorktree) ? inWorktree : path.join(run.workspaceDir, step.script!);
+-      const child = spawn(scriptFile, [], {
++      const { command, args } = commandForScript(scriptFile);
++      const child = spawn(command, args, {
+         cwd: engine.workDir(run),
+         env: scriptEnv(run, stepId, attempt, this.scriptFeedback.get(attemptId) ?? null),
+         stdio: ["ignore", "pipe", "pipe"],
+@@ -2905,7 +2924,8 @@ export class Runtime {
+       }
+       if (!existsSync(pipeline.workspaceDir)) return finish({ kind: "failed", message: `the pipeline's workspace ${pipeline.workspaceDir} does not exist` });
+       if (!existsSync(file)) return finish({ kind: "failed", message: `${stage.admit.script} not found in the pipeline's workspace ${pipeline.workspaceDir}` });
+-      const child = spawn(file, [], {
++      const { command, args } = commandForScript(file);
++      const child = spawn(command, args, {
+         cwd: pipeline.workspaceDir,
+         env: {
+           ...process.env,
+@@ -3496,7 +3516,7 @@ export class Runtime {
+     const oldAgent = attempt.agentId;
+     this.clearTimeout(oldAgent);
+     await this.store.mutate(runId, (current) => engine.moveAttempt(current, stepId, { agentId: agent.id, target: config.provider ?? "", now: nowIso() }));
+-    const handover = `A previous agent of this attempt (agent ${oldAgent}, on ${attempt.target || "another model"}) stopped before reporting; you take over on ${config.provider}. Check what it already did (git log, git status, the PRs) before redoing work. Its conversation can be read with read_agent_conversation.`;
++    const handover = stepAgentHandover(oldAgent, attempt.target, config.provider);
+     const prompt = [attempt.prompt, handover, message.trim() ? `Message from the Playbook Manager:\n${message.trim()}` : ""].filter(Boolean).join("\n\n");
+     await agent.send(withPreamble(prompt, this.store.get(runId)!));
+     this.armTimeout(this.store.get(runId)!, stepId);
+@@ -3996,7 +4016,8 @@ export class Runtime {
+     await this.store.mutate(runId, (current) =>
+       engine.failOverAttempt(current, stepId, { target: exhausted, agentId: agent.id, newTarget: config.provider ?? "", now: nowIso(), reason, resumed: options.resuming === true }),
+     );
+-    await agent.send(withPreamble(attempt.prompt, this.store.get(runId)!)).catch((error: unknown) => console.error(`[playbooks] could not brief ${agent.id}:`, errorText(error)));
++    const prompt = [attempt.prompt, stepAgentHandover(agentId, attempt.target, config.provider)].filter(Boolean).join("\n\n");
++    await agent.send(withPreamble(prompt, this.store.get(runId)!)).catch((error: unknown) => console.error(`[playbooks] could not brief ${agent.id}:`, errorText(error)));
+     this.armTimeout(this.store.get(runId)!, stepId);
+     await this.archiveStepAgent(agentId);
+     if (options.resuming) {

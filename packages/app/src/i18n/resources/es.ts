@@ -131,6 +131,8 @@ export const es: TranslationResources = {
     },
   },
   composer: {
+    predictions: en.composer.predictions,
+    context: en.composer.context,
     placeholders: {
       desktop: "Envíe un mensaje al agente, etiquete@fileso use/commandsy/skills",
       mobile: "Mensaje,@files,/commands",

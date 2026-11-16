@@ -1,0 +1,29 @@
+# Subscription targets only. Existing paid API profiles are intentionally not automatic routes.
+tiers:
+  planner:
+    - { provider: claude, model: claude-opus-5-5, mode: auto, thinking: medium }
+    - { provider: codex, model: gpt-6.1-sol, mode: auto-review, thinking: high }
+  worker:
+    - { provider: pi-playbooks, model: opencode-go/deepseek-v4.1-flash, thinking: max }
+    - { provider: codex, model: gpt-6.1-terra, mode: auto-review, thinking: medium }
+    - { provider: codex, model: gpt-6.1-sol, mode: auto-review, thinking: high }
+  complex:
+    - { provider: codex, model: gpt-6.1-terra, mode: auto-review, thinking: xhigh }
+    - { provider: codex, model: gpt-6.1-sol, mode: auto-review, thinking: high }
+  ui:
+    - { provider: claude-private, model: claude-sonnet-5-5, mode: auto, thinking: medium }
+    - { provider: codex, model: gpt-6.1-terra, mode: auto-review, thinking: medium }
+  reviewer:
+    - { provider: claude, model: claude-opus-5-5, mode: auto, thinking: medium }
+    - { provider: codex, model: gpt-6.1-sol, mode: auto-review, thinking: high }
+  verifier:
+    - { provider: codex, model: gpt-6-luna, mode: auto-review, thinking: high }
+    - { provider: claude-private, model: claude-haiku-5-5, mode: auto, thinking: medium }
+agent: { tier: worker }
+providers:
+  exhausted_for: 1h
+  on_exhausted: fail
+  usage: { check: true, threshold: 100 }
+role:
+  silence: off
+  archive_agents: true

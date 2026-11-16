@@ -60,6 +60,23 @@ jobs:
       - name: Typecheck app
         run: npm run typecheck --workspace=@getpaseo/app
 
+      - name: Verify Composer prediction and harness contracts
+        working-directory: packages/server
+        run: |
+          node ../../node_modules/@typescript/native-preview/bin/tsgo.js -p tsconfig.server.typecheck.json --noEmit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node ../../node_modules/vitest/vitest.mjs run src/server/composer src/server/agent/providers/codex/context.test.ts src/server/agent/providers/pi/context.test.ts --bail=1
+
+      - name: Verify Composer draft identities and autocomplete
+        working-directory: packages/app
+        run: >-
+          node ../../node_modules/vitest/vitest.mjs run --project unit
+          src/composer/context/selection.test.ts
+          src/utils/file-mention-autocomplete.test.ts
+          src/utils/agent-command-autocomplete.test.ts
+          src/stores/draft-store
+          --bail=1
+
       - name: Check fork source style
         run: |
           npm run lint

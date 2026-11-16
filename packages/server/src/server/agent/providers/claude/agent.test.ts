@@ -615,6 +615,24 @@ describe("ClaudeAgentClient binary resolution", () => {
     }
   });
 
+  test("keeps plugin inventory unknown until Claude reports native initialization", async () => {
+    const queryReturn = vi.fn().mockResolvedValue(undefined);
+    const queryFactory = vi.fn(() => ({ close: vi.fn(), return: queryReturn }));
+    const client = new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({ provider: "claude", cwd: process.cwd() });
+    try {
+      await expect(session.listContext?.(["plugin"])).rejects.toThrow(
+        "confirmed after the first turn",
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
   test("loads user, project, and local Claude settings", async () => {
     const queryReturn = vi.fn();
     queryReturn.mockResolvedValue(undefined);

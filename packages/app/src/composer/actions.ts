@@ -373,7 +373,11 @@ export function openComposerAttachment(input: OpenComposerAttachmentInput): void
     input.setLightboxMetadata(input.attachment.metadata);
     return;
   }
-  if (input.attachment.kind === "file" || input.attachment.kind === "workspace_file") {
+  if (
+    input.attachment.kind === "file" ||
+    input.attachment.kind === "workspace_file" ||
+    input.attachment.kind === "harness_context"
+  ) {
     return;
   }
   if (isWorkspaceAttachment(input.attachment)) {
