@@ -1,4 +1,4 @@
-import type { Route } from "./settings.ts";
+import type { ControllerConfig, Route } from "./settings.ts";
 import { claudeSubscriptionAccess, isClaudeProvider } from "./providers.ts";
 
 export interface RouteProfile {
@@ -77,5 +77,44 @@ export function createProfileRoute(
     modeId: profile.modeId,
     ...(profile.featureValues ? { featureValues } : {}),
     ...(access === "openai-api" ? { bucket: "implementation" } : {}),
+  };
+}
+
+function withoutRoute(ids: string[], removed: string, fallback: string | undefined): string[] {
+  const rest = ids.filter((id) => id !== removed);
+  return rest.length || !fallback ? rest : [fallback];
+}
+
+/**
+ * Deletes a route and every reference to it. A role or category that would be left
+ * without a route falls back to the first remaining enabled route (UI falls back to
+ * the default routing). The last route cannot be deleted.
+ */
+export function removeRoute(config: ControllerConfig, routeId: string): ControllerConfig {
+  const routes = config.routes.filter((route) => route.id !== routeId);
+  if (!routes.length || routes.length === config.routes.length) return config;
+  const fallback = (routes.find((route) => route.enabled) ?? routes[0]).id;
+  const roleRoutes = config.roleRoutes && {
+    ...config.roleRoutes,
+    ...Object.fromEntries(
+      Object.entries(config.roleRoutes).map(([role, ids]) => [
+        role,
+        ids && withoutRoute(ids, routeId, role === "ui" ? undefined : fallback),
+      ]),
+    ),
+  };
+  if (roleRoutes && !roleRoutes.ui?.length) delete roleRoutes.ui;
+  return {
+    ...config,
+    routes,
+    ...(roleRoutes ? { roleRoutes: roleRoutes as ControllerConfig["roleRoutes"] } : {}),
+    ...(config.workCategories
+      ? {
+          workCategories: config.workCategories.map((category) => ({
+            ...category,
+            routeIds: withoutRoute(category.routeIds, routeId, fallback),
+          })),
+        }
+      : {}),
   };
 }

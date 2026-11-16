@@ -329,6 +329,14 @@ async function automaticTaskWorkspace(
     mainAgentId: mainWorkspace.mainAgentId,
   };
 }
+// The injected defaults must satisfy the same budget rule the save path enforces.
+function viewDecisionDefaults(config: Config) {
+  const defaults = defaultDecisionSettings();
+  return {
+    ...defaults,
+    monthlyBudgetMicroUsd: Math.min(defaults.monthlyBudgetMicroUsd, config.budgets.decisions),
+  };
+}
 export function settingsView(store: Store, config: Config, vault = new CredentialVault()) {
   const cycle = new Date().toISOString().slice(0, 7);
   const apiUsage = store.db
@@ -355,7 +363,7 @@ export function settingsView(store: Store, config: Config, vault = new Credentia
     );
   return {
     revision: hash(config),
-    config: { ...config, roleRoutes, decisions: config.decisions ?? defaultDecisionSettings() },
+    config: { ...config, roleRoutes, decisions: config.decisions ?? viewDecisionDefaults(config) },
     controllerRoot: appRoot,
     credentials: { normal: vault.status("normal"), decisions: vault.status("decisions") },
     usage: new Decisions(store).usage(),

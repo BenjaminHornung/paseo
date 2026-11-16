@@ -240,14 +240,14 @@ profiles. The optional `roleRoutes.ui` list applies to mutating implementation p
 whose bound package classification has `workKind: "ui"` or whose assessed execution facts
 have `uiChanged: true`, regardless of their
 `implement-simple`, `implement-normal` or `implement-complex` role. It does not change
-complexity, tier, capability, repository approvals, budgets, writer coordination,
+complexity, tier, capability, budgets, writer coordination,
 review or visual acceptance requirements. Repository and file boundaries remain mandatory.
 
 Company `claude` and private `claude-private` routes can be saved in the same ordered
 list. They retain separate subscription access and circuits; private routes require a
 distinct effective native configuration directory, including inherited launcher
 environment. Existing repository, tier, funding and capability gates still apply.
-Saving a preference does not add repository approvals.
+Routes have no per-repository restrictions; every route works in every workspace.
 
 Data privacy classification is no longer a controller feature. Preparation and settings
 have no public/personal/company/restricted selection or route allowlists. Account choices

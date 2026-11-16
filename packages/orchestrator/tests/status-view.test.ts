@@ -1,5 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { removeRoute } from "../paseo-plugin/shared/routes.ts";
+import type { ControllerConfig, Route } from "../paseo-plugin/shared/settings.ts";
+import { validateSettings } from "../paseo-plugin/shared/settings-validation.ts";
 import { decisionRows, decisionView } from "../paseo-plugin/shared/status-view.ts";
 
 test("latest decision shows the effective result and never substitutes an older result", () => {
@@ -125,4 +128,84 @@ test("a nameless refusal cannot hide the effective roles the controller selected
   );
   assert.equal(planner?.changed, false);
   assert.equal(rows.find((row) => row.label === "Bestehenden Auftrag fortsetzen")?.used, true);
+});
+
+const route = (id: string): Route => ({
+  id,
+  access: "codex-pro200",
+  provider: "codex",
+  model: "m",
+  revision: "r",
+  reasoning: "high",
+  tier: 2,
+  enabled: true,
+  maxConcurrent: 1,
+  capabilities: ["code"],
+});
+const settings = (): ControllerConfig => ({
+  schemaVersion: 1,
+  daemonUrl: "ws://127.0.0.1:1/ws",
+  gitExecutable: "git",
+  maxWorkflows: 2,
+  maxRework: 2,
+  apiEnabled: false,
+  liveDispatchApproved: false,
+  roleRoutes: {
+    planner: ["a", "b"],
+    advisor: ["a"],
+    "implement-simple": ["a"],
+    "implement-normal": ["a"],
+    "implement-complex": ["a"],
+    reviewer: ["a"],
+    ui: ["a"],
+  },
+  workCategories: [{ id: "db", label: "DB", description: "Datenbank", routeIds: ["a"] }],
+  routes: [route("a"), route("b")],
+  budgets: { decisions: 0, implementation: 0, "premium-api": 0, emergency: 0 },
+});
+
+test("deleting a referenced route removes references and falls back to the next route", () => {
+  const next = removeRoute(settings(), "a");
+  assert.deepEqual(
+    next.routes.map((r) => r.id),
+    ["b"],
+  );
+  assert.deepEqual(next.roleRoutes?.planner, ["b"]);
+  assert.deepEqual(next.roleRoutes?.reviewer, ["b"]);
+  assert.equal(next.roleRoutes?.ui, undefined, "UI falls back to default routing");
+  assert.deepEqual(next.workCategories?.[0].routeIds, ["b"]);
+  assert.deepEqual(validateSettings(next, { decisionsKeyPresent: false }), {});
+  assert.equal(removeRoute(next, "b"), next, "the last route cannot be deleted");
+});
+
+test("validation reports concrete messages per field and accepts a valid config", () => {
+  assert.deepEqual(validateSettings(settings(), { decisionsKeyPresent: false }), {});
+  const bad = settings();
+  bad.maxRework = 5;
+  bad.routes[0].maxConcurrent = Number.NaN;
+  bad.decisions = {
+    enabled: true,
+    model: "gpt-6-luna",
+    roles: [],
+    minConfidence: 0.8,
+    timeoutMs: 10000,
+    monthlyBudgetMicroUsd: 5000000,
+    maxCallMicroUsd: 1000,
+    fundsConfirmed: false,
+    validUntil: "",
+    projectId: "",
+  };
+  const errors = validateSettings(bad, { decisionsKeyPresent: false });
+  assert.match(errors.maxRework, /0 bis 2/);
+  assert.match(errors["route:a:maxConcurrent"], /Zahl/);
+  assert.match(errors["decisions.monthlyBudgetMicroUsd"], /höchstens 0 USD/);
+  assert.match(errors["decisions.enabled"], /Key/);
+  assert.match(errors["decisions.fundsConfirmed"], /Guthaben/);
+  assert.match(errors["decisions.validUntil"], /JJJJ-MM-TT/);
+});
+
+test("assigning a route to UI or a category never invalidates an otherwise valid config", () => {
+  const config = settings();
+  config.roleRoutes = { ...config.roleRoutes!, ui: ["b", "a"] };
+  assert.deepEqual(validateSettings(config, { decisionsKeyPresent: false }), {});
 });

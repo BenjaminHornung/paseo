@@ -6,7 +6,7 @@ Desktop: zentraler Einstellungsbereich. Kompakt: eine Spalte, keine horizontalen
 Formularüberläufe. Drei Bereiche: Rollen & Modelle, Decisions, Keys & Budgets.
 
 Gespeichert/ungespeichert/fehlender Key/Budget gesperrt sind echte Zustände.
-Ein allgemeines Speichern hält Entwürfe bei Fehlern und erkennt Revisionkonflikte.
+Änderungen werden automatisch (nach ca. 600 ms) gespeichert; ungültige Eingaben bleiben lokal und zeigen am Feld eine konkrete Meldung. Revisionskonflikte laden den Serverstand neu.
 Secret-Eingaben werden nach erfolgreichem Speichern geleert, nie vorausgefüllt.
 Farbe allein trägt keine Statusinformation. Text nimmt immer Host-Farbwerte.
 

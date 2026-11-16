@@ -1,6 +1,12 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { contractSchema, canonicalPath, type RuntimeRoute } from "../src/contracts.ts";
+import {
+  contractSchema,
+  canonicalPath,
+  routeAllowsPath,
+  routeSchema,
+  type RuntimeRoute,
+} from "../src/contracts.ts";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 
@@ -244,4 +250,37 @@ test("a wait timeout preserves idle foreground state without asserting backgroun
     "unknown",
     "unsettled state without an active turn stays uncertain",
   );
+});
+
+// Per-route repository restrictions were removed: every route works everywhere,
+// and legacy configs that still carry repositoryRoots stay valid and are ignored.
+test("routes allow every path; legacy repositoryRoots are ignored but still parse", () => {
+  const base = {
+    id: "private-route",
+    access: "claude-personal-pro",
+    provider: "claude-private",
+    model: "m",
+    revision: "r",
+    reasoning: "",
+    tier: 2,
+    enabled: true,
+    maxConcurrent: 1,
+    capabilities: ["code"],
+  };
+  const withoutRoots = routeSchema.parse(base);
+  const withRoots = routeSchema.parse({ ...base, repositoryRoots: ["relative-is-fine-now"] });
+  const elsewhere = path.join(fixture, "other-repository");
+  assert.equal(routeAllowsPath(withoutRoots, elsewhere), true);
+  assert.equal(routeAllowsPath(withRoots, elsewhere), true);
+  const api = routeSchema.parse({
+    ...base,
+    id: "api",
+    access: "openai-api",
+    provider: "pi",
+    model: "openai/x",
+    reasoning: "high",
+    bucket: "implementation",
+  });
+  assert.equal(routeAllowsPath(api, elsewhere), true, "enabled API routes need no roots");
+  assert.throws(() => routeSchema.parse({ ...base, bucket: "implementation" }));
 });

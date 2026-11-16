@@ -124,6 +124,27 @@ export function pathInScope(file: string, allowed: string): boolean {
   return target === root || target.startsWith(`${root}/`);
 }
 
+function accessIssues(r: {
+  access: string;
+  provider: string;
+  model: string;
+  bucket?: string;
+}): string[] {
+  const issues: string[] = [];
+  if (r.access === "codex-pro200" && (r.provider !== "codex" || r.bucket))
+    issues.push("subscription requires codex without API bucket");
+  if (
+    r.access === "opencode-go" &&
+    (r.provider !== "pi" || r.model !== "opencode-go/deepseek-v4.1-flash" || r.bucket)
+  )
+    issues.push("Go requires DeepSeek via Pi without an API bucket");
+  if (
+    r.access === "openai-api" &&
+    (r.provider !== "pi" || !r.model.startsWith("openai/") || !r.bucket || r.bucket === "decisions")
+  )
+    issues.push("API coding requires separate Pi OpenAI route and coding bucket");
+  return issues;
+}
 export const routeSchema = z
   .strictObject({
     id: identifier,
@@ -152,14 +173,8 @@ export const routeSchema = z
     dataScopes: z.array(z.string()).optional(),
     capabilities: z.array(z.enum(["code", "text"])).min(1),
     bucket: bucket.optional(),
-    repositoryRoots: z
-      .array(
-        z
-          .string()
-          .min(1)
-          .refine((root) => path.isAbsolute(root), "absolute repository root required"),
-      )
-      .optional(),
+    // Ignored legacy configuration; every route works in every repository.
+    repositoryRoots: z.array(z.string()).optional(),
     maxTaskMicroUsd: microUsd.min(10000).optional(),
   })
   .superRefine((r, ctx) => {
@@ -174,39 +189,17 @@ export const routeSchema = z
         code: "custom",
         message: "Claude provider requires its matching separate subscription route",
       });
-    if (isClaudeSubscription(r.access) && (r.bucket || (r.enabled && !r.repositoryRoots?.length)))
+    if (isClaudeSubscription(r.access) && r.bucket)
       ctx.addIssue({
         code: "custom",
-        message: "Claude requires explicit repository roots without an API bucket",
+        message: "Claude subscription routes cannot use an API bucket",
       });
-    if (r.access === "openai-api" && r.enabled && !r.repositoryRoots?.length)
-      ctx.addIssue({ code: "custom", message: "API routes require explicit repository roots" });
     if (!isClaudeProvider(r.provider) && ["", "off", "ultracode"].includes(r.reasoning))
       ctx.addIssue({
         code: "custom",
         message: "Reasoning option requires a matching Claude catalog model",
       });
-    if (r.access === "codex-pro200" && (r.provider !== "codex" || r.bucket))
-      ctx.addIssue({ code: "custom", message: "subscription requires codex without API bucket" });
-    if (
-      r.access === "opencode-go" &&
-      (r.provider !== "pi" || r.model !== "opencode-go/deepseek-v4.1-flash" || r.bucket)
-    )
-      ctx.addIssue({
-        code: "custom",
-        message: "Go requires DeepSeek via Pi without an API bucket",
-      });
-    if (
-      r.access === "openai-api" &&
-      (r.provider !== "pi" ||
-        !r.model.startsWith("openai/") ||
-        !r.bucket ||
-        r.bucket === "decisions")
-    )
-      ctx.addIssue({
-        code: "custom",
-        message: "API coding requires separate Pi OpenAI route and coding bucket",
-      });
+    for (const message of accessIssues(r)) ctx.addIssue({ code: "custom", message });
   });
 export type RuntimeRoute = z.infer<typeof routeSchema>;
 export function apiTaskReservation(
@@ -223,24 +216,9 @@ export function apiTaskReservation(
   if (amount > limit) throw Error("Task estimate exceeds API route limit");
   return amount;
 }
-export function routeAllowsPath(route: RuntimeRoute, cwd: string): boolean {
-  if (
-    !route.repositoryRoots?.length &&
-    !isClaudeSubscription(route.access) &&
-    route.access !== "openai-api"
-  )
-    return true;
-  try {
-    const target = canonicalPath(cwd);
-    return !!route.repositoryRoots?.some((root) => {
-      const relative = path.relative(canonicalPath(root), target);
-      return (
-        relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
-      );
-    });
-  } catch {
-    return false;
-  }
+// Repository restrictions were removed: every route works in every workspace.
+export function routeAllowsPath(_route: RuntimeRoute, _cwd: string): boolean {
+  return true;
 }
 export const decisionSettingsSchema = z.strictObject({
   enabled: z.boolean(),

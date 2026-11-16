@@ -14,6 +14,7 @@ import {
   type ControllerConfig,
   type RoutingCategory,
 } from "../shared/settings";
+import type { SettingsErrors } from "../shared/settings-validation";
 import { createWorkCategory, type WorkCategory } from "../shared/work-categories";
 import { routeLabel } from "../shared/routes";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
@@ -36,6 +37,19 @@ const routeActionsStyle: ViewStyle = {
   gap: 4,
   alignItems: "center",
 };
+
+function categoryFormProblem(
+  label: string,
+  description: string,
+  routeId: string,
+): string | undefined {
+  if (!label.trim()) return "Bitte einen Kategorienamen eingeben.";
+  if (label.length > 120) return "Der Kategoriename darf höchstens 120 Zeichen lang sein.";
+  if (!description.trim()) return "Bitte eine Beschreibung eingeben.";
+  if (description.length > 1000) return "Die Beschreibung darf höchstens 1000 Zeichen lang sein.";
+  if (!routeId) return "Bitte eine primäre Route auswählen.";
+  return undefined;
+}
 
 function NewWorkCategory({ config, onChange }: { config: ControllerConfig; onChange: Change }) {
   const [label, setLabel] = useState("");
@@ -60,6 +74,8 @@ function NewWorkCategory({ config, onChange }: { config: ControllerConfig; onCha
     setRouteId("");
     setGeneration((value) => value + 1);
   }, [label, description, routeId, config.workCategories, onChange]);
+  const started = !!(label || description || routeId);
+  const problem = started ? categoryFormProblem(label, description, routeId) : undefined;
   return (
     <SettingsSection
       title="Arbeitskategorie anlegen"
@@ -86,14 +102,12 @@ function NewWorkCategory({ config, onChange }: { config: ControllerConfig; onCha
         />
         <SettingsAction
           label="Neue Arbeitskategorie"
-          actionLabel="Kategorie anlegen"
-          disabled={
-            !label.trim() ||
-            !description.trim() ||
-            !routeId ||
-            label.length > 120 ||
-            description.length > 1000
+          hint={
+            started ? "Wird sofort gespeichert." : "Name, Beschreibung und primäre Route ausfüllen."
           }
+          error={problem}
+          actionLabel="Kategorie anlegen"
+          disabled={!started || !!problem}
           onPress={create}
         />
       </SettingsCard>
@@ -171,7 +185,11 @@ function PreferenceRow({
   return (
     <SettingsRow
       label={`${index + 1}. ${index === 0 ? "Primär" : "Fallback"}`}
-      hint={routeLabel(config.routes.find((route) => route.id === id)!)}
+      hint={
+        config.routes.find((route) => route.id === id)
+          ? routeLabel(config.routes.find((route) => route.id === id)!)
+          : `Nicht mehr vorhandene Route: ${id}`
+      }
     >
       <View style={routeActionsStyle}>
         <CompactAction label="Nach oben" theme={theme} disabled={index === 0} onPress={up} />
@@ -244,11 +262,13 @@ export function RoutingPreferences({
   onChange,
   generation,
   theme,
+  errors,
 }: {
   config: ControllerConfig;
   onChange: Change;
   generation: number;
   theme: PluginSurfaceProps["theme"];
+  errors: SettingsErrors;
 }) {
   const [selection, setSelection] = useState("planner");
   const category = config.workCategories?.find((item) => `category:${item.id}` === selection);
@@ -313,6 +333,7 @@ export function RoutingPreferences({
           <SettingsSelect
             label="Rolle oder Arbeitsart"
             value={category ? selection : role}
+            error={category ? errors[`category:${category.id}`] : errors[`role:${role}`]}
             options={options}
             onValueChange={setSelection}
           />
@@ -327,13 +348,13 @@ export function RoutingPreferences({
           {role === "ui" && !category && (
             <SettingsRow
               label={preference.length ? "Eigene UI-Reihenfolge" : "Standardrouting aktiv"}
-              hint="Ohne Zuordnung gilt die Implementierungsklasse. Eine ausdrücklich gewählte eigene Kategorie hat Vorrang. Qualitätsstufe, Repository-Grenzen und Budget gelten weiterhin."
+              hint="Ohne Zuordnung gilt die Implementierungsklasse. Eine ausdrücklich gewählte eigene Kategorie hat Vorrang. Qualitätsstufe und Budget gelten weiterhin."
             />
           )}
           <PreferenceOrder
             config={config}
             preference={preference}
-            required={!!category}
+            required={!!category || role !== "ui"}
             setPreference={setPreference}
             theme={theme}
           />
