@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { removeRoute } from "../paseo-plugin/shared/routes.ts";
 import type { ControllerConfig, Route } from "../paseo-plugin/shared/settings.ts";
+import { shouldAdoptServerView } from "../paseo-plugin/shared/settings-adoption.ts";
 import { validateSettings } from "../paseo-plugin/shared/settings-validation.ts";
 import { decisionRows, decisionView } from "../paseo-plugin/shared/status-view.ts";
 
@@ -208,4 +209,70 @@ test("assigning a route to UI or a category never invalidates an otherwise valid
   const config = settings();
   config.roleRoutes = { ...config.roleRoutes!, ui: ["b", "a"] };
   assert.deepEqual(validateSettings(config, { decisionsKeyPresent: false }), {});
+});
+
+test("removeRoute fallback prefers an active non-API route and only then an API route", () => {
+  const api = { ...route("api"), access: "openai-api" as const, provider: "pi" as const };
+  const go = { ...route("go"), access: "opencode-go" as const, provider: "pi" as const };
+  const config = settings();
+  config.routes = [route("a"), api, go, route("sub")];
+  config.roleRoutes = { ...config.roleRoutes!, planner: ["a"] };
+  assert.deepEqual(removeRoute(config, "a").roleRoutes?.planner, ["sub"]);
+  const onlyApi = settings();
+  onlyApi.routes = [route("a"), api];
+  onlyApi.roleRoutes = { ...onlyApi.roleRoutes!, planner: ["a"] };
+  assert.deepEqual(removeRoute(onlyApi, "a").roleRoutes?.planner, ["api"]);
+});
+
+test("validator matches the server for validUntil, projectId, integers and access models", () => {
+  const config = settings();
+  config.decisions = {
+    enabled: true,
+    model: "gpt-6-luna",
+    roles: [],
+    minConfidence: 0.8,
+    timeoutMs: 10000,
+    monthlyBudgetMicroUsd: 0,
+    maxCallMicroUsd: 1000,
+    fundsConfirmed: true,
+    validUntil: "2030-01-01T00:00:00.000Z",
+    projectId: "proj_abc-1",
+  };
+  assert.equal(
+    validateSettings(config, { decisionsKeyPresent: true })["decisions.validUntil"],
+    undefined,
+  );
+  assert.deepEqual(validateSettings(config, { decisionsKeyPresent: true }), {});
+  config.decisions.projectId = "abc";
+  config.decisions.maxCallMicroUsd = 1000.5;
+  config.budgets.emergency = 1.5;
+  config.routes[0].maxTaskMicroUsd = 10000.5;
+  config.routes[1] = { ...route("b"), access: "opencode-go", provider: "pi", model: "x" };
+  config.routes[1].reasoning = "high";
+  const errors = validateSettings(config, { decisionsKeyPresent: true });
+  assert.match(errors["decisions.projectId"], /proj_/);
+  assert.match(errors["decisions.maxCallMicroUsd"], /ganzzahlig/);
+  assert.match(errors["budget:emergency"], /ganzzahlig/);
+  assert.match(errors["route:a:maxTaskMicroUsd"], /ganzzahlig/);
+  assert.match(errors["route:b:model"], /deepseek-v4.1-flash/);
+  config.routes[1] = { ...route("b"), access: "openai-api", provider: "pi", model: "gpt" };
+  assert.match(
+    validateSettings(config, { decisionsKeyPresent: true })["route:b:model"],
+    /openai\//,
+  );
+});
+
+test("a reloaded server view is adopted only when nothing local would be lost", () => {
+  const view = (revision: string, normal = "n") => ({
+    revision,
+    credentials: { normal: { revision: normal }, decisions: { revision: "d" } },
+  });
+  const base = { current: view("1"), server: view("2"), dirty: false, saving: false };
+  assert.equal(shouldAdoptServerView(base), true);
+  assert.equal(shouldAdoptServerView({ ...base, server: view("1") }), false);
+  assert.equal(shouldAdoptServerView({ ...base, server: view("1", "x") }), true);
+  assert.equal(shouldAdoptServerView({ ...base, dirty: true }), false);
+  assert.equal(shouldAdoptServerView({ ...base, saving: true }), false);
+  assert.equal(shouldAdoptServerView({ ...base, current: undefined }), true);
+  assert.equal(shouldAdoptServerView({ ...base, server: undefined }), false);
 });

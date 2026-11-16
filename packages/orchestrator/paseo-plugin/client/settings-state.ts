@@ -16,6 +16,14 @@ import {
   validateSettings,
   type SettingsErrors,
 } from "../shared/settings-validation";
+import { shouldAdoptServerView } from "../shared/settings-adoption";
+
+/**
+ * Draft whose save did not complete because the screen was closed (flush or queued edit
+ * after an in-flight save failed). The next open re-applies it on top of the fresh server view.
+ */
+let orphanDraft: ControllerConfig | undefined;
+const settingsKey = ["orchestrator-settings"];
 
 export type Tab = "routes" | "decisions" | "keys";
 const autosaveDelayMs = 600;
@@ -45,11 +53,61 @@ const messages: [string, string][] = [
     "unknown route",
     "Eine Rollen- oder Kategoriezuordnung verweist auf eine nicht vorhandene Route.",
   ],
+  [
+    "CONTROLLER_IDENTITY_READ_ONLY",
+    "Daemon-URL und Git-Programm des Controllers lassen sich hier nicht ändern.",
+  ],
+  ["duplicate route IDs", "Zwei Routen haben dieselbe ID."],
+  [
+    "API routes require explicit API dispatch approval",
+    "API-Routen brauchen den aktivierten API-Coding-Worker (Tab Rollen & Modelle).",
+  ],
+  [
+    "API dispatch requires confirmed credits",
+    "Der API-Coding-Worker braucht bestätigtes Guthaben mit gültigem Ablaufdatum, das alle Controller-Budgets deckt.",
+  ],
+  [
+    "Decisions requires an explicit funded validity period",
+    "Decisions braucht die Guthaben-Bestätigung und ein gültiges Ablaufdatum.",
+  ],
+  [
+    "Claude provider requires",
+    "Claude-Provider und Zugangsart passen nicht zusammen (Firma/Privat getrennt halten).",
+  ],
+  [
+    "Reasoning option requires",
+    "Diese Reasoning-Stufe gibt es nur für Claude-Modelle. Bitte eine konkrete Stufe (low bis max) wählen.",
+  ],
+  [
+    "subscription requires codex",
+    "Codex-Abo-Routen brauchen den Provider Codex und keinen API-Bucket.",
+  ],
+  [
+    "Go requires DeepSeek",
+    "OpenCode-Go-Routen brauchen Pi mit dem Modell opencode-go/deepseek-v4.1-flash und keinen API-Bucket.",
+  ],
+  [
+    "API coding requires",
+    "API-Routen brauchen Pi mit einem openai/-Modell und einen Coding-Bucket (nicht „decisions“).",
+  ],
+  [
+    "roleRoutes references an unknown route",
+    "Eine Rollenzuordnung verweist auf eine nicht vorhandene Route.",
+  ],
 ];
+const invalidConfigMessage =
+  "Die Einstellungen wurden vom Server als ungültig abgelehnt. Bitte die markierten Felder prüfen oder neu laden.";
 export function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
   const known = messages.find(([needle]) => message.includes(needle));
   if (known) return known[1];
+  if (
+    (error instanceof Error && error.name === "ZodError") ||
+    /invalid_type|too_small|too_big|invalid_format|invalid_value|unrecognized_key|"custom"/.test(
+      message,
+    )
+  )
+    return invalidConfigMessage;
   let code = "UNKNOWN";
   if (typeof error === "object" && error !== null && "safeCode" in error)
     code = String(error.safeCode);
@@ -95,8 +153,12 @@ export function useSettingsState(initialTab: Tab) {
   const savingRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const flushRef = useRef<() => void>(() => undefined);
+  const scheduleSaveRef = useRef<() => void>(() => undefined);
   const saveRef = useRef(save);
   saveRef.current = save;
+  const mountedRef = useRef(true);
+  const queryClientRef = useRef(queryClient);
+  queryClientRef.current = queryClient;
   const normalRef = useRef<SettingsInputHandle>(null),
     decisionsRef = useRef<SettingsInputHandle>(null);
   const [normalReady, setNormalReady] = useState(false),
@@ -148,12 +210,34 @@ export function useSettingsState(initialTab: Tab) {
     [queryClient],
   );
   useEffect(() => {
-    if (settings.data && !view) accept(settings.data, true);
+    if (!settings.data) return;
+    if (!view) {
+      accept(settings.data, true);
+      // Re-apply an edit that could not be saved when the screen was last closed.
+      const orphan = orphanDraft;
+      orphanDraft = undefined;
+      if (orphan) {
+        draftRef.current = orphan;
+        setDraft(orphan);
+        dirtyRef.current = true;
+        setDirty(true);
+        scheduleSaveRef.current();
+      }
+    } else if (
+      shouldAdoptServerView({
+        current: viewRef.current,
+        server: settings.data as unknown as SettingsView,
+        dirty: dirtyRef.current,
+        saving: savingRef.current,
+      })
+    )
+      accept(settings.data, true);
   }, [settings.data, view, accept]);
   const scheduleSave = useCallback(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => flushRef.current(), autosaveDelayMs);
   }, []);
+  scheduleSaveRef.current = scheduleSave;
   const reloadAfterConflict = (conflict: unknown) => {
     // Another window saved first: take the server state and tell the user.
     load({})
@@ -167,10 +251,25 @@ export function useSettingsState(initialTab: Tab) {
   const saveMutation = useMutation({
     mutationFn: async (config: ControllerConfig) => {
       savingRef.current = true;
-      return save({
-        revision: viewRef.current!.revision,
-        config: config as unknown as Record<string, unknown>,
-      });
+      let value: unknown;
+      try {
+        value = await save({
+          revision: viewRef.current!.revision,
+          config: config as unknown as Record<string, unknown>,
+        });
+      } catch (failure) {
+        // Closed while saving and the save failed: keep every edit for the next open.
+        if (!mountedRef.current && dirtyRef.current && draftRef.current)
+          orphanDraft = draftRef.current;
+        throw failure;
+      }
+      if (!mountedRef.current) {
+        // Closed while saving: record the result, then flush any edit queued meanwhile.
+        queryClientRef.current.setQueryData(settingsKey, value);
+        viewRef.current = value as unknown as SettingsView;
+        if (dirtyRef.current && draftRef.current !== config) await persistDetached();
+      }
+      return value as Awaited<ReturnType<typeof save>>;
     },
     onSuccess: (value, sent) => {
       const next = value as unknown as SettingsView;
@@ -181,7 +280,7 @@ export function useSettingsState(initialTab: Tab) {
       if (draftRef.current === sent) {
         dirtyRef.current = false;
         setDirty(false);
-      } else scheduleSave();
+      } else if (mountedRef.current) scheduleSave();
     },
     onError: (e) => {
       if (e instanceof Error && e.message.includes("SETTINGS_CONFLICT")) reloadAfterConflict(e);
@@ -258,26 +357,45 @@ export function useSettingsState(initialTab: Tab) {
     if (Object.keys(problems).length) return;
     saveMutation.mutate(config);
   };
-  useEffect(
-    () => () => {
-      // Closing the screen inside the debounce window must not lose the last edit.
-      if (timerRef.current) clearTimeout(timerRef.current);
-      const config = draftRef.current,
-        current = viewRef.current;
-      if (!config || !current || !dirtyRef.current || savingRef.current) return;
-      const problems = validateSettings(config, {
-        decisionsKeyPresent: current.credentials.decisions.present,
+  /** Saves the latest draft without UI: used when the screen closes. No parallel saves. */
+  const persistDetached = async () => {
+    const config = draftRef.current,
+      current = viewRef.current;
+    if (!config || !current || !dirtyRef.current) return;
+    const problems = validateSettings(config, {
+      decisionsKeyPresent: current.credentials.decisions.present,
+    });
+    if (Object.keys(problems).length) {
+      orphanDraft = config;
+      return;
+    }
+    try {
+      const value = await saveRef.current({
+        revision: current.revision,
+        config: config as unknown as Record<string, unknown>,
       });
-      if (Object.keys(problems).length) return;
-      saveRef
-        .current({
-          revision: current.revision,
-          config: config as unknown as Record<string, unknown>,
-        })
-        .catch(() => undefined);
-    },
-    [],
-  );
+      // The next open must see the flushed state, not the pre-flush cache entry.
+      queryClientRef.current.setQueryData(settingsKey, value);
+      viewRef.current = value as unknown as SettingsView;
+      dirtyRef.current = false;
+    } catch {
+      orphanDraft = config;
+      queryClientRef.current.invalidateQueries({ queryKey: settingsKey });
+    }
+  };
+  const persistRef = useRef(persistDetached);
+  persistRef.current = persistDetached;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      // Closing inside the debounce window must not lose the last edit. A save already in
+      // flight flushes the queued edit itself when it completes (see mutationFn).
+      if (timerRef.current) clearTimeout(timerRef.current);
+      if (savingRef.current) return;
+      void persistRef.current();
+    };
+  }, []);
   const errors = draft
     ? validateSettings(draft, { decisionsKeyPresent: !!view?.credentials.decisions.present })
     : {};

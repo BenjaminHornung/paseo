@@ -5,10 +5,7 @@ import { workCategorySchema, type WorkCategory } from "./work-categories.ts";
 /** Field key to a concrete German message. An empty record means the config can be saved. */
 export type SettingsErrors = Record<string, string>;
 
-const isDate = (value: string) =>
-  /^\d{4}-\d{2}-\d{2}$/.test(value) &&
-  Number.isFinite(Date.parse(`${value}T00:00:00Z`)) &&
-  new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
+// Same rule as the server (contracts.ts): anything Date.parse accepts, ISO timestamps included.
 const validDay = (value: string) => Number.isFinite(Date.parse(value));
 const claudeProviders = new Set(["claude", "claude-private"]);
 
@@ -25,6 +22,28 @@ function rangeError(
   else if (integer && !Number.isInteger(value))
     errors[key] = `Nur ganze Zahlen erlaubt. ${message}`;
   else if (value < min || value > max) errors[key] = message;
+}
+
+const MICRO_MESSAGE = "Bitte einen ganzzahligen Betrag in Mikro-USD (ab 0) eingeben.";
+const microUsdOk = (value: number) =>
+  Number.isInteger(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
+
+/** Mirrors accessIssues in src/contracts.ts. */
+function accessErrors(errors: SettingsErrors, r: Route, key: string) {
+  if (r.access === "codex-pro200" && (r.provider !== "codex" || r.bucket))
+    errors[key] = "Codex-Abo-Routen brauchen den Provider Codex und keinen API-Bucket.";
+  if (
+    r.access === "opencode-go" &&
+    (r.provider !== "pi" || r.model !== "opencode-go/deepseek-v4.1-flash" || r.bucket)
+  )
+    errors[key] =
+      "OpenCode-Go-Routen brauchen Pi mit dem Modell opencode-go/deepseek-v4.1-flash und keinen API-Bucket.";
+  if (
+    r.access === "openai-api" &&
+    (r.provider !== "pi" || !r.model.startsWith("openai/") || !r.bucket || r.bucket === "decisions")
+  )
+    errors[key] =
+      "API-Routen brauchen Pi mit einem openai/-Modell und einen Coding-Bucket (nicht „decisions“).";
 }
 
 function routeErrors(errors: SettingsErrors, r: Route, config: ControllerConfig) {
@@ -50,6 +69,9 @@ function routeErrors(errors: SettingsErrors, r: Route, config: ControllerConfig)
     errors[at("capabilities")] = "Mindestens Programmieren oder Textaufgaben muss aktiv sein.";
   if (r.maxTaskMicroUsd !== undefined && !(r.maxTaskMicroUsd >= 10000))
     errors[at("maxTaskMicroUsd")] = "Das Tasklimit muss mindestens 0,01 USD betragen.";
+  else if (r.maxTaskMicroUsd !== undefined && !microUsdOk(r.maxTaskMicroUsd))
+    errors[at("maxTaskMicroUsd")] = MICRO_MESSAGE;
+  accessErrors(errors, r, at("model"));
   if (r.enabled && r.access === "openai-api" && !config.apiEnabled)
     errors[at("enabled")] =
       "API-Routen brauchen den aktivierten API-Coding-Worker (Tab Rollen & Modelle).";
@@ -91,14 +113,23 @@ function decisionErrors(errors: SettingsErrors, config: ControllerConfig, keyPre
     cap,
     `Das Decisions-Monatsbudget darf höchstens ${cap / 1000000} USD betragen (maximal 5 USD und nicht mehr als das Controller-Budget „decisions“).`,
   );
+  if (d.validUntil.length > 40)
+    errors["decisions.validUntil"] = "Das Datum darf höchstens 40 Zeichen lang sein.";
+  if (d.projectId.length > 120 || !/^(?:proj_[a-zA-Z0-9_-]+)?$/.test(d.projectId))
+    errors["decisions.projectId"] =
+      "Die Projekt-ID muss leer sein oder mit „proj_“ beginnen (nur Buchstaben, Ziffern, _ und -, höchstens 120 Zeichen).";
+  for (const key of ["monthlyBudgetMicroUsd", "maxCallMicroUsd"] as const)
+    if (Number.isFinite(d[key]) && !Number.isInteger(d[key]))
+      errors[`decisions.${key}`] = MICRO_MESSAGE;
   if (!d.enabled) return;
   if (!keyPresent)
     errors["decisions.enabled"] = "Zuerst unter Keys & Budgets den Decisions-Key speichern.";
   if (!d.fundsConfirmed)
     errors["decisions.fundsConfirmed"] =
       "Decisions braucht die Bestätigung, dass Guthaben vorhanden ist.";
-  if (!isDate(d.validUntil))
-    errors["decisions.validUntil"] = "Bitte ein gültiges Datum im Format JJJJ-MM-TT eingeben.";
+  if (!validDay(d.validUntil))
+    errors["decisions.validUntil"] =
+      "Bitte ein gültiges Datum eingeben (z. B. JJJJ-MM-TT oder ein ISO-Zeitstempel).";
 }
 
 function fundingErrors(errors: SettingsErrors, config: ControllerConfig) {
@@ -108,6 +139,7 @@ function fundingErrors(errors: SettingsErrors, config: ControllerConfig) {
       errors["funding.cycle"] = "Bitte den Monat als JJJJ-MM eingeben.";
     if (!Number.isFinite(f.availableMicroUsd) || f.availableMicroUsd < 0)
       errors["funding.available"] = "Bitte einen Betrag ab 0 USD eingeben.";
+    else if (!microUsdOk(f.availableMicroUsd)) errors["funding.available"] = MICRO_MESSAGE;
   }
   if (!config.apiEnabled) return;
   if (!f?.confirmed)
@@ -175,6 +207,7 @@ export function validateSettings(
   for (const [key, value] of Object.entries(config.budgets))
     if (!Number.isFinite(value) || value < 0)
       errors[`budget:${key}`] = "Bitte einen Betrag ab 0 USD eingeben.";
+    else if (!microUsdOk(value)) errors[`budget:${key}`] = MICRO_MESSAGE;
   for (const route of config.routes) routeErrors(errors, route, config);
   decisionErrors(errors, config, options.decisionsKeyPresent);
   fundingErrors(errors, config);
