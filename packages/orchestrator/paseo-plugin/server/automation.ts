@@ -66,8 +66,17 @@ export function orchestrationInstructions(agentId: string): string {
   return `${bootstrap}\nDeine Controller-Main-ID ist ${agentId}.\nBehalte das Hauptchat-cwd. Verwende orchestrator_worktree mit dem tatsächlichen Repository innerhalb dieses Workspace und orchestrator_register_task mit dem abgeleiteten Vertrag direkt als JSON-Objekt.\nDie normale Shell-/Auto-review-/MCP-Freigabe gilt weiterhin; keine Ablehnung umgehen. Nicht die allgemeinen workflow add/dispatch-Befehle verwenden. Bei fehlenden Controller-Werkzeugen keine Ersatzwriter starten, sondern den konkreten fehlenden Zugang melden.`;
 }
 
+// Restart waits in seconds: 5, 15, 60, 300, 300. The fifth consecutive failure is final.
+export function runnerRestartDelay(failures: number): number {
+  const delays = [5_000, 15_000, 60_000, 300_000, 300_000];
+  return delays[Math.min(Math.max(failures, 0), delays.length - 1)] ?? 300_000;
+}
+const maxRunnerFailures = 5;
+
 export class AutomationRuntime {
   private child?: ChildProcess;
+  private failures = 0;
+  private restartTimer?: ReturnType<typeof setTimeout>;
   private phase: WorkflowStatus["runner"] = "stopped";
   private paseo?: PaseoApi;
   private fallback?: PaseoClient;
@@ -262,21 +271,47 @@ export class AutomationRuntime {
     );
     this.child = child;
     let anotherRunner = false;
+    let exitNoted = false;
+    // An error event and the close event can both report one failed exit; count it once.
+    const noteExit = () => {
+      if (exitNoted || this.phase !== "failed") return;
+      exitNoted = true;
+      this.failures += 1;
+      this.scheduleRestart();
+    };
     let output = "";
     child.stdout?.on("data", (chunk) => {
       output = (output + chunk.toString()).slice(-4096);
       if (output.includes('"watching": true')) this.phase = "running";
+      // A completed tick proves the runner works, so the failure streak starts over.
+      if (output.includes('"tickCompletedAt"')) this.failures = 0;
       if (output.includes("WATCH_ALREADY_RUNNING")) anotherRunner = true;
     });
     child.stderr?.resume();
     child.stdin?.on("error", () => {});
     child.on("error", () => {
       this.phase = "failed";
+      noteExit();
     });
     child.on("close", (code) => {
       if (this.child === child) this.child = undefined;
       this.phase = anotherRunner ? "waiting" : code === 0 ? "stopped" : "failed";
+      noteExit();
     });
+  }
+  // After the delay the phase becomes "stopped", so the next pulse starts the runner again.
+  // At the limit the phase stays "failed" and is visible in the status.
+  private scheduleRestart() {
+    if (this.disposed || this.failures >= maxRunnerFailures) return;
+    clearTimeout(this.restartTimer);
+    this.restartTimer = setTimeout(
+      () => {
+        this.restartTimer = undefined;
+        // Only a still-failed runner is restarted; anything else set meanwhile is kept.
+        if (!this.disposed && this.phase === "failed") this.phase = "stopped";
+      },
+      runnerRestartDelay(this.failures - 1),
+    );
   }
   async pulse() {
     if (this.busy || this.disposed) return;
@@ -431,6 +466,7 @@ export class AutomationRuntime {
   dispose() {
     this.disposed = true;
     clearInterval(this.timer);
+    clearTimeout(this.restartTimer);
     // EOF requests a cooperative stop after the current tick. Never kill agent
     // sessions or check-process trees on a plugin reload.
     this.child?.stdin?.end();

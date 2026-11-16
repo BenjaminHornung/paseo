@@ -48,6 +48,7 @@ import {
   humanNativeIntakeAliases,
 } from "./intake-identity.ts";
 import type { OperatorWakeBinding } from "./verification-recovery.ts";
+import { advisoryHint, advisoryOn } from "./advisory.ts";
 
 const taskApprovalLinkSchema = z.strictObject({
   agentId: z.string().min(1),
@@ -721,6 +722,33 @@ export function currentIntake(
   )
     throw Error("INTAKE_IMPLEMENTATION_NOT_AUTHORIZED");
   return assessment;
+}
+// Advisory fallback for currentIntake: the newest intake that already carries a decision.
+// Returns undefined when no such row exists, so the caller rethrows its original error.
+export function latestDecidedIntake(
+  store: Store,
+  agentId: string,
+  forMutation: boolean,
+): Assessment<IntakeResult> | undefined {
+  const checkpoint = store.db
+    .prepare("SELECT work_intake_id FROM main_checkpoints WHERE agent_id=?")
+    .get(agentId) as { work_intake_id: string | null } | undefined;
+  const row =
+    forMutation && checkpoint?.work_intake_id
+      ? (store.db
+          .prepare("SELECT id FROM assessments WHERE id=? AND owner_id=?")
+          .get(checkpoint.work_intake_id, agentId) as { id: string } | undefined)
+      : (store.db
+          .prepare(
+            "SELECT id FROM assessments WHERE owner_id=? AND kind='intake' AND result_json IS NOT NULL ORDER BY created_ms DESC,rowid DESC LIMIT 1",
+          )
+          .get(agentId) as { id: string } | undefined);
+  if (!row) return undefined;
+  try {
+    return effectiveIntakeAssessment(store, readIntakeAssessment(store, row.id));
+  } catch {
+    return readIntakeAssessment(store, row.id);
+  }
 }
 
 interface MainInputRow {
@@ -1465,7 +1493,11 @@ function interpretedInputMessageHashes(
     if (alias.nativeMessageId) messages.add(hash(alias.nativeMessageId));
   return messages;
 }
-function assertIntakeSettled(
+function assertIntakeSettled(store: Store, agentId: string, superseding: number[] = []): void {
+  if (advisoryOn()) return advisoryHint(store, "INTAKE_PENDING_SKIPPED", { main: agentId });
+  assertIntakeSettledStrict(store, agentId, superseding);
+}
+function assertIntakeSettledStrict(
   store: Store,
   agentId: string,
   supersedingSequences: number[] = [],

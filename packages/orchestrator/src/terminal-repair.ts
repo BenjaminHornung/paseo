@@ -33,4 +33,5 @@ export interface TerminalRepairGrant extends Omit<TerminalRepairRequest, "checks
   approvedCheckRevision: string;
   approvedScopeRevision: string;
   reason: string;
+  advisory?: true;
 }

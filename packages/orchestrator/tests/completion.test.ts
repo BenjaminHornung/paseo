@@ -33,6 +33,58 @@ test("completion distinguishes foreground settlement, known work and missing pro
   assert.equal((await capability.assess(snapshot)).state, "NEEDS_CONFIRMATION");
 });
 
+test("advisory completion turns unknown coverage into a VERIFY hint and keeps live work hard", async () => {
+  const evidence = (complete: boolean) => ({
+    foregroundEvidence: async () => ({ complete, traceHash: "trace", toolCount: 1 }),
+  });
+  const snapshot = {
+    id: "agent",
+    status: "idle",
+    turnComplete: true,
+    foregroundActive: false,
+    backgroundActive: false,
+  } as Snapshot;
+  const off = new CurrentPaseoCompletion(evidence(true));
+  assert.equal(
+    (await off.assess({ ...snapshot, backgroundActive: null })).state,
+    "NEEDS_CONFIRMATION",
+  );
+  assert.equal(
+    (await new CurrentPaseoCompletion(evidence(false)).assess(snapshot)).state,
+    "NEEDS_CONFIRMATION",
+  );
+  const on = new CurrentPaseoCompletion(evidence(true), () => true);
+  assert.deepEqual(await on.assess({ ...snapshot, backgroundActive: null }), {
+    state: "VERIFY",
+    reason: "advisory-no-process-coverage",
+  });
+  assert.deepEqual(await new CurrentPaseoCompletion(evidence(false), () => true).assess(snapshot), {
+    state: "VERIFY",
+    reason: "advisory-unobserved-tools",
+  });
+  assert.equal(
+    (
+      await new CurrentPaseoCompletion(evidence(false), () => true).assess({
+        ...snapshot,
+        backgroundActive: null,
+      })
+    ).reason,
+    "advisory-unobserved-tools-no-process-coverage",
+  );
+  assert.deepEqual(await on.assess(snapshot), {
+    state: "VERIFY",
+    reason: "turn-and-known-work-complete",
+  });
+  assert.equal(
+    (await on.assess({ ...snapshot, status: "running", backgroundActive: true })).state,
+    "WAITING_PROCESSES",
+  );
+  assert.equal(
+    (await on.assess({ ...snapshot, foregroundActive: true })).state,
+    "NEEDS_CONFIRMATION",
+  );
+});
+
 test("optional documented SDK capability never substitutes failed reads with an empty inventory", async () => {
   assert.deepEqual(await new OptionalBackgroundCapability({}).inventory(), {
     supported: false,

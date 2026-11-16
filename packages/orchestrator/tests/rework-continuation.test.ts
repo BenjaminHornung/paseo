@@ -1807,7 +1807,7 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
           changedSession = false;
         let observedSession = nativeSessionId;
         let reviewerSession = "native-rejected-reviewer";
-        let reviewerStatus: "idle" | "error" = "idle";
+        let reviewerStatus: "idle" | "error" | "running" = "idle";
         let reviewerErrorDuringForeground = false;
         let duringReviewerForeground = false;
         const sdkAgent = (id = "writer-old") => ({
@@ -2047,6 +2047,128 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
           additionalAllowedPath: "tests/manifest.ts",
           checks: contract.checks,
         };
+        // Subscription Claude routes join the advisory repair path only; kept out of the
+        // parent callback so its complexity stays under the lint limit.
+        const advisoryClaudeAndApiRoutes = async () => {
+          let claudeSent = 0;
+          // Subscription Claude routes join the advisory repair path only; the strict path stays Codex-only.
+          const claudeWriterRoute = {
+            id: "claude-writer",
+            access: "claude-company-pro" as const,
+            provider: "claude" as const,
+            model: "claude-writer-model",
+            revision: "fixture",
+            reasoning: "high" as const,
+            tier: 2 as const,
+            enabled: true,
+            maxConcurrent: 2,
+            dataScopes: ["public" as const],
+            capabilities: ["code" as const],
+            repositoryRoots: [root],
+          };
+          const claudeConfig = configSchema.parse({
+            ...repairConfig,
+            routes: [writerRoute, claudeWriterRoute, reviewerRoute],
+            roleRoutes: { ...roleRoutes, "implement-normal": ["claude-writer"] },
+          });
+          const claudeRoute = claudeConfig.routes.find((route) => route.id === "claude-writer")!;
+          const claudeCopy = async (name: string) => {
+            const copy = await advisoryCopy(name);
+            copy.db
+              .prepare("UPDATE tasks SET config_json=?,config_hash=? WHERE key=?")
+              .run(JSON.stringify(claudeConfig), hash(claudeConfig), taskKey);
+            copy.db
+              .prepare("UPDATE attempts SET route_json=? WHERE id=?")
+              .run(JSON.stringify(claudeRoute), oldId);
+            return copy;
+          };
+          const claudeOff = await claudeCopy("claude-off");
+          try {
+            assert.throws(
+              () =>
+                claudeOff.approveTerminalRepair(
+                  taskKey,
+                  {
+                    ...request,
+                    configHash: hash(claudeConfig),
+                    scopeRevision: claudeOff.scopeRevision(repairContract),
+                    checkRevision: claudeOff.checkRevision(repairContract),
+                  },
+                  "Claude operator grant",
+                ),
+              /TERMINAL_REPAIR_NOT_ELIGIBLE/,
+            );
+            assert.equal(claudeOff.terminalRepairGrant(taskKey), undefined);
+          } finally {
+            claudeOff.close();
+          }
+          const claudeRefresh = async (id: string): Promise<Snapshot | null> => {
+            const current = await sdkProvider.refresh(id);
+            return current ? { ...current, provider: "claude", model: claudeRoute.model } : null;
+          };
+          const claudeProvider: Provider = {
+            ...repairProvider,
+            refresh: claudeRefresh,
+            run: async (id) => {
+              assert.equal(id, "writer-old");
+              claudeSent++;
+              return {
+                ...(await claudeRefresh(id))!,
+                status: "running",
+                foregroundActive: true,
+                turnComplete: false,
+              };
+            },
+          };
+          const claudeOn = await claudeCopy("claude-on");
+          try {
+            const claudeEngine = new Engine(
+              claudeOn,
+              claudeConfig,
+              claudeProvider,
+              undefined,
+              undefined,
+              () => dispatchAllowed,
+              () => true,
+            );
+            const sentBeforeClaude = claudeSent;
+            assert.deepEqual(
+              await claudeEngine.continueExisting(taskKey, advisoryRepair),
+              advisoryPending,
+            );
+            assert.equal(claudeOn.terminalRepairGrant(taskKey)?.advisory, true);
+            assert.equal(countEvents(claudeOn, "ADVISORY_HINT:%"), 1);
+            assert.equal(claudeSent, sentBeforeClaude, "the successor waits for the normal tick");
+            await claudeEngine.tick([taskKey]);
+            assert.equal(claudeSent, sentBeforeClaude + 1, "the successor is delivered by tick");
+            assert.equal(claudeOn.latest(taskKey)?.id, `${taskKey}/4`);
+            assert.equal(claudeOn.latest(taskKey)?.agent_id, "writer-old");
+          } finally {
+            claudeOn.close();
+          }
+          const openaiOn = await advisoryCopy("openai-api");
+          try {
+            openaiOn.db.prepare("UPDATE attempts SET route_json=? WHERE id=?").run(
+              JSON.stringify({
+                ...writerRoute,
+                id: "openai-writer",
+                access: "openai-api",
+                provider: "pi",
+                model: "openai/gpt-6-luna",
+              }),
+              oldId,
+            );
+            await assert.rejects(
+              () => advisoryEngine(openaiOn).continueExisting(taskKey, advisoryRepair),
+              /TERMINAL_REPAIR_NOT_ELIGIBLE/,
+            );
+            assert.equal(openaiOn.terminalRepairGrant(taskKey), undefined);
+            assert.equal(countEvents(openaiOn, "ADVISORY_HINT:%"), 0);
+          } finally {
+            openaiOn.close();
+          }
+        };
+        await advisoryClaudeAndApiRoutes();
         const noExtensionFile = path.join(root, "terminal-repair-existing-scope.sqlite");
         const rejectedFile = path.join(root, "terminal-repair-rejected-review.sqlite");
         await state.backupTo(rejectedFile);
@@ -2164,6 +2286,106 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
             );
           } finally {
             rejectedAdvisory.close();
+          }
+          // Spec 37 (rework part): the reviewer is not settled. The strict guard refuses;
+          // advisory mode records REVIEWER_NOT_SETTLED and binds only the recorded review row.
+          const notSettledRepair = { diffHash: originalDiff.diffHash, findings: [reviewerFinding] };
+          const reviewerCopy = async (name: string) => {
+            const file = path.join(root, `terminal-repair-reviewer-${name}.sqlite`);
+            await rejected.backupTo(file);
+            return new Store(file);
+          };
+          reviewerStatus = "running";
+          try {
+            const offCopy = await reviewerCopy("off");
+            try {
+              offCopy.approveTerminalRepair(
+                taskKey,
+                rejectedRequest,
+                "Operator grant with reviewer running",
+              );
+              const offEngine = new Engine(
+                offCopy,
+                repairConfig,
+                { ...repairProvider, loadedAgent: (id) => sdkProvider.loadedAgent(id) },
+                undefined,
+                undefined,
+                () => dispatchAllowed,
+                () => false,
+              );
+              await assert.rejects(
+                () => offEngine.continueExisting(taskKey, notSettledRepair),
+                /TERMINAL_REPAIR_REVIEWER_NOT_SETTLED/,
+              );
+              assert.equal(offCopy.latest(taskKey)!.id, oldId);
+            } finally {
+              offCopy.close();
+            }
+            const onCopy = await reviewerCopy("on");
+            try {
+              const onEngine = new Engine(
+                onCopy,
+                repairConfig,
+                { ...repairProvider, loadedAgent: (id) => sdkProvider.loadedAgent(id) },
+                undefined,
+                undefined,
+                () => dispatchAllowed,
+                () => true,
+              );
+              assert.deepEqual(
+                await onEngine.continueExisting(taskKey, notSettledRepair),
+                advisoryPending,
+              );
+              assert.equal(
+                (
+                  onCopy.db
+                    .prepare(
+                      "SELECT COUNT(*) AS n FROM events WHERE kind LIKE 'ADVISORY_HINT:%REVIEWER_NOT_SETTLED%'",
+                    )
+                    .get() as { n: number }
+                ).n,
+                1,
+              );
+            } finally {
+              onCopy.close();
+            }
+            const changedCopy = await reviewerCopy("changed");
+            try {
+              let reviewerRefreshed = false;
+              const changedEngine = new Engine(
+                changedCopy,
+                repairConfig,
+                {
+                  ...repairProvider,
+                  loadedAgent: (id) => sdkProvider.loadedAgent(id),
+                  refresh: async (id) => {
+                    if (id === "rejected-reviewer") reviewerRefreshed = true;
+                    // The reviewer guard has captured the row; the worker refresh that follows
+                    // it is the window in which the recorded review row changes once.
+                    if (id === "writer-old" && reviewerRefreshed) {
+                      reviewerRefreshed = false;
+                      changedCopy.db
+                        .prepare("UPDATE review_runs SET result_json=? WHERE attempt_id=?")
+                        .run(JSON.stringify({ ...rejectedResult, unresolvedIssues: 2 }), oldId);
+                    }
+                    return sdkProvider.refresh(id);
+                  },
+                },
+                undefined,
+                undefined,
+                () => dispatchAllowed,
+                () => true,
+              );
+              await assert.rejects(
+                () => changedEngine.continueExisting(taskKey, notSettledRepair),
+                /TERMINAL_REPAIR_REVIEW_CHANGED/,
+              );
+              assert.equal(changedCopy.latest(taskKey)!.id, oldId);
+            } finally {
+              changedCopy.close();
+            }
+          } finally {
+            reviewerStatus = "idle";
           }
           rejected.approveTerminalRepair(
             taskKey,
@@ -2303,6 +2525,32 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
             oldFinalization,
           );
           sent = 0;
+          // Spec 43 (L3): an error that escapes tickOnce is recorded once per hour bucket as a
+          // classed TICK_FAILED row. A raw message becomes UNCLASSIFIED and never reaches the log.
+          // (A throwing provider.refresh is handled inside reconcile and records NEEDS_CONFIRMATION.)
+          const throwingGate = (message: string) => () => {
+            throw Error(message);
+          };
+          for (const [name, gate, expected] of [
+            ["class", throwingGate("DISPATCH_GATE_DOWN"), "TICK_FAILED:DISPATCH_GATE_DOWN:%"],
+            ["raw", throwingGate("lowercase raw message with /path"), "TICK_FAILED:UNCLASSIFIED:%"],
+          ] as const)
+            await assertTickFailureRecorded(
+              rejected,
+              path.join(root, `terminal-repair-tick-${name}.sqlite`),
+              (copy) =>
+                new Engine(
+                  copy,
+                  repairConfig,
+                  repairProvider,
+                  undefined,
+                  undefined,
+                  gate,
+                  () => false,
+                ),
+              expected,
+            );
+          assert.equal(sent, 0, "a failed dispatch gate must not send work");
         } finally {
           rejected.close();
         }
@@ -2754,3 +3002,30 @@ test("unresolved reviewer findings rework before visual acceptance and checkpoin
     },
   );
 });
+
+// Spec 43 (L3): a failing tick resolves and records one classed TICK_FAILED row per hour
+// bucket on a store copy. A raw message is recorded as UNCLASSIFIED and never in the log.
+async function assertTickFailureRecorded(
+  source: Store,
+  file: string,
+  engineFor: (copy: Store) => Engine,
+  expectedKind: string,
+): Promise<void> {
+  await source.backupTo(file);
+  const copy = new Store(file);
+  try {
+    await engineFor(copy).tick();
+    const count = (sql: string, ...values: string[]) =>
+      (copy.db.prepare(sql).get(...values) as { n: number }).n;
+    assert.equal(count("SELECT COUNT(*) AS n FROM events WHERE kind LIKE ?", expectedKind), 1);
+    assert.equal(
+      count(
+        "SELECT COUNT(*) AS n FROM events WHERE kind LIKE '%path%' OR attempt_id LIKE '%path%'",
+      ),
+      0,
+      "a raw failure message must not reach the event log",
+    );
+  } finally {
+    copy.close();
+  }
+}

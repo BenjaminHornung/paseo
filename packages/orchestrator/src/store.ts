@@ -150,6 +150,18 @@ function lockStoreInitialization(filename: string): () => void {
   }
 }
 
+// Advisory mode admits the subscription routes but never the API routes: openai-api and
+// opencode-go spend money, so the spend boundary stays with the operator.
+const advisoryRepairAccess = new Set<string>([
+  "codex-pro200",
+  "claude-company-pro",
+  "claude-personal-pro",
+]);
+function repairRouteEligible(route: RuntimeRoute, advisory: boolean): boolean {
+  if (route.provider === "codex" && route.access === "codex-pro200") return true;
+  return advisory && advisoryRepairAccess.has(route.access);
+}
+
 export class Store {
   readonly db: DatabaseSync;
   constructor(filename: string) {
@@ -646,7 +658,7 @@ export class Store {
       .get(id) as { kind: string } | undefined;
     return row ? JSON.parse(row.kind.slice("TERMINAL_REPAIR_SUCCESSOR:".length)) : undefined;
   }
-  private terminalRepairPredecessor(key: string, request: TerminalRepairRequest) {
+  private terminalRepairPredecessor(key: string, request: TerminalRepairRequest, advisory = false) {
     const task = this.task(key),
       attempt = this.latest(key);
     if (
@@ -671,8 +683,7 @@ export class Store {
       task.rework <= config.maxRework ||
       !contract.mutation ||
       !contract.role.startsWith("implement-") ||
-      route.provider !== "codex" ||
-      route.access !== "codex-pro200"
+      !repairRouteEligible(route, advisory)
     )
       throw Error("TERMINAL_REPAIR_NOT_ELIGIBLE");
     const { checks, review, rejectedReview } = this.terminalRepairCheckEvidence(attempt, request);
@@ -826,6 +837,7 @@ export class Store {
     input: unknown,
     reason: string,
     authorize: () => void = () => {},
+    advisory = false,
   ): string {
     const request = terminalRepairRequestSchema.parse(input);
     return this.transaction(() => {
@@ -839,7 +851,7 @@ export class Store {
         if (!consumed || previous.predecessorAttemptId === request.predecessorAttemptId)
           throw Error("TERMINAL_REPAIR_ALREADY_GRANTED");
       }
-      const predecessor = this.terminalRepairPredecessor(key, request),
+      const predecessor = this.terminalRepairPredecessor(key, request, advisory),
         c = predecessor.contract;
       const approvedPaths = this.scopePaths(c);
       if (request.additionalAllowedPath !== undefined) {
@@ -875,6 +887,7 @@ export class Store {
           paths: approvedPaths.sort(),
         }),
         reason,
+        ...(advisory ? { advisory: true as const } : {}),
       };
       this.event(`OPERATOR_TERMINAL_REPAIR:${JSON.stringify(grant)}`, predecessor.attempt.id);
       return hash(grant);
@@ -889,7 +902,11 @@ export class Store {
       authorize();
       if (hash(this.terminalRepairGrant(grant.taskKey)) !== hash(grant))
         throw Error("TERMINAL_REPAIR_GRANT_CHANGED");
-      const predecessor = this.terminalRepairPredecessor(grant.taskKey, grant);
+      const predecessor = this.terminalRepairPredecessor(
+        grant.taskKey,
+        grant,
+        grant.advisory === true,
+      );
       if (hash(predecessor) !== grant.predecessorHash)
         throw Error("TERMINAL_REPAIR_BINDING_CHANGED");
       if (

@@ -36,7 +36,7 @@ process.env.PASEO_ORCHESTRATOR_NODE = process.execPath;
 await build({
   stdin: {
     contents:
-      'export { prepareOrchestratorSession } from "./paseo-plugin/server/preparation.ts"; export { AutomationRuntime } from "./paseo-plugin/server/automation.ts";',
+      'export { prepareOrchestratorSession } from "./paseo-plugin/server/preparation.ts"; export { AutomationRuntime, runnerRestartDelay } from "./paseo-plugin/server/automation.ts";',
     resolveDir: fixtureRoot,
     sourcefile: "preparation-test-entry.ts",
   },
@@ -67,15 +67,18 @@ await build({
     },
   ],
 });
-const { prepareOrchestratorSession: prepare, AutomationRuntime } = (await import(
-  pathToFileURL(path.join(fixture, "preparation.mjs")).href
-)) as {
+const {
+  prepareOrchestratorSession: prepare,
+  AutomationRuntime,
+  runnerRestartDelay,
+} = (await import(pathToFileURL(path.join(fixture, "preparation.mjs")).href)) as {
   prepareOrchestratorSession: (
     request: PreparationInput,
     paseo: unknown,
     automation: unknown,
   ) => Promise<{ agentId: string; workspaceId: string; automation: string }>;
   AutomationRuntime: new () => TestRuntime;
+  runnerRestartDelay: (failures: number) => number;
 };
 after(() => {
   if (previousRoot === undefined) delete process.env.PASEO_ORCHESTRATOR_ROOT;
@@ -332,4 +335,12 @@ test("existing-main preparation waits for idle and rejects unverified native wor
     assert.ok(!main.events.includes("label-write"), scenario.name);
     assert.equal(main.sent.length, 0, scenario.name);
   }
+});
+
+test("runner restart waits run 5, 15, 60, 300 seconds and cap at 300 seconds", () => {
+  assert.equal(runnerRestartDelay(0), 5_000);
+  assert.equal(runnerRestartDelay(1), 15_000);
+  assert.equal(runnerRestartDelay(3), 300_000);
+  assert.equal(runnerRestartDelay(4), 300_000);
+  assert.equal(runnerRestartDelay(5), 300_000);
 });
