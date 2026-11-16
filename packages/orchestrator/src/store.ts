@@ -23,6 +23,7 @@ import {
   type TerminalRepairRequest,
 } from "./terminal-repair.ts";
 import { verificationRecheck } from "./verification-recheck.ts";
+import { advisoryHint, advisoryOn, recordOnce } from "./advisory.ts";
 
 export type AttemptState =
   | "INTENT"
@@ -1038,6 +1039,7 @@ export class Store {
     return undefined;
   }
   verificationBlocked(c: Contract, attemptId: string): boolean {
+    // Hard: a live writer that is not settled for verification owns the worktree.
     if (
       this.ownership(c).some(
         (peer) =>
@@ -1045,17 +1047,38 @@ export class Store {
           (peer.state !== "HELD" || !["VERIFY", "COMPLETE"].includes(peer.status)),
       )
     )
-      return true;
+      return this.verificationWaiting(attemptId);
     if (!c.workspace) return false;
-    // Released leases do not remove failed changes from the shared checkout.
+    const blockers = this.cohortVerificationBlockers(c);
+    if (blockers.length === 0) return false;
+    if (advisoryOn() && blockers.every((peer) => peer.status === "FAILED" && !peer.leased)) {
+      advisoryHint(
+        this,
+        "FAILED_PEER_IN_CHECKOUT",
+        { task: `${c.workflowId}/${c.taskId}/${c.role}`, peers: blockers.length },
+        attemptId,
+      );
+      return false;
+    }
+    return this.verificationWaiting(attemptId);
+  }
+  private verificationWaiting(attemptId: string): true {
+    recordOnce(this, `VERIFICATION_WAITING_PEERS:${attemptId}`, attemptId);
+    return true;
+  }
+  // Released leases do not remove failed changes from the shared checkout.
+  private cohortVerificationBlockers(c: Contract): { status: string; leased: boolean }[] {
+    const leased = new Set(this.ownership(c).map((row) => row.attempt_id));
     const rows = this.db
-      .prepare(`SELECT t.contract_json,a.status FROM tasks t JOIN attempts a ON a.task_key=t.key
+      .prepare(`SELECT t.contract_json,a.id,a.status FROM tasks t JOIN attempts a ON a.task_key=t.key
       WHERE a.sequence=(SELECT MAX(sequence) FROM attempts WHERE task_key=t.key)`)
-      .all() as { contract_json: string; status: string }[];
-    return rows.some((row) => {
-      const peer: Contract = JSON.parse(row.contract_json);
-      return peer.mutation && sameCohort(c, peer) && !["VERIFY", "COMPLETE"].includes(row.status);
-    });
+      .all() as { contract_json: string; id: string; status: string }[];
+    return rows
+      .filter((row) => {
+        const peer: Contract = JSON.parse(row.contract_json);
+        return peer.mutation && sameCohort(c, peer) && !["VERIFY", "COMPLETE"].includes(row.status);
+      })
+      .map((row) => ({ status: row.status, leased: leased.has(row.id) }));
   }
   peerAllowedPaths(c: Contract): string[] {
     if (!c.workspace) return [];

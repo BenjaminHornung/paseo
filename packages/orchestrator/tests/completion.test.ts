@@ -1,4 +1,9 @@
 import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { softCode } from "../src/advisory.ts";
 import assert from "node:assert/strict";
 import { CurrentPaseoCompletion, OptionalBackgroundCapability } from "../src/completion.ts";
 import { parseAgentJson, reviewResultSchema, contractSchema } from "../src/contracts.ts";
@@ -1017,4 +1022,26 @@ test("native Claude Bash and structured notifications settle only under their ma
     "NEEDS_CONFIRMATION",
     "a new unsafe shell during native readback cannot escape the foreground scan",
   );
+});
+
+test("softCode reports a SQLite busy lock as a static code and never a raw message", (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "paseo-softcode-"));
+  const file = path.join(dir, "lock.sqlite");
+  const holder = new DatabaseSync(file);
+  const contender = new DatabaseSync(file);
+  t.after(() => {
+    holder.close();
+    contender.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  holder.exec("CREATE TABLE IF NOT EXISTS t(x); BEGIN EXCLUSIVE");
+  let busy: unknown;
+  try {
+    contender.exec("BEGIN EXCLUSIVE");
+  } catch (error) {
+    busy = error;
+  }
+  assert.ok(busy, "a second exclusive transaction must fail while the first holds the lock");
+  assert.equal(softCode(busy), "SQLITE_BUSY");
+  assert.equal(softCode(new Error(`/private/${file} raw detail`)), "UNCLASSIFIED");
 });

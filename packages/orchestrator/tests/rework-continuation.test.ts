@@ -7,6 +7,7 @@ import { rm } from "node:fs/promises";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { Engine } from "../src/engine.ts";
+import { useAdvisoryReader } from "../src/advisory.ts";
 import {
   canonicalPath,
   configSchema,
@@ -3029,3 +3030,199 @@ async function assertTickFailureRecorded(
     copy.close();
   }
 }
+
+test("a FAILED cohort peer waits by default and becomes a hint only when advisory mode is on", (t) => {
+  // The hook is installed from this sync body. The async cases only flip the flag.
+  let advisoryOnValue = false;
+  const restoreAdvisory = useAdvisoryReader(() => advisoryOnValue);
+  t.after(restoreAdvisory);
+  return (async () => {
+    const root = mkdtempSync(path.join(process.cwd(), ".peer-cohort-test-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const worktree = canonicalPath(root);
+    const workspace = { id: "peer-workspace", directory: worktree, mainAgentId: "main" };
+    const contractFor = (taskId: string, allowedPath: string) =>
+      contractSchema.parse({
+        workflowId: "peer-wf",
+        taskId,
+        repository: worktree,
+        worktree,
+        baseCommit: "0123456789abcdef0123456789abcdef01234567",
+        dataScope: "public",
+        role: "implement-normal",
+        prompt: "Change one file",
+        acceptance: ["Changed"],
+        allowedPaths: [allowedPath],
+        requiredCapabilities: ["code"],
+        minTier: 2,
+        mutation: true,
+        highRisk: false,
+        uiChanged: false,
+        ownerApproved: false,
+        estimatedMicroUsd: 0,
+        workspace,
+        checks: { build: [process.execPath, "--version"], test: [process.execPath, "--version"] },
+      });
+    const writerRoute = {
+      id: "writer",
+      access: "codex-pro200" as const,
+      provider: "codex" as const,
+      model: "writer-model",
+      revision: "fixture",
+      reasoning: "high" as const,
+      tier: 2 as const,
+      enabled: true,
+      maxConcurrent: 2,
+      dataScopes: ["public" as const],
+      capabilities: ["code" as const],
+    };
+    const cfg = configSchema.parse({
+      schemaVersion: 1,
+      orchestrationVersion: 2,
+      daemonUrl: "ws://127.0.0.1:3010/ws",
+      gitExecutable: gitExecutable(),
+      maxWorkflows: 2,
+      maxRework: 1,
+      apiEnabled: false,
+      liveDispatchApproved: true,
+      budgets: { decisions: 0, implementation: 0, "premium-api": 0, emergency: 0 },
+      routes: [writerRoute],
+      roleRoutes: {
+        planner: ["writer"],
+        advisor: ["writer"],
+        "implement-simple": ["writer"],
+        "implement-normal": ["writer"],
+        "implement-complex": ["writer"],
+        reviewer: ["writer"],
+      },
+    });
+    const mainKey = "peer-wf/main-task/implement-normal";
+    const peerKey = "peer-wf/peer-task/implement-normal";
+    // The stub is never reached on the paths under test: review() stops at the peer gate,
+    // or returns at the refresh that has no snapshot.
+    const provider = { refresh: async () => null } as unknown as Provider;
+    const seed = (label: string, peerStatus: string, peerLease: "HELD" | "RELEASED") => {
+      const state = new Store(path.join(root, `peer-${label}.sqlite`));
+      state.db
+        .prepare("INSERT INTO workflows VALUES(?,?,?,?)")
+        .run("peer-wf", worktree, "", hash(cfg));
+      const seeds = [
+        { key: mainKey, contract: contractFor("main-task", "main.txt"), seq: 1, status: "VERIFY" },
+        {
+          key: peerKey,
+          contract: contractFor("peer-task", "peer.txt"),
+          seq: 1,
+          status: peerStatus,
+        },
+      ];
+      for (const row of seeds) {
+        state.db
+          .prepare(
+            "INSERT INTO tasks(key,workflow_id,contract_json,contract_hash,config_hash,config_json,state,rework) VALUES(?,?,?,?,?,?,?,0)",
+          )
+          .run(
+            row.key,
+            "peer-wf",
+            JSON.stringify(row.contract),
+            hash(row.contract),
+            hash(cfg),
+            JSON.stringify(cfg),
+            "READY",
+          );
+        state.db
+          .prepare(
+            "INSERT INTO attempts(id,task_key,sequence,status,route_json,agent_id,fence,session_key,created_ms,result_hash,run_accepted) VALUES(?,?,?,?,?,?,?,?,?,?,0)",
+          )
+          .run(
+            `${row.key}/${row.seq}`,
+            row.key,
+            row.seq,
+            row.status,
+            JSON.stringify(writerRoute),
+            `agent-${row.seq}-${row.key}`,
+            row.seq,
+            `session-${row.key}`,
+            Date.now(),
+            null,
+          );
+      }
+      state.db
+        .prepare(
+          "INSERT INTO leases(worktree,attempt_id,fence,state,heartbeat_ms) VALUES(?,?,1,'HELD',?)",
+        )
+        .run(`lease:${mainKey}`, `${mainKey}/1`, Date.now());
+      state.db
+        .prepare(
+          "INSERT INTO leases(worktree,attempt_id,fence,state,heartbeat_ms) VALUES(?,?,1,?,?)",
+        )
+        .run(`lease:${peerKey}`, `${peerKey}/1`, peerLease, Date.now());
+      return state;
+    };
+    // Blocked reviews stay WAITING_PEERS on every call. A proceeding review moves the attempt on
+    // (the null snapshot is observed as NEEDS_CONFIRMATION), so it is called once.
+    const reviewWith = async (state: Store, on: boolean, calls: 1 | 2) => {
+      advisoryOnValue = on;
+      const engine = new Engine(state, cfg, provider, undefined, undefined, undefined, () => on);
+      const results = [];
+      for (let n = 0; n < calls; n += 1) results.push(await engine.review(`${mainKey}/1`, true));
+      return results;
+    };
+    const events = (state: Store, like: string) =>
+      (
+        state.db.prepare("SELECT kind FROM events WHERE kind LIKE ?").all(like) as {
+          kind: string;
+        }[]
+      ).map((row) => row.kind);
+
+    // (a) switch off: the failed peer keeps the checkout blocked, visibly and once.
+    const off = seed("off", "FAILED", "RELEASED");
+    try {
+      const results = await reviewWith(off, false, 2);
+      assert.deepEqual(
+        results.map((r) => r.state),
+        ["WAITING_PEERS", "WAITING_PEERS"],
+      );
+      assert.equal(
+        (off.db.prepare("SELECT count(*) AS n FROM turn_checks").get() as { n: number }).n,
+        0,
+      );
+      assert.deepEqual(events(off, "VERIFICATION_WAITING_PEERS%"), [
+        `VERIFICATION_WAITING_PEERS:${mainKey}/1`,
+      ]);
+      assert.deepEqual(events(off, "ADVISORY_HINT:%"), []);
+    } finally {
+      off.close();
+    }
+
+    // (b) switch on: the failed peer becomes one advisory hint and verification proceeds.
+    const on = seed("on", "FAILED", "RELEASED");
+    try {
+      const results = await reviewWith(on, true, 1);
+      assert.notEqual(results[0]!.state, "WAITING_PEERS");
+      assert.deepEqual(events(on, "VERIFICATION_WAITING_PEERS%"), []);
+      assert.deepEqual(events(on, "ADVISORY_HINT:%"), [
+        `ADVISORY_HINT:${JSON.stringify({
+          code: "FAILED_PEER_IN_CHECKOUT",
+          task: "peer-wf/main-task/implement-normal",
+          peers: 1,
+        })}`,
+      ]);
+    } finally {
+      on.close();
+    }
+
+    // (c) switch on: a peer that is still running under a held lease keeps blocking.
+    const running = seed("running", "RUNNING", "HELD");
+    try {
+      const results = await reviewWith(running, true, 2);
+      assert.deepEqual(
+        results.map((r) => r.state),
+        ["WAITING_PEERS", "WAITING_PEERS"],
+      );
+      assert.deepEqual(events(running, "ADVISORY_HINT:%"), []);
+      assert.equal(events(running, "VERIFICATION_WAITING_PEERS%").length, 1);
+    } finally {
+      running.close();
+    }
+  })();
+});

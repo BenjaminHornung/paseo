@@ -31,8 +31,21 @@ export function useAdvisoryReader(next: AdvisoryReader): () => void {
 }
 
 const codePattern = /^[A-Z][A-Z0-9_]{1,70}$/;
+const sqliteCodePattern = /^SQLITE_[A-Z_]+$/;
+// node:sqlite reports the primary result code in `errcode` and carries the code name only in `errstr`.
+const sqliteBusy = 5;
+const sqliteLocked = 6;
 // Only static UPPER_SNAKE codes leave the process. Raw messages may carry paths or prompts.
 export function softCode(error: unknown): string {
+  if (typeof error === "object" && error !== null) {
+    const { code, errcode, errstr } = error as Record<string, unknown>;
+    if (typeof code === "string" && sqliteCodePattern.test(code)) return code;
+    if (typeof errcode === "number") {
+      if ((errcode & 0xff) === sqliteBusy) return "SQLITE_BUSY";
+      if ((errcode & 0xff) === sqliteLocked) return "SQLITE_LOCKED";
+    }
+    if (errstr === "database is locked") return "SQLITE_BUSY";
+  }
   const message = error instanceof Error ? error.message : "";
   return codePattern.test(message) ? message : "UNCLASSIFIED";
 }
